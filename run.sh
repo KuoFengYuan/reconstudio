@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Launch the COLMAP Panel from a conda env.
+# Launch Recon Studio (https://github.com/KuoFengYuan/reconstudio) from a conda env.
 #
 # Per-machine config: copy local.env.example -> local.env and edit it (gitignored).
 # Anything in local.env (or the environment) overrides the defaults below.
 #
-# One-time setup:
-#   conda create -n colmap_panel python=3.10 -y
-#   conda run -n colmap_panel pip install -r requirements.txt
+# One-time setup (env name configurable via CONDA_ENV; default rec):
+#   conda create -n rec python=3.10 -y
+#   conda run -n rec pip install -r requirements.txt
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 
 : "${HOST:=127.0.0.1}"
 : "${PORT:=8077}"
-: "${CONDA_ENV:=colmap_panel}"
+: "${CONDA_ENV:=rec}"
 # conda base: explicit CONDA_ROOT, else `conda info --base`, else common locations.
 if [[ -z "${CONDA_ROOT:-}" ]]; then
   CONDA_ROOT="$(conda info --base 2>/dev/null || true)"
@@ -42,10 +42,11 @@ export COLMAP_PANEL_DATA; mkdir -p "$COLMAP_PANEL_DATA"
 : "${COLMAP_PANEL_BROWSE_ROOT:=$( [[ -d /mnt/ssd1 ]] && echo /mnt/ssd1 || echo / )}"
 export COLMAP_PANEL_BROWSE_ROOT
 
+export CONDA_ROOT   # so backends.py / doctor can locate sibling trainer envs (gs2m, …)
 ENVPY="$CONDA_ROOT/envs/$CONDA_ENV/bin/python"
 [[ -x "$ENVPY" ]] || { echo "conda env '$CONDA_ENV' python not found at: $ENVPY" >&2
                        echo "set CONDA_ROOT/CONDA_ENV in local.env" >&2; exit 1; }
 export PYTHONNOUSERSITE=1   # keep ~/.local out of the env
 
-echo "COLMAP Panel -> http://$HOST:$PORT  (env=$CONDA_ENV, ffmpeg=$FFMPEG_BIN, colmap=$COLMAP_BIN)"
+echo "Recon Studio -> http://$HOST:$PORT  (env=$CONDA_ENV, ffmpeg=$FFMPEG_BIN, colmap=$COLMAP_BIN)"
 exec "$ENVPY" -m uvicorn app:app --host "$HOST" --port "$PORT"

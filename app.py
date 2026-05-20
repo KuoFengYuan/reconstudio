@@ -1,4 +1,4 @@
-"""COLMAP Panel - web front-end over the pure-Python pipeline modules.
+"""Recon Studio - web front-end over the pure-Python pipeline modules.
 
 Single-machine local tool. Binds to 127.0.0.1 by default. Run:
     ./run.sh            # or: uvicorn app:app --host 127.0.0.1 --port 8077
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -21,14 +22,16 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from jobs import COLMAP_STAGES, Job, manager, new_id
+from jobs import COLMAP_STAGES, MAX_JOBS, Job, manager, new_id
+from pipeline import (TRAIN_DEFAULTS, available_backends, build_cli,
+                      doctor as run_doctor, get_backend, list_gpus)
 
 BASE = Path(__file__).parent
 # Restrict the directory browser to this root (the data disk by default).
 BROWSE_ROOT = Path(os.environ.get("COLMAP_PANEL_BROWSE_ROOT", "/")).resolve()
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")   # PATH by default; override via env
 
-app = FastAPI(title="COLMAP Panel")
+app = FastAPI(title="Recon Studio")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
 (BASE / "static").mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
@@ -62,7 +65,9 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
 async def index(request: Request):
     return _page(request, "index.html", colmap_defaults=COLMAP_DEFAULTS,
                  frames_defaults=FRAMES_DEFAULTS, enums=ENUMS,
-                 stages=COLMAP_STAGES, browse_root=str(BROWSE_ROOT))
+                 stages=COLMAP_STAGES, browse_root=str(BROWSE_ROOT),
+                 train_defaults=TRAIN_DEFAULTS, backends=available_backends(),
+                 gpus=list_gpus())
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +161,7 @@ def _build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "vocab_tree_url": (form.get("VOCAB_TREE_URL") or "").strip() or None,
         "force": bool(form.get("FORCE")),
         "layout": form.get("layout") or "auto",
-        "resize": form.get("resize") or "keep",
+        "resize": form.get("resize") or "fullhd",
     }
     for key, allowed in (("camera_mode", ENUMS["CAMERA_MODE"]),
                          ("matcher", ENUMS["MATCHER"]), ("mapper", ENUMS["MAPPER"]),
@@ -201,11 +206,109 @@ async def create_colmap(request: Request):
 
 
 # --------------------------------------------------------------------------- #
+# Train job  (pipeline.run_train; runs in the backend's own conda env)
+# --------------------------------------------------------------------------- #
+@app.post("/ui/train", response_class=HTMLResponse)
+async def create_train(request: Request):
+    form = dict(await request.form())
+    source = (form.get("source") or "").strip().rstrip("/")
+    out = (form.get("model_path") or "").strip().rstrip("/")
+    backend = (form.get("backend") or "gs2m").strip()
+    gpu = (form.get("gpu") or "").strip()
+    extra = (form.get("extra") or "").strip()
+    try:
+        if not Path(source).is_dir():
+            raise ValueError(f"source 不是資料夾: {source!r}")
+        if not out:
+            raise ValueError("輸出模型目錄 (model_path) 必填")
+        spec = get_backend(backend)
+        if not spec:
+            raise ValueError(f"未知 backend: {backend}")
+        cli = build_cli(spec.get("params", []), form)   # tunable params -> CLI
+        params = {"backend": backend, "source": source, "model_path": out,
+                  "gpu": gpu, "args": cli, "extra": extra,
+                  "force": bool(form.get("force"))}
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    # Total iterations for the progress bar: --iterations in the assembled CLI/extra.
+    total = 30000
+    m = re.search(r"--iterations\s+(\d+)", f"{cli} {extra}")
+    if m:
+        total = int(m.group(1))
+
+    job = Job(id=new_id(), kind="train",
+              title=f"{backend} · {Path(source).name} → {Path(out).name}",
+              subtitle=f"{source}  →  {out}  (gpu={gpu or 'default'})",
+              params=params, mirror=str(Path(out) / "train.log"),
+              meta={"source": source, "model_path": out, "backend": backend,
+                    "total": total, "can_mesh": bool(spec.get("mesh_args"))})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+# --------------------------------------------------------------------------- #
+# Mesh job  (pipeline.run_mesh; backend-specific, e.g. GS-2M's render.py)
+# --------------------------------------------------------------------------- #
+@app.post("/ui/mesh", response_class=HTMLResponse)
+async def create_mesh(request: Request):
+    form = dict(await request.form())
+    model = (form.get("model_path") or "").strip().rstrip("/")
+    backend = (form.get("backend") or "").strip()
+    gpu = (form.get("gpu") or "").strip()
+    extra = (form.get("extra") or "").strip()
+    try:
+        if not Path(model).is_dir():
+            raise ValueError(f"model_path 不是資料夾: {model!r}")
+        if not (Path(model) / "cfg_args").is_file():
+            raise ValueError("這不像訓練輸出（缺 cfg_args）;請指向 train.py 的 -m 輸出目錄。")
+        spec = get_backend(backend)
+        if not spec:
+            raise ValueError(f"未知 backend: {backend}")
+        if not spec.get("mesh_args"):
+            raise ValueError(f"backend '{backend}' 不支援 mesh 抽取。")
+        cli = build_cli(spec.get("mesh_params", []), form)
+        params = {"backend": backend, "model_path": model, "gpu": gpu,
+                  "args": cli, "extra": extra}
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    job = Job(id=new_id(), kind="mesh",
+              title=f"mesh · {backend} · {Path(model).name}",
+              subtitle=f"{model}  (gpu={gpu or 'default'})",
+              params=params, mirror=str(Path(model) / "mesh.log"),
+              meta={"model_path": model, "backend": backend})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+# --------------------------------------------------------------------------- #
+# Preflight / environment check — the "deploy to a new machine" checklist
+# --------------------------------------------------------------------------- #
+@app.get("/doctor", response_class=HTMLResponse)
+async def doctor_page(request: Request, deep: int = 1):
+    report = await asyncio.to_thread(run_doctor, bool(deep))
+    return _page(request, "doctor.html", report=report, deep=bool(deep))
+
+
+@app.get("/api/doctor")
+async def api_doctor(deep: int = 1):
+    return JSONResponse(await asyncio.to_thread(run_doctor, bool(deep)))
+
+
+@app.get("/api/gpus")
+async def api_gpus():
+    return JSONResponse(await asyncio.to_thread(list_gpus))
+
+
+# --------------------------------------------------------------------------- #
 # Job views / status / list  (htmx fragments) + JSON + SSE logs
 # --------------------------------------------------------------------------- #
 @app.get("/ui/joblist", response_class=HTMLResponse)
 async def joblist(request: Request):
-    return _page(request, "_joblist.html", jobs=manager.list())
+    running = sum(1 for j in manager.jobs.values() if j.status == "running")
+    return _page(request, "_joblist.html", jobs=manager.list(),
+                 max_jobs=MAX_JOBS, running=running)
 
 
 @app.get("/ui/jobs/{job_id}", response_class=HTMLResponse)
@@ -317,6 +420,26 @@ async def image_file(job_id: str, idx: int):
     raise HTTPException(404, f"image file not found: {name}")
 
 
+@app.get("/api/jobs/{job_id}/mesh.ply")
+async def mesh_ply(job_id: str):
+    """Serve the extracted mesh (tsdf_post.ply) of a mesh job for download."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job.kind != "mesh":
+        raise HTTPException(404, "not a mesh job")
+    # Prefer the path the parser captured; else glob the model output dir.
+    p = (job.meta or {}).get("mesh_path")
+    path = Path(p) if p else None
+    if not (path and path.is_file()):
+        model = Path((job.meta or {}).get("model_path", ""))
+        cands = sorted(model.glob("*/*/mesh/tsdf_post.ply")) if str(model) else []
+        path = cands[-1] if cands else None
+    if not (path and path.is_file()):
+        raise HTTPException(404, "mesh not found (尚未產出或已被移動)")
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
 @app.get("/api/jobs/{job_id}/model.ply")
 async def model_ply(job_id: str):
     job = manager.get(job_id)
@@ -359,7 +482,7 @@ async def stream_logs(job_id: str):
             if ended and no_more:
                 yield f"event: end\ndata: {cur.status}\n\n"
                 return
-            await asyncio.sleep(0.7)
+            await asyncio.sleep(0.4)
 
     # Disable proxy / port-forward buffering so events flush immediately.
     return StreamingResponse(gen(), media_type="text/event-stream", headers={

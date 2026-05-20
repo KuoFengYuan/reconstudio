@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>環境檢查 · Recon Studio</title>
+<style>
+  :root { --bg:#0e1014; --panel:#161922; --line:#2a3038; --fg:#e6e9ef; --mut:#8b93a3;
+          --accent:#4c8bf5; --ok:#3fb950; --err:#f85149; --warn:#d29922; }
+  body { margin:0; font:14px/1.6 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif;
+         background:var(--bg); color:var(--fg); padding:24px 28px; }
+  a { color:var(--accent); }
+  h1 { font-size:17px; } h2 { font-size:14px; margin:18px 0 6px; color:var(--accent); }
+  code { font-family:ui-monospace,monospace; color:#c9d1d9; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:12px 14px; margin:8px 0; }
+  .ok { color:var(--ok); } .err { color:var(--err); } .warn { color:var(--warn); } .mut { color:var(--mut); }
+  table { border-collapse:collapse; font-size:13px; }
+  td { padding:2px 14px 2px 0; vertical-align:top; }
+  .pill { display:inline-block; border-radius:20px; padding:1px 9px; font-size:12px; font-weight:600; color:#0a0c10; }
+</style>
+</head>
+<body>
+{% macro yn(v) %}{% if v %}<span class="pill" style="background:var(--ok)">OK</span>{% else %}<span class="pill" style="background:var(--err)">缺</span>{% endif %}{% endmacro %}
+<h1>🔧 環境檢查（部署到新機器先看這頁）</h1>
+<p class="mut">conda envs 目錄：<code>{{ report.conda_envs_dir or '（未偵測到）' }}</code>
+   · <a href="/doctor?deep=0">只查路徑（快）</a> · <a href="/doctor?deep=1">含 torch/CUDA 探測（慢）</a> · <a href="/">← 回面板</a></p>
+
+<h2>COLMAP</h2>
+<div class="card">
+  {{ yn(report.colmap.ok) }} <code>{{ report.colmap.bin }}</code>
+  {% if report.colmap.path %}<span class="mut">→ {{ report.colmap.path }}</span>{% endif %}
+  {% if report.colmap.version %}<div class="mut">{{ report.colmap.version }}</div>{% endif %}
+</div>
+
+<h2>GPU</h2>
+<div class="card">
+  {% if report.gpus %}
+    {% for g in report.gpus %}<div>#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(1) }} GB</div>{% endfor %}
+  {% else %}<span class="warn">未偵測到 nvidia-smi / GPU</span>{% endif %}
+</div>
+
+<h2>訓練 backends</h2>
+{% for name, b in report.backends.items() %}
+<div class="card">
+  <div style="font-weight:600">{{ yn(b.ready) }} {{ b.label }} <span class="mut">({{ name }})</span></div>
+  <table>
+    <tr><td class="mut">conda env</td><td><code>{{ b.conda_env }}</code></td></tr>
+    <tr><td class="mut">env python</td><td>{{ yn(b.env_python) }} <code>{{ b.env_python or '找不到' }}</code></td></tr>
+    <tr><td class="mut">repo / train.py</td><td>{{ yn(b.repo_ok) }} <code>{{ b.repo }}</code></td></tr>
+    {% if b.probe %}
+      {% if b.probe.error %}
+      <tr><td class="mut">probe</td><td class="err">{{ b.probe.error }}</td></tr>
+      {% else %}
+      <tr><td class="mut">torch</td><td>
+        {% if b.probe.torch %}<span class="ok">{{ b.probe.torch }}</span>
+          · CUDA {{ '可用' if b.probe.cuda else '不可用' }}{% if b.probe.device %} · {{ b.probe.device }}{% endif %}
+        {% else %}<span class="err">{{ b.probe.torch_error or '無法載入 torch' }}</span>{% endif %}
+      </td></tr>
+      <tr><td class="mut">submodules</td><td>
+        {% if b.probe.import_fail %}<span class="err">{{ b.probe.import_fail }}</span>
+        {% else %}<span class="ok">全部 import 成功</span>{% endif %}
+      </td></tr>
+      {% endif %}
+    {% endif %}
+  </table>
+</div>
+{% endfor %}
+</body>
+</html>

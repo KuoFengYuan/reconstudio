@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "Per-machine training backends (copy to backends.json; gitignored).",
+    "Shallow-merged over the built-in defaults in pipeline/backends.py — you only",
+    "need to set keys that differ on THIS machine. Adding a trainer is a config",
+    "entry here, not a code change.",
+    "",
+    "Resolution of the interpreter (most portable first):",
+    "  1. \"python\": absolute path (set this if the env isn't a standard conda env)",
+    "  2. $CONDA_ROOT/envs/<conda_env>/bin/python",
+    "  3. <envs>/<conda_env>/bin/python derived from the panel's own sys.prefix",
+    "Repos are relative to the Recon Studio repo dir unless given as an absolute path.",
+    "Param `type`: int | float | str | bool | select (select needs \"options\").",
+    "",
+    "Mesh extraction is backend-specific: a backend supports it ONLY if it declares",
+    "`mesh_args` (+ `mesh_script`/`mesh_params`). GS-2M does (render.py --extract_mesh);",
+    "gsplat below intentionally omits it, so the Mesh tab won't offer gsplat."
+  ],
+
+  "gs2m": {
+    "conda_env": "gs2m",
+    "repo": "../GS-2M",
+    "params": [
+      { "key": "iterations", "flag": "--iterations", "type": "int", "default": "30000", "label": "迭代次數" },
+      { "key": "resolution", "flag": "-r", "type": "int", "default": "1", "label": "解析度降採樣 (-r)" },
+      { "key": "data_device", "flag": "--data_device", "type": "select", "options": ["cpu", "cuda"], "default": "cpu", "label": "影像快取裝置" },
+      { "key": "material", "flag": "--material", "type": "bool", "default": false, "label": "材質分解" }
+    ]
+  },
+
+  "gsplat": {
+    "label": "gsplat (nerfstudio)",
+    "conda_env": "gsplat",
+    "repo": "../gsplat",
+    "train_script": "examples/simple_trainer.py",
+    "train_args": "default --data_dir {scene} --result_dir {out} {args} {extra}",
+    "probe_imports": ["torch", "gsplat"],
+    "params": [
+      { "key": "max_steps", "flag": "--max_steps", "type": "int", "default": "30000", "label": "max steps" }
+    ]
+  }
+}

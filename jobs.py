@@ -18,16 +18,21 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from pipeline import (COLMAP_STAGES, Cancelled, Runner, run_colmap, run_frames)
+from pipeline import (COLMAP_STAGES, Cancelled, Runner, run_colmap, run_frames,
+                      run_mesh, run_train)
 from pipeline.colmap import COLMAP_DEFAULTS  # noqa: F401  (re-exported for app)
 from pipeline.frames import FRAMES_DEFAULTS  # noqa: F401
 
 DATA_DIR = Path(os.environ.get("COLMAP_PANEL_DATA", str(Path.home() / ".colmap_panel")))
 JOBS_DIR = DATA_DIR / "jobs"
+# How many jobs may run concurrently. Tune per machine via the env var.
+MAX_JOBS = max(1, int(os.environ.get("COLMAP_PANEL_MAX_JOBS", "4")))
 
 RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "frames": run_frames,
     "colmap": run_colmap,
+    "train": run_train,
+    "mesh": run_mesh,
 }
 
 # --- COLMAP stage parsing --------------------------------------------------- #
@@ -48,11 +53,42 @@ _FR_FOUND = re.compile(r"Found (\d+) video")
 _FR_CUR = re.compile(r"######## \[(\d+)/(\d+)\]")
 _FR_RESULT = re.compile(r"-> (\d+) kept / (\d+) dropped")
 
+# --- train parsing ---------------------------------------------------------- #
+# tqdm's live bar is \r-based (won't stream as discrete lines through a pipe), so
+# we lean on the trainer's newline-terminated markers: tqdm.write("[ITER n] …")
+# and "Training complete!". The "n/total [" form is parsed too, for when a bar
+# line does flush.
+_TR_BAR = re.compile(r"(\d+)/(\d+)\s*\[")
+_TR_ITER = re.compile(r"\[ITER\s+(\d+)\]")
+_TR_LOSS = re.compile(r"loss[=:]\s*([0-9.]+)", re.IGNORECASE)
+_TR_DONE = re.compile(r"Training complete")
+# Human-readable phase, so the status chip shows life during the long, output-quiet
+# stages (camera loading etc.) instead of looking frozen.
+_TR_PHASES = [
+    (re.compile(r"Loading train cameras"), "載入訓練相機"),
+    (re.compile(r"Loading test cameras"), "載入測試相機"),
+    (re.compile(r"Number of points at init"), "初始化點雲"),
+    (re.compile(r"Populating"), "建立多視角資料"),
+    (re.compile(r"Saving Gaussians"), "存檔中"),
+    (re.compile(r"Saving checkpoint"), "存 checkpoint"),
+]
+
+# --- mesh parsing ----------------------------------------------------------- #
+_ME_RESULT = re.compile(r"\[mesh\] result:\s*(\S+)")
+_ME_VERT = re.compile(r"Num vertices post:\s*(\d+)")
+_ME_EXTRACT = re.compile(r"Extracting mesh from TSDF")
+_ME_PHASES = [
+    (re.compile(r"Found \d+ cameras"), "載入相機"),
+    (re.compile(r"Estimated voxel|Voxel_size|TSDF config"), "估計體素 / 融合"),
+    (re.compile(r"Extracting mesh"), "抽取 mesh"),
+    (re.compile(r"Post processing|Post-processed"), "後處理"),
+]
+
 
 @dataclass
 class Job:
     id: str
-    kind: str                       # "frames" | "colmap"
+    kind: str                       # "frames" | "colmap" | "train" | "mesh"
     title: str
     subtitle: str
     params: dict = field(default_factory=dict)   # default lets old-schema job.json load
@@ -117,20 +153,66 @@ def _parse_frames(job: Job, line: str) -> None:
         job.meta["dropped"] = job.meta.get("dropped", 0) + int(m.group(2))
 
 
+def _parse_train(job: Job, line: str) -> None:
+    for rx, label in _TR_PHASES:
+        if rx.search(line):
+            job.meta["phase"] = label
+            break
+    # Only the *training* bar (desc "Training") counts as the iteration progress;
+    # the "Loading train cameras: …/245 [" bar must not be mistaken for it.
+    if "Training" in line:
+        m = _TR_BAR.search(line)
+        if m:
+            job.meta["iter"], job.meta["total"] = int(m.group(1)), int(m.group(2))
+            job.meta["phase"] = "訓練中"
+            job.current_stage = "train"
+    m = _TR_ITER.search(line)
+    if m:
+        job.meta["iter"] = int(m.group(1))
+        job.current_stage = "train"
+    m = _TR_LOSS.search(line)
+    if m:
+        job.meta["loss"] = m.group(1)
+    if _TR_DONE.search(line):
+        job.meta["complete"] = True
+        job.meta["phase"] = "完成"
+        job.current_stage = "done"
+
+
+def _parse_mesh(job: Job, line: str) -> None:
+    for rx, label in _ME_PHASES:
+        if rx.search(line):
+            job.meta["phase"] = label
+            break
+    if _ME_EXTRACT.search(line):
+        job.current_stage = "extract"
+    m = _ME_VERT.search(line)
+    if m:
+        job.meta["vertices"] = int(m.group(1))
+    m = _ME_RESULT.search(line)
+    if m:
+        job.meta["mesh_path"] = m.group(1)
+        job.current_stage = "done"
+
+
 PARSERS: dict[str, Callable[[Job, str], None]] = {
     "colmap": _parse_colmap,
     "frames": _parse_frames,
+    "train": _parse_train,
+    "mesh": _parse_mesh,
 }
 
 
 class JobManager:
-    """Single-worker, serialized execution (both ffmpeg and COLMAP are heavy)."""
+    """Runs up to MAX_JOBS jobs concurrently (one asyncio worker per slot, each
+    job's heavy work offloaded to a thread). GPU is chosen manually per job (the
+    train/mesh forms' GPU field -> CUDA_VISIBLE_DEVICES); no auto GPU selection."""
 
     def __init__(self) -> None:
         self.jobs: dict[str, Job] = {}
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.runners: dict[str, Runner] = {}
-        self._worker: Optional[asyncio.Task] = None
+        self._workers: list[asyncio.Task] = []
         JOBS_DIR.mkdir(parents=True, exist_ok=True)
         self._load_existing()
 
@@ -146,8 +228,9 @@ class JobManager:
                 continue
 
     def start(self) -> None:
-        if self._worker is None:
-            self._worker = asyncio.create_task(self._run_worker())
+        if not self._workers:
+            self._workers = [asyncio.create_task(self._run_worker(i))
+                             for i in range(MAX_JOBS)]
 
     def submit(self, job: Job) -> None:
         if job.kind == "colmap":
@@ -192,13 +275,17 @@ class JobManager:
         shutil.rmtree(job.dir, ignore_errors=True)
         return "deleted"
 
-    async def _run_worker(self) -> None:
+    async def _run_worker(self, wid: int) -> None:
         while True:
             job_id = await self.queue.get()
-            job = self.jobs.get(job_id)
-            if not job or job.status != "queued":
-                continue
-            await self._run_job(job)
+            try:
+                job = self.jobs.get(job_id)
+                if job and job.status == "queued":
+                    await self._run_job(job)
+            except Exception:          # never let an unexpected error kill a slot
+                pass
+            finally:
+                self.queue.task_done()
 
     async def _run_job(self, job: Job) -> None:
         job.status = "running"

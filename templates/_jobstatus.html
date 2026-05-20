@@ -33,6 +33,49 @@
       <button onclick="fillColmap('{{ job.meta.out }}','{{ job.meta.ws }}')">▶ 接著跑 COLMAP（自動帶入 {{ job.meta.out }}）</button>
     </div>
     {% endif %}
+  {% elif job.kind == 'train' %}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      {% if job.meta.get('phase') %}
+      <span style="background:var(--accent);color:#0a0c10;border-radius:6px;padding:3px 9px;font-size:12px;font-weight:600">
+        {{ job.meta.phase }}
+      </span>{% endif %}
+      {% if job.meta.get('iter') is not none %}
+      <span style="border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:3px 9px;font-size:12px">
+        iter {{ job.meta.get('iter', 0) }}{% if job.meta.get('total') %} / {{ job.meta.total }}{% endif %}
+      </span>{% endif %}
+      {% if job.meta.get('loss') %}
+      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
+        loss {{ job.meta.loss }}
+      </span>{% endif %}
+      <span class="hint">backend: {{ job.meta.get('backend','') }}</span>
+    </div>
+    {% if job.status == 'done' %}
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span class="hint">✅ 模型輸出：<code>{{ job.meta.get('model_path','') }}</code></span>
+      {% if job.meta.get('can_mesh') %}
+      <button class="ghost" onclick="fillMesh('{{ job.meta.get('model_path','') }}')">🧩 接著抽 Mesh</button>
+      {% endif %}
+    </div>
+    {% endif %}
+  {% elif job.kind == 'mesh' %}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      <span style="background:var(--accent);color:#0a0c10;border-radius:6px;padding:3px 9px;font-size:12px;font-weight:600">
+        {{ job.meta.get('phase') or job.current_stage or 'render' }}
+      </span>
+      {% if job.meta.get('vertices') %}
+      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
+        {{ job.meta.vertices }} verts
+      </span>{% endif %}
+      <span class="hint">backend: {{ job.meta.get('backend','') }}</span>
+    </div>
+    {% if job.status == 'done' %}
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <a href="/api/jobs/{{ job.id }}/mesh.ply" download
+         style="display:inline-block;background:var(--panel2);color:var(--fg);border:1px solid var(--line2);
+                border-radius:7px;padding:7px 11px;text-decoration:none;font-weight:500">⬇ 下載 tsdf_post.ply</a>
+      <span class="hint"><code>{{ job.meta.get('mesh_path') or (job.meta.get('model_path','') ~ '/train/ours_*/mesh/tsdf_post.ply') }}</code></span>
+    </div>
+    {% endif %}
   {% else %}
     <div style="display:flex;gap:6px;flex-wrap:wrap">
       {% for s in stages %}
@@ -44,8 +87,9 @@
       {% endfor %}
     </div>
     {% if job.status == 'done' %}
-    <div style="margin-top:12px">
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button onclick="openViz('{{ job.id }}')">🧊 檢視 3D 結果（點雲 + 相機位置）</button>
+      <button class="ghost" onclick="fillTrain('{{ job.meta.get('workspace','') }}')">🧠 接著訓練（帶入 workspace）</button>
     </div>
     {% endif %}
   {% endif %}

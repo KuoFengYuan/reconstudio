@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>COLMAP Panel</title>
+<title>Recon Studio</title>
 <script src="/static/htmx.min.js"></script>
 <style>
   :root { --bg:#0e1014; --panel:#161922; --panel2:#1b1f29; --line:#2a3038; --line2:#363d49;
@@ -63,7 +63,8 @@
             background:linear-gradient(180deg,var(--accent),var(--accent-d)); box-shadow:0 2px 10px rgba(76,139,245,.25); }
   .tabs { display:flex; gap:4px; margin-bottom:14px; background:var(--panel); padding:4px;
           border-radius:10px; border:1px solid var(--line); }
-  .tabs button { flex:1; background:transparent; color:var(--mut); border:0; border-radius:7px; padding:7px 10px; font-weight:550; }
+  .tabs button { flex:1; min-width:0; white-space:nowrap; background:transparent; color:var(--mut);
+                 border:0; border-radius:7px; padding:7px 8px; font-size:13px; font-weight:550; }
   .tabs button.active { color:#fff; background:var(--accent); }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
@@ -76,16 +77,18 @@
 </head>
 <body>
 <header>
-  <h1>COLMAP Panel</h1>
-  <span class="sub">video → sharp frames → reconstruction</span>
+  <h1>Recon Studio</h1>
+  <span class="sub">影片 → 清晰幀 → COLMAP → 訓練 → Mesh</span>
 </header>
 
 <div class="wrap">
   <!-- ============================= left: forms ============================= -->
   <div class="col left">
     <div class="tabs">
-      <button class="ghost active" id="t-frames" onclick="showForm('frames')">① 影片→清晰幀</button>
-      <button class="ghost" id="t-colmap" onclick="showForm('colmap')">② COLMAP</button>
+      <button class="ghost active" id="t-frames" onclick="showForm('frames')">抽幀</button>
+      <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
+      <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
+      <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
     </div>
 
     <!-- ----- frames form ----- -->
@@ -145,10 +148,10 @@
         </div>
         <label>影像解析度</label>
         <select name="resize">
-          <option value="keep" selected>保持原樣</option>
-          <option value="fullhd">等比縮小到 FullHD（長邊 ≤ 1920）</option>
+          <option value="fullhd" selected>等比縮小到 FullHD（長邊 ≤ 1920）</option>
+          <option value="keep">保持原樣</option>
         </select>
-        <div class="hint">FullHD：特徵抽取與去畸變輸出都限制在 1920;加速且輸出較小,適合訓練。輸入格式自動偵測。</div>
+        <div class="hint">FullHD：先把輸入影像等比例縮成長邊 ≤1920 的實體檔（存到 <code>workspace/images_fullhd</code>），整條 COLMAP 都用 FullHD 跑 — 適合 4K 影像。輸入格式自動偵測。</div>
       </fieldset>
 
       <details class="grp" id="fmt-grp">
@@ -235,6 +238,141 @@
 
       <button class="submit" type="submit">▶ 啟動 COLMAP</button>
     </form>
+
+    {# render one tunable param field from its schema entry (shared by train + mesh) #}
+    {% macro field(pr, ready) %}
+      {% if pr.type == 'bool' %}
+      <label class="checks" style="margin-top:8px"><input type="checkbox" name="{{ pr.key }}" value="1"
+             {{ 'checked' if pr.default }} {{ '' if ready else 'disabled' }}> {{ pr.label }}</label>
+      {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
+      {% elif pr.type == 'select' %}
+      <label>{{ pr.label }}</label>
+      <select name="{{ pr.key }}" {{ '' if ready else 'disabled' }}>
+        {% for o in pr.options %}<option {{ 'selected' if o==pr.default }}>{{ o }}</option>{% endfor %}
+      </select>
+      {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
+      {% else %}
+      <label>{{ pr.label }}</label>
+      <input name="{{ pr.key }}" value="{{ pr.default }}" {{ '' if ready else 'disabled' }}
+             {% if pr.placeholder %}placeholder="{{ pr.placeholder }}"{% endif %}>
+      {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
+      {% endif %}
+    {% endmacro %}
+
+    <!-- ----- train form ----- -->
+    <form id="form-train" style="display:none" hx-post="/ui/train" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>訓練</legend>
+        <label>backend（訓練器；環境由 backends.json 解析）</label>
+        <select name="backend" id="train_backend" onchange="showBackendParams(this.value)">
+          {% for b in backends %}
+          <option value="{{ b.name }}" {{ 'disabled' if not b.ready }}>
+            {{ b.label }}{{ '' if b.ready else '（環境未就緒）' }}
+          </option>{% endfor %}
+        </select>
+        <div class="hint">
+          灰掉的代表該機器上 env/repo 未就緒 —
+          <a href="/doctor" target="_blank" style="color:var(--accent)">開 /doctor 檢查環境</a>。
+        </div>
+
+        <label>source（COLMAP workspace 或去畸變輸出）</label>
+        <div class="row">
+          <input name="source" id="train_source" placeholder="{{ browse_root }}/FY115/0518_colmap_ws" required>
+          <button type="button" class="ghost" onclick="openPicker('train_source')">瀏覽</button>
+        </div>
+        <label>model_path（輸出模型目錄）</label>
+        <div class="row">
+          <input name="model_path" id="train_out" placeholder="{{ browse_root }}/FY115/0518_gs2m" required>
+          <button type="button" class="ghost" onclick="openPicker('train_out')">瀏覽</button>
+        </div>
+
+        <label>GPU</label>
+        <select name="gpu">
+          {% if gpus %}{% for g in gpus %}
+          <option value="{{ g.index }}">#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
+          {% endfor %}{% else %}
+          <option value="0">0（預設;未偵測到 nvidia-smi）</option>
+          {% endif %}
+        </select>
+      </fieldset>
+
+      <!-- per-backend tunable params (rendered from each backend's schema) -->
+      {% for b in backends %}
+      <div class="bp" data-backend="{{ b.name }}" {{ '' if loop.first else 'style=display:none' }}>
+        <fieldset>
+          <legend>{{ b.label }} 參數</legend>
+          {% for pr in b.params if not pr.group %}{{ field(pr, b.ready) }}{% endfor %}
+        </fieldset>
+        {% for grp, items in (b.params | selectattr('group', 'defined') | list | groupby('group')) %}
+        <details class="grp"><summary>{{ grp }}</summary><div class="gbody">
+          {% for pr in items %}{{ field(pr, b.ready) }}{% endfor %}
+        </div></details>
+        {% endfor %}
+      </div>
+      {% endfor %}
+
+      <details class="grp">
+        <summary>進階（額外旗標）</summary>
+        <div class="gbody">
+          <label>extra（直接附加到指令後;表單沒有的旗標寫這）</label>
+          <input name="extra" placeholder="--checkpoint_iterations 7000 30000">
+          <label class="checks" style="margin-top:10px"><input type="checkbox" name="force" value="1"> FORCE（重建 scene 連結）</label>
+        </div>
+      </details>
+
+      <button class="submit" type="submit">▶ 啟動訓練</button>
+    </form>
+
+    <!-- ----- mesh form ----- -->
+    <form id="form-mesh" style="display:none" hx-post="/ui/mesh" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>Mesh 抽取</legend>
+        {% set mesh_backends = backends | selectattr('mesh') | list %}
+        {% if not mesh_backends %}
+        <div class="hint">目前沒有支援 mesh 抽取的 backend（此功能僅 GS-2M 類提供）。</div>
+        {% else %}
+        <label>backend</label>
+        <select name="backend" id="mesh_backend" onchange="syncBackendParams('mesh')">
+          {% for b in mesh_backends %}
+          <option value="{{ b.name }}" {{ 'disabled' if not b.ready }}>
+            {{ b.label }}{{ '' if b.ready else '（環境未就緒）' }}
+          </option>{% endfor %}
+        </select>
+        <label>model_path（已訓練的模型輸出目錄）</label>
+        <div class="row">
+          <input name="model_path" id="mesh_model" placeholder="{{ browse_root }}/FY115/0518_gs2m" required>
+          <button type="button" class="ghost" onclick="openPicker('mesh_model')">瀏覽</button>
+        </div>
+        <div class="hint">就是訓練時 model_path 的那個目錄（內含 cfg_args / point_cloud）。</div>
+        <label>GPU</label>
+        <select name="gpu">
+          {% if gpus %}{% for g in gpus %}
+          <option value="{{ g.index }}">#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
+          {% endfor %}{% else %}<option value="0">0（預設）</option>{% endif %}
+        </select>
+        {% endif %}
+      </fieldset>
+
+      {% for b in mesh_backends %}
+      <div class="bp" data-backend="{{ b.name }}" {{ '' if loop.first else 'style=display:none' }}>
+        <fieldset>
+          <legend>{{ b.label }} Mesh 參數</legend>
+          {% for pr in b.mesh_params %}{{ field(pr, b.ready) }}{% endfor %}
+        </fieldset>
+      </div>
+      {% endfor %}
+
+      {% if mesh_backends %}
+      <details class="grp">
+        <summary>進階（額外旗標）</summary>
+        <div class="gbody">
+          <label>extra（直接附加到 render.py 後）</label>
+          <input name="extra" placeholder="--num_clusters 1">
+        </div>
+      </details>
+      <button class="submit" type="submit">▶ 抽取 Mesh</button>
+      {% endif %}
+    </form>
   </div>
 
   <!-- ============================ right: output ============================ -->
@@ -265,10 +403,39 @@
 
 <script>
   function showForm(which){
-    document.getElementById('form-frames').style.display = which==='frames' ? '' : 'none';
-    document.getElementById('form-colmap').style.display = which==='colmap' ? '' : 'none';
-    document.getElementById('t-frames').classList.toggle('active', which==='frames');
-    document.getElementById('t-colmap').classList.toggle('active', which==='colmap');
+    ['frames','colmap','train','mesh'].forEach(function(k){
+      var f = document.getElementById('form-' + k);
+      if (f) f.style.display = (k===which) ? '' : 'none';
+      var t = document.getElementById('t-' + k);
+      if (t) t.classList.toggle('active', k===which);
+    });
+    if (which==='train' || which==='mesh') syncBackendParams(which);
+  }
+  // Show the selected backend's param block within a form; disable inputs in the
+  // hidden blocks so only the chosen backend's fields are submitted (no key clash).
+  function syncBackendParams(form){
+    var sel = document.getElementById(form + '_backend');
+    if (!sel) return;
+    document.querySelectorAll('#form-' + form + ' .bp').forEach(function(bp){
+      var on = bp.getAttribute('data-backend') === sel.value;
+      bp.style.display = on ? '' : 'none';
+      bp.querySelectorAll('input,select,textarea').forEach(function(el){ el.disabled = !on; });
+    });
+  }
+  // chain: COLMAP done -> training, prefilled (source = workspace; resolver finds
+  // the undistorted *_mapper dir; output defaults to <workspace>_gs2m).
+  function fillTrain(workspace){
+    showForm('train');
+    var s = document.getElementById('train_source'); if (s) s.value = workspace;
+    var o = document.getElementById('train_out');
+    if (o) o.value = workspace.replace(/_ws$/,'').replace(/\/+$/,'') + '_gs2m';
+    window.scrollTo(0, 0);
+  }
+  // chain: training done -> mesh extraction, prefilled with the model output dir.
+  function fillMesh(model){
+    showForm('mesh');
+    var m = document.getElementById('mesh_model'); if (m) m.value = model;
+    window.scrollTo(0, 0);
   }
   function showTab(which, btn){
     document.getElementById('tab-run').style.display  = which==='run'  ? '' : 'none';
@@ -330,14 +497,30 @@
     var pre = document.getElementById('log');
     if (!pre) return;
     pre.textContent = '';
+    pre.dataset.lastProg = '0';
     var es = new EventSource('/api/jobs/' + jobId + '/logs');
     window._es = es;
     es.onmessage = function(ev){
       var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-      pre.textContent += ev.data + '\n';
+      ev.data.split('\n').forEach(function(ln){ pushLogLine(pre, ln); });
       if (atBottom) pre.scrollTop = pre.scrollHeight;
     };
     es.addEventListener('end', function(){ es.close(); });
+  }
+  // tqdm refreshes the same bar with \r; treat progress lines as in-place updates
+  // so the bar moves at the bottom instead of flooding the pane with thousands of
+  // near-identical lines (which made the log feel laggy / stuck).
+  function pushLogLine(pre, line){
+    var isProg = /\d+%\|/.test(line) || /it\/s/.test(line);
+    var t = pre.textContent;
+    if (isProg && pre.dataset.lastProg === '1'){
+      var body = t.endsWith('\n') ? t.slice(0, -1) : t;
+      var nl = body.lastIndexOf('\n');
+      pre.textContent = (nl >= 0 ? body.slice(0, nl + 1) : '') + line + '\n';
+    } else {
+      pre.textContent = t + line + '\n';
+    }
+    pre.dataset.lastProg = isProg ? '1' : '0';
   }
   function refreshJoblist(){ htmx.ajax('GET', '/ui/joblist', {target:'#joblist', swap:'innerHTML'}); }
   function toggleAllJobs(cb){ document.querySelectorAll('.jobsel').forEach(x => x.checked = cb.checked); }

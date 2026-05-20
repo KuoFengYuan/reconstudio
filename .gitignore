@@ -2,8 +2,9 @@
 data/
 *.tmp
 
-# per-machine config (copy from local.env.example)
+# per-machine config (copy from *.example)
 local.env
+backends.json
 
 # python
 __pycache__/

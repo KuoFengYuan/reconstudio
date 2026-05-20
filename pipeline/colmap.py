@@ -7,18 +7,22 @@ banners it emits match `log()` so the panel's stage parser is unchanged.
 """
 from __future__ import annotations
 
+import concurrent.futures as futures
 import os
 import shutil
+import subprocess
 import time
 import urllib.request
 from pathlib import Path
 
-from .runner import Runner
+from .runner import Cancelled, Runner
 
 COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "undistort"]
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 # colmap binary: PATH by default, override with COLMAP_BIN for non-standard installs.
 COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
+# ffmpeg: used for the FullHD resize step (PATH by default; override via FFMPEG_BIN).
+FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
 COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
@@ -26,7 +30,7 @@ COLMAP_DEFAULTS = {
     "camera_model": "OPENCV", "max_features": "4096", "camera_mode": "per_folder",
     "matcher": "both", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
-    "force": False, "nested_layout": False, "resize": "keep",
+    "force": False, "nested_layout": False, "resize": "fullhd",
 }
 FULLHD_MAX = "1920"   # longest side cap for the "fullhd" resize option
 
@@ -46,6 +50,81 @@ def _download(url: str, dest: Path, r: Runner) -> None:
             tmp.unlink(missing_ok=True)
             time.sleep(2)
     raise RuntimeError(f"vocab tree download failed: {last}")
+
+
+def _resize_workers() -> int:
+    env = os.environ.get("COLMAP_PANEL_RESIZE_WORKERS")
+    if env and env.isdigit() and int(env) > 0:
+        return int(env)
+    return max(1, min((os.cpu_count() or 8), 32))   # CPU-bound encode; cap to be polite
+
+
+def _resize_enc_args(rel: str) -> list[str]:
+    """Highest-quality encode for the output format. JPEG: q=1 + full-chroma 4:4:4
+    (no subsampling). PNG/TIFF: lossless, so just rescale."""
+    ext = Path(rel).suffix.lower()
+    if ext in (".jpg", ".jpeg"):
+        return ["-q:v", "1", "-pix_fmt", "yuvj444p"]
+    if ext == ".png":
+        return ["-compression_level", "1"]          # lossless; light zlib = faster write
+    return []
+
+
+def _resize_to_fullhd(img_root: str, lines: list[str], ws: Path,
+                      force: bool, r: Runner) -> str:
+    """Physically downscale every listed image so its longest side is <= FULLHD_MAX,
+    writing real FullHD copies under ws/images_fullhd/<relpath> (aspect kept, never
+    upscaled). The whole COLMAP run then operates on these — no in-COLMAP size cap.
+
+    Speed: many ffmpeg workers in parallel (NVDEC/GPU can't accelerate JPEG stills,
+    so we saturate CPU cores instead). Quality: Lanczos downscaling + max-quality
+    encode. Idempotent via a sentinel; honors FORCE; resumes by skipping done files.
+    Returns the new image root."""
+    if not shutil.which(FFMPEG_BIN):
+        raise RuntimeError(f"ffmpeg not found: '{FFMPEG_BIN}' (set FFMPEG_BIN); "
+                           "needed for the FullHD resize")
+    out_root = ws / "images_fullhd"
+    sentinel = ws / ".resize_fullhd.done"
+    if sentinel.exists() and not force:
+        r.log(f"skip resize (sentinel exists; set FORCE=1 to redo) -> {out_root}")
+        return str(out_root)
+    if force:
+        shutil.rmtree(out_root, ignore_errors=True)
+    workers = _resize_workers()
+    r.banner(f"resize input -> FullHD (longest side <= {FULLHD_MAX}px, Lanczos, "
+             f"max quality, {workers} parallel) -> {out_root}")
+    # cap the longest side, keep aspect, never upscale (min with original); -2 keeps
+    # the other side an even number; Lanczos = best-quality downscaling filter.
+    vf = (f"scale='if(gte(iw,ih),min({FULLHD_MAX},iw),-2)':"
+          f"'if(gte(iw,ih),-2,min({FULLHD_MAX},ih))':flags=lanczos")
+
+    def _one(rel: str) -> None:
+        dst = out_root / rel
+        if dst.exists() and not force:
+            return                                   # resume a partial run cheaply
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        argv = [FFMPEG_BIN, "-y", "-nostdin", "-loglevel", "error",
+                "-i", str(Path(img_root) / rel), "-vf", vf,
+                *_resize_enc_args(rel), str(dst)]
+        res = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"ffmpeg resize failed for {rel}: "
+                               f"{res.stderr.strip()[:200]}")
+
+    n, done = len(lines), 0
+    with futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        pending = [ex.submit(_one, rel) for rel in lines]
+        for fut in futures.as_completed(pending):
+            if r.cancelled:
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise Cancelled()
+            fut.result()                             # propagate ffmpeg failures
+            done += 1
+            if done % 250 == 0 or done == n:
+                r.log(f"  resized {done}/{n}")
+    sentinel.touch()
+    return str(out_root)
 
 
 def _has_images(folder: Path) -> bool:
@@ -204,6 +283,12 @@ def run_colmap(p: dict, r: Runner) -> None:
     if not lines:
         raise FileNotFoundError("no images found")
 
+    # FullHD: physically downscale the inputs to FullHD copies and run the entire
+    # pipeline on those. The image_list paths stay relative, so they remain valid
+    # against the rebased root.
+    if fullhd:
+        img_root = _resize_to_fullhd(img_root, lines, ws, force, r)
+
     # 1. feature_extractor
     if stage_on("extract"):
         if need(db):
@@ -214,11 +299,10 @@ def run_colmap(p: dict, r: Runner) -> None:
                 cam = ["--ImageReader.single_camera_per_folder", "1"]
             else:
                 cam = ["--ImageReader.single_camera", "1"]
-            size_opt = ["--FeatureExtraction.max_image_size", FULLHD_MAX] if fullhd else []
             r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(db),
                    "--image_path", img_root, "--image_list_path", str(lst), *cam,
                    "--ImageReader.camera_model", str(d["camera_model"]),
-                   "--SiftExtraction.max_num_features", str(d["max_features"]), *size_opt])
+                   "--SiftExtraction.max_num_features", str(d["max_features"])])
         else:
             r.log("skip extract (database.db exists; set FORCE=1 to redo)")
 
@@ -277,11 +361,10 @@ def run_colmap(p: dict, r: Runner) -> None:
         if need(dense_dir / "sparse" / "cameras.bin"):
             if not (ws / "sparse" / "0" / "cameras.bin").is_file():
                 raise RuntimeError("sparse model missing, cannot undistort")
-            r.banner(f"image_undistorter -> {dense_dir}" + (f" (max_image_size={FULLHD_MAX})" if fullhd else ""))
-            undist_size = ["--max_image_size", FULLHD_MAX] if fullhd else []
+            r.banner(f"image_undistorter -> {dense_dir}")
             r.run([COLMAP_BIN, "image_undistorter", "--image_path", img_root,
                    "--input_path", str(ws / "sparse" / "0"),
-                   "--output_path", str(dense_dir), "--output_type", "COLMAP", *undist_size])
+                   "--output_path", str(dense_dir), "--output_type", "COLMAP"])
         else:
             r.log(f"skip undistort ({dense_dir}/sparse/cameras.bin exists; set FORCE=1 to redo)")
 
