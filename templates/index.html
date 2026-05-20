@@ -56,6 +56,8 @@
   button:hover { filter:brightness(1.08); }
   button:active { transform:translateY(1px); }
   button.ghost { background:var(--panel2); color:var(--fg); border:1px solid var(--line2); padding:7px 11px; font-weight:500; }
+  .jf { padding:4px 10px; font-size:12px; border-radius:20px; }
+  .jf.active { background:var(--accent); color:#fff; border-color:var(--accent); }
   .checks { display:flex; flex-wrap:wrap; gap:8px 14px; }
   .checks label { display:flex; align-items:center; gap:5px; margin:0; color:var(--fg); font-size:13px; }
   .checks input { width:auto; accent-color:var(--accent); }
@@ -421,7 +423,29 @@
       bp.style.display = on ? '' : 'none';
       bp.querySelectorAll('input,select,textarea').forEach(function(el){ el.disabled = !on; });
     });
+    syncVoxelMode(form);
   }
+  // When "自動體素大小" is on, the mesh script computes voxel_size itself and derives
+  // sdf_trunc from it (4×) — a manual voxel_size > 0 would silently override auto.
+  // So disable (= don't submit) those two fields while auto is checked; the 0.006
+  // default only takes effect once the user unchecks auto.
+  function syncVoxelMode(form){
+    var sel = document.getElementById(form + '_backend');
+    if (!sel) return;
+    var bp = document.querySelector('#form-' + form + ' .bp[data-backend="' + sel.value + '"]');
+    if (!bp) return;
+    var auto = bp.querySelector('[name="auto_voxel"]');
+    if (!auto) return;
+    bp.querySelectorAll('[name="voxel_size"],[name="sdf_trunc"]').forEach(function(el){
+      el.disabled = auto.checked;
+    });
+  }
+  document.addEventListener('change', function(e){
+    if (e.target && e.target.name === 'auto_voxel'){
+      var f = e.target.closest('form');
+      if (f && f.id.indexOf('form-') === 0) syncVoxelMode(f.id.slice(5));
+    }
+  });
   // chain: COLMAP done -> training, prefilled (source = workspace; resolver finds
   // the undistorted *_mapper dir; output defaults to <workspace>_gs2m).
   function fillTrain(workspace){
@@ -523,6 +547,21 @@
     pre.dataset.lastProg = isProg ? '1' : '0';
   }
   function refreshJoblist(){ htmx.ajax('GET', '/ui/joblist', {target:'#joblist', swap:'innerHTML'}); }
+  // History filter by kind (frames/colmap/train/mesh). Persisted across the 3s
+  // auto-refresh and re-applied in htmx:afterSwap below.
+  window._jobFilter = window._jobFilter || 'all';
+  function filterJobs(kind){ window._jobFilter = kind; applyJobFilter(); }
+  function applyJobFilter(){
+    var f = window._jobFilter || 'all';
+    // selected kind vanished (e.g. all those jobs deleted) -> fall back to 全部
+    if (f !== 'all' && !document.querySelector('#joblist .jf[data-filter="' + f + '"]')) f = window._jobFilter = 'all';
+    document.querySelectorAll('#joblist tbody tr').forEach(function(tr){
+      tr.style.display = (f === 'all' || tr.getAttribute('data-kind') === f) ? '' : 'none';
+    });
+    document.querySelectorAll('#joblist .jf').forEach(function(b){
+      b.classList.toggle('active', b.getAttribute('data-filter') === f);
+    });
+  }
   function toggleAllJobs(cb){ document.querySelectorAll('.jobsel').forEach(x => x.checked = cb.checked); }
   function deleteSelected(){
     var ids = Array.from(document.querySelectorAll('.jobsel:checked')).map(x => x.value);
@@ -547,9 +586,10 @@
       var box = t.querySelector('[data-log-job]');
       if (box) startLogStream(box.getAttribute('data-log-job'));
     }
-    if (t && t.id === 'joblist'){           // restore selection + scroll after live refresh
+    if (t && t.id === 'joblist'){           // restore selection + scroll + filter after live refresh
       document.querySelectorAll('.jobsel').forEach(x => { if (window._jobSel.has(x.value)) x.checked = true; });
       var sc = t.closest('.col'); if (sc) sc.scrollTop = window._jobScroll;
+      applyJobFilter();
     }
   });
 </script>

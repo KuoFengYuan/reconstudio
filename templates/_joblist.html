@@ -7,6 +7,14 @@
 {% if not jobs %}
 <p class="hint">尚無 job。</p>
 {% else %}
+{% set kinds = [('frames','🎬','抽幀'),('colmap','📐','COLMAP'),('train','🧠','訓練'),('mesh','🧩','Mesh')] %}
+<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+  <button class="ghost jf" data-filter="all" onclick="filterJobs('all')">全部 ({{ jobs|length }})</button>
+  {% for k, emo, lab in kinds %}
+    {% set n = jobs|selectattr('kind','equalto',k)|list|length %}
+    {% if n %}<button class="ghost jf" data-filter="{{ k }}" onclick="filterJobs('{{ k }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
+  {% endfor %}
+</div>
 <table style="width:100%;border-collapse:collapse;font-size:13px">
   <thead><tr style="color:var(--mut);text-align:left">
     <th style="padding:6px 8px"><input type="checkbox" onclick="toggleAllJobs(this)"></th>
@@ -14,7 +22,7 @@
   </tr></thead>
   <tbody>
   {% for j in jobs %}
-  <tr style="border-top:1px solid var(--line)">
+  <tr data-kind="{{ j.kind }}" style="border-top:1px solid var(--line)">
     <td style="padding:6px 8px"><input type="checkbox" class="jobsel" value="{{ j.id }}"></td>
     <td>
       <span style="background:{{ badge[j.status] }};color:#0a0c10;font-weight:600;
