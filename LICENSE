@@ -1,0 +1,39 @@
+Recon Studio — License
+======================
+
+Copyright (c) 2026 KuoFengYuan <cses955203@gmail.com>
+
+Recon Studio is the orchestration / web-UI code in this repository (the
+"Software"). It drives external tools and trainers — notably COLMAP and
+GS-2M / 3D Gaussian Splatting — which are NOT included in this repository and
+are each governed by their own licenses (see THIRD_PARTY_NOTICES.md).
+
+Because the Software's primary trainer dependency, GS-2M / 3D Gaussian
+Splatting, is licensed by Inria and the Max Planck Institut for Informatik
+(MPII) for non-commercial, research and evaluation use only, the Software is
+released under the same spirit:
+
+1. Permission is granted, free of charge, to any person obtaining a copy of the
+   Software, to use, copy, modify and distribute it for NON-COMMERCIAL,
+   research and evaluation purposes only.
+
+2. Use of the integrated third-party components (COLMAP, FFmpeg, GS-2M /
+   3D Gaussian Splatting, and others listed in THIRD_PARTY_NOTICES.md) remains
+   subject to their respective licenses; you are responsible for complying with
+   them. In particular, GS-2M / 3D Gaussian Splatting may NOT be used for
+   commercial purposes.
+
+3. Redistributions, in source or modified form, must retain this notice and
+   THIRD_PARTY_NOTICES.md.
+
+4. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+For commercial licensing of the Gaussian-Splatting technology, contact the
+Inria licensor — see GS-2M's LICENSE.md and
+https://github.com/graphdeco-inria/gaussian-splatting.

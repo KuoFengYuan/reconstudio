@@ -273,3 +273,12 @@ form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX
 | `templates/` | `index.html` (4 forms) + htmx partials + `viz.html` (three.js) + `doctor.html` |
 | `backends.example.json` | template for per-machine `backends.json` (gitignored) |
 | `run.sh` + `local.env.example` | launcher with auto-detected defaults; per-machine overrides |
+
+## License
+
+Recon Studio's own code is released for **non-commercial, research and evaluation
+use** ([`LICENSE`](LICENSE)), mirroring its core trainer dependency. It integrates
+third-party tools under their own licenses ([`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)) —
+notably **GS-2M / 3D Gaussian Splatting (Inria, non-commercial)**, COLMAP (BSD),
+and FFmpeg (LGPL/GPL). The training & mesh stages are therefore non-commercial;
+for commercial use of the Gaussian-Splatting technology, contact Inria.
