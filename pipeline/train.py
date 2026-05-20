@@ -15,14 +15,21 @@ is the single most common way this integration goes wrong.
 """
 from __future__ import annotations
 
+import json
+import re
 import shlex
 from pathlib import Path
 
 from .backends import env_python, get_backend, repo_path
 from .model import read_cameras
-from .runner import Runner
+from .runner import Cancelled, Runner
 
 TRAIN_DEFAULTS = {"backend": "gs2m", "gpu": "0", "extra": "", "force": False}
+
+# Marker-scaling tools are panel-owned (live in this project's tools/), but run
+# in the backend's env (they need cv2/open3d/plyfile, which the trainer env has).
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+MARKER_SCRIPT, SCALE_SCRIPT = "estimate_marker_scale.py", "scale_mesh.py"
 
 _NEEDED = ("cameras.bin", "images.bin", "points3D.bin")
 _PINHOLE = {"PINHOLE", "SIMPLE_PINHOLE"}
@@ -127,6 +134,67 @@ def run_train(p: dict, r: Runner) -> None:
         r.log(f"[next] 可在「Mesh」分頁對 {out} 抽 mesh（此 backend 支援）")
 
 
+def _scene_from_model(out: Path) -> Path:
+    """Find the COLMAP scene a model was trained on. Prefer the source_path
+    recorded in the model's cfg_args (ground truth), fall back to the panel's
+    `<model>_scene` convention from _build_scene."""
+    cfg = out / "cfg_args"
+    if cfg.is_file():
+        m = re.search(r"source_path\s*=\s*'([^']*)'", cfg.read_text())
+        if m and m.group(1):
+            return Path(m.group(1))
+    return out.parent / f"{out.name}_scene"
+
+
+def _run_marker_scale(p: dict, r: Runner, py: Path, mesh_ply: Path) -> None:
+    """If a ChArUco marker board was captured, estimate the recon→mm scale from it
+    and write a physically-scaled copy of the mesh (in millimetres) next to it.
+
+    The tools are panel-owned (tools/) but run with the backend's env python `py`
+    (they need cv2/open3d/plyfile, which the trainer env provides)."""
+    mk = p.get("marker") or {}
+    out = Path(p["model_path"])
+    scene = _scene_from_model(out)
+    sparse, images = scene / "sparse" / "0", scene / "images"
+    if not (sparse / "cameras.bin").is_file() or not images.exists():
+        raise FileNotFoundError(
+            f"找不到場景的 sparse/0 與 images（{scene}）。此模型可能不是用本面板訓練的,"
+            " 無法定位 COLMAP 場景做標定。")
+    for s in (MARKER_SCRIPT, SCALE_SCRIPT, "colmap_read_write_model.py"):
+        if not (TOOLS_DIR / s).is_file():
+            raise FileNotFoundError(f"找不到標定工具: {TOOLS_DIR / s}")
+
+    env = {"PYTHONUNBUFFERED": "1"}
+    scale_json = mesh_ply.parent / "marker_scale.json"
+    r.banner("marker scale | 偵測標定板、估算尺度")
+    est = [str(py), "-u", str(TOOLS_DIR / MARKER_SCRIPT),
+           "--sparse", str(sparse), "--images", str(images),
+           "--squares-x", str(mk["squares_x"]), "--squares-y", str(mk["squares_y"]),
+           "--square-mm", str(mk["square_mm"]), "--marker-mm", str(mk["marker_mm"]),
+           "--dict", str(mk.get("dict") or "DICT_5X5_100"),
+           "--out-json", str(scale_json)]
+    r.log("estimate: " + " ".join(est))
+    r.run(est, cwd=str(TOOLS_DIR), env=env)
+
+    data = json.loads(scale_json.read_text())
+    mm_per_unit = float(data["mm_per_unit"])
+    r.log(f"[scale] mm_per_unit={mm_per_unit:.6f}  rel_mad={data.get('rel_mad_pct', float('nan')):.3f}%"
+          f"  pairs={data.get('pairs')}")
+
+    scaled = mesh_ply.with_name(mesh_ply.stem + "_scaled_mm.ply")
+    r.banner("marker scale | 套用尺度,輸出 mm 實際尺寸 mesh")
+    sc = [str(py), "-u", str(TOOLS_DIR / SCALE_SCRIPT),
+          "--in", str(mesh_ply), "--out", str(scaled),
+          "--mm-per-unit", f"{mm_per_unit:.8f}", "--target-unit", "mm", "--force"]
+    r.log("scale: " + " ".join(sc))
+    r.run(sc, cwd=str(TOOLS_DIR), env=env)
+    if scaled.is_file():
+        r.log(f"[mesh] scaled result: {scaled}")
+        r.log(f"[mesh] scale: 1 recon unit = {mm_per_unit:.4f} mm（mesh 已換算為實際 mm）")
+    else:
+        r.log("[mesh] warning: 縮放後的 mesh 沒產出,請檢查上面的輸出。")
+
+
 def run_mesh(p: dict, r: Runner) -> None:
     """Extract a triangle mesh from a trained model. Backend-specific: only runs
     for backends that declare `mesh_args` (e.g. GS-2M's render.py --extract_mesh)."""
@@ -168,7 +236,16 @@ def run_mesh(p: dict, r: Runner) -> None:
     # render.py writes to <out>/<split>/<label>_<iter>/mesh/tsdf_post.ply
     found = sorted(out.glob("*/*/mesh/tsdf_post.ply"))
     if found:
-        r.log(f"[mesh] result: {found[-1]}")
+        mesh_ply = found[-1]
+        r.log(f"[mesh] result: {mesh_ply}")
+        if (p.get("marker") or {}).get("enable"):
+            try:
+                _run_marker_scale(p, r, py, mesh_ply)
+            except Cancelled:
+                raise
+            except Exception as exc:   # keep the (valid) unscaled mesh; just flag scaling
+                r.banner("marker scale 失敗 — 保留未縮放的 mesh")
+                r.log(f"[mesh] marker scale 失敗: {exc}")
     else:
         r.log("[mesh] warning: 找不到 tsdf_post.ply,請檢查上面的 render 輸出。")
     r.banner(f"mesh done. model={out}")

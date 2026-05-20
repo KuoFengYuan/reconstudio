@@ -355,6 +355,39 @@
         {% endif %}
       </fieldset>
 
+      {% set marker_backends = mesh_backends | selectattr('marker') | list %}
+      {% if marker_backends %}
+      <details class="grp">
+        <summary>Marker 量測標定（產出實際尺寸 mesh）</summary>
+        <div class="gbody">
+          <label class="checks"><input type="checkbox" name="marker_enable" value="1">
+            提供 marker（抽完 mesh 後自動依標定板換算成實際 mm 尺寸）</label>
+          <div class="hint">場景中需放一塊 ChArUco 標定板。勾選後會自動偵測板子、估算尺度,輸出
+            <code>tsdf_post_scaled_mm.ply</code>（單位 mm）。<b>不需手動填數值</b> — 使用下列已設定的板子規格:</div>
+          {% for b in marker_backends %}
+          <div class="hint" data-mk="{{ b.name }}">📐 規格:{{ b.marker_defaults.squares_x }}×{{ b.marker_defaults.squares_y }} 格 ·
+            方格 {{ b.marker_defaults.square_mm }}mm · marker {{ b.marker_defaults.marker_mm }}mm ·
+            {{ b.marker_defaults.dict }}　<span style="opacity:.7">（在 backends.json 改,或下方臨時覆寫）</span></div>
+          {% endfor %}
+          <details class="grp" style="margin-top:8px">
+            <summary>進階:臨時覆寫板子規格（留空 = 用上面設定）</summary>
+            <div class="gbody">
+              <div class="row">
+                <div style="flex:1"><label>方格數 X</label><input name="marker_squares_x" placeholder="預設"></div>
+                <div style="flex:1"><label>方格數 Y</label><input name="marker_squares_y" placeholder="預設"></div>
+              </div>
+              <div class="row">
+                <div style="flex:1"><label>方格邊長 (mm)</label><input name="marker_square_mm" placeholder="預設"></div>
+                <div style="flex:1"><label>marker 邊長 (mm)</label><input name="marker_marker_mm" placeholder="預設"></div>
+              </div>
+              <label>ArUco 字典</label>
+              <input name="marker_dict" placeholder="預設（如 DICT_5X5_100）">
+            </div>
+          </details>
+        </div>
+      </details>
+      {% endif %}
+
       {% for b in mesh_backends %}
       <div class="bp" data-backend="{{ b.name }}" {{ '' if loop.first else 'style=display:none' }}>
         <fieldset>

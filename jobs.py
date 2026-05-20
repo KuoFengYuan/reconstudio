@@ -75,6 +75,8 @@ _TR_PHASES = [
 
 # --- mesh parsing ----------------------------------------------------------- #
 _ME_RESULT = re.compile(r"\[mesh\] result:\s*(\S+)")
+_ME_SCALED = re.compile(r"\[mesh\] scaled result:\s*(\S+)")
+_ME_SCALE = re.compile(r"mm_per_unit=([0-9.]+)")
 _ME_VERT = re.compile(r"Num vertices post:\s*(\d+)")
 _ME_EXTRACT = re.compile(r"Extracting mesh from TSDF")
 _ME_PHASES = [
@@ -193,6 +195,13 @@ def _parse_mesh(job: Job, line: str) -> None:
     if m:
         job.meta["mesh_path"] = m.group(1)
         job.current_stage = "done"
+    m = _ME_SCALE.search(line)
+    if m:
+        job.meta["mm_per_unit"] = float(m.group(1))
+    m = _ME_SCALED.search(line)
+    if m:
+        job.meta["mesh_scaled_path"] = m.group(1)
+        job.meta["phase"] = "已縮放 (mm)"
 
 
 PARSERS: dict[str, Callable[[Job, str], None]] = {

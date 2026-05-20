@@ -73,6 +73,35 @@ def _scene_label(path: str) -> str:
     return f"{p.parent.name}/{p.name}" if p.parent.name else p.name
 
 
+def _parse_marker(form: dict, spec: dict) -> dict | None:
+    """Build the marker-scaling config when「提供 marker」is ticked, else None.
+
+    The board geometry is taken from the backend's configured `marker_defaults`
+    (so the user never types numbers — that's the whole point). A per-job text
+    field may override any value, but blank means "use the configured default"."""
+    if not form.get("marker_enable"):
+        return None
+    d = dict(spec.get("marker_defaults") or {})
+    if not d:
+        raise ValueError("此 backend 未設定標定板規格 (marker_defaults);請在 backends.json 補上後再用。")
+
+    def pick(key):  # per-job override (text field) wins over the configured default
+        v = (form.get("marker_" + key) or "").strip()
+        return v if v else d.get(key)
+    try:
+        sx, sy = int(pick("squares_x")), int(pick("squares_y"))
+        sq, mk = float(pick("square_mm")), float(pick("marker_mm"))
+    except (TypeError, ValueError):
+        raise ValueError("marker 覆寫值需為數字 (方格數為整數、邊長 mm 為數值),或留空用預設規格。")
+    if min(sx, sy) < 2 or min(sq, mk) <= 0:
+        raise ValueError("marker 參數不合理:方格數需 ≥ 2,邊長 (mm) 需 > 0。")
+    if mk >= sq:
+        raise ValueError("marker 邊長應小於方格邊長 (ChArUco marker 嵌在方格內)。")
+    return {"enable": True, "squares_x": sx, "squares_y": sy,
+            "square_mm": sq, "marker_mm": mk,
+            "dict": str(pick("dict") or "DICT_5X5_100").strip()}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return _page(request, "index.html", colmap_defaults=COLMAP_DEFAULTS,
@@ -282,14 +311,17 @@ async def create_mesh(request: Request):
         cli = build_cli(spec.get("mesh_params", []), form)
         params = {"backend": backend, "model_path": model, "gpu": gpu,
                   "args": cli, "extra": extra}
+        marker = _parse_marker(form, spec)   # optional ChArUco scaling -> mm mesh
+        if marker:
+            params["marker"] = marker
     except ValueError as exc:
         return _page(request, "_error.html", message=str(exc))
 
     job = Job(id=new_id(), kind="mesh",
-              title=f"mesh · {_scene_label(model)}",
+              title=f"mesh · {_scene_label(model)}" + (" · scaled" if marker else ""),
               subtitle=f"{model}  (gpu={gpu or 'default'})",
               params=params, mirror=str(Path(model) / "mesh.log"),
-              meta={"model_path": model, "backend": backend})
+              meta={"model_path": model, "backend": backend, "marker": bool(marker)})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
@@ -449,6 +481,25 @@ async def mesh_ply(job_id: str):
         path = cands[-1] if cands else None
     if not (path and path.is_file()):
         raise HTTPException(404, "mesh not found (尚未產出或已被移動)")
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+@app.get("/api/jobs/{job_id}/mesh_scaled.ply")
+async def mesh_scaled_ply(job_id: str):
+    """Serve the marker-scaled mesh (tsdf_post_scaled_mm.ply, in millimetres)."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job.kind != "mesh":
+        raise HTTPException(404, "not a mesh job")
+    p = (job.meta or {}).get("mesh_scaled_path")
+    path = Path(p) if p else None
+    if not (path and path.is_file()):
+        model = Path((job.meta or {}).get("model_path", ""))
+        cands = sorted(model.glob("*/*/mesh/tsdf_post_scaled_mm.ply")) if str(model) else []
+        path = cands[-1] if cands else None
+    if not (path and path.is_file()):
+        raise HTTPException(404, "scaled mesh not found (未啟用 marker 或縮放失敗)")
     return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 

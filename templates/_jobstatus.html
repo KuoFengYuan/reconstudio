@@ -73,6 +73,14 @@
       <a href="/api/jobs/{{ job.id }}/mesh.ply" download
          style="display:inline-block;background:var(--panel2);color:var(--fg);border:1px solid var(--line2);
                 border-radius:7px;padding:7px 11px;text-decoration:none;font-weight:500">⬇ 下載 tsdf_post.ply</a>
+      {% if job.meta.get('mesh_scaled_path') %}
+      <a href="/api/jobs/{{ job.id }}/mesh_scaled.ply" download
+         style="display:inline-block;background:var(--accent);color:#0a0c10;border:1px solid var(--accent);
+                border-radius:7px;padding:7px 11px;text-decoration:none;font-weight:600">⬇ 下載實際尺寸 mesh (mm)</a>
+      {% if job.meta.get('mm_per_unit') %}
+      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
+        1 unit = {{ '%.4f'|format(job.meta.mm_per_unit) }} mm</span>{% endif %}
+      {% endif %}
       <span class="hint"><code>{{ job.meta.get('mesh_path') or (job.meta.get('model_path','') ~ '/train/ours_*/mesh/tsdf_post.ply') }}</code></span>
     </div>
     {% endif %}

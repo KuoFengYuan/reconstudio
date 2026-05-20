@@ -98,6 +98,16 @@ BUILTIN_BACKENDS: dict[str, dict] = {
         # --- mesh extraction (render.py --extract_mesh) ---
         "mesh_script": "render.py",
         "mesh_args": "-m {out} --extract_mesh --skip_test {args} {extra}",
+        # Optional marker-board scaling: when the Mesh form's「提供 marker」is on,
+        # run_mesh runs the panel's tools/estimate_marker_scale.py + scale_mesh.py
+        # (panel-owned) using this backend's env. A backend opts in just by
+        # declaring the physical ChArUco board geometry below — applied
+        # automatically (no manual entry). Override per machine in backends.json.
+        "marker_defaults": {
+            "squares_x": 9, "squares_y": 6,
+            "square_mm": 28.806, "marker_mm": 21.12,
+            "dict": "DICT_5X5_100",
+        },
         "mesh_params": [
             {"key": "mesh_only", "flag": "--mesh_only", "type": "bool", "default": True,
              "label": "只抽 mesh（加速）",
@@ -223,6 +233,11 @@ def available_backends() -> list[dict]:
             # supports it only if it declares mesh_args. gsplat & co. won't.
             "mesh": bool(spec.get("mesh_args")),
             "mesh_params": spec.get("mesh_params", []),
+            # marker-board scaling: a backend opts in by declaring a board geometry
+            # (marker_defaults). The scripts are panel-owned (tools/) and run in
+            # this backend's env. The UI shows a checkbox + the configured spec.
+            "marker": bool(spec.get("marker_defaults")),
+            "marker_defaults": spec.get("marker_defaults", {}),
         })
     return res
 
