@@ -418,6 +418,21 @@ async def viz(request: Request, job_id: str):
     return _page(request, "viz.html", job=job.to_dict(), has_model=bool(_model_dir(job)))
 
 
+@app.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
+async def mesh_viz(request: Request, job_id: str):
+    """In-browser mesh viewer (orbit/zoom + mm ruler). Lets the user switch
+    between the raw (recon-unit) mesh and the marker-scaled (mm) mesh."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job.kind != "mesh":
+        raise HTTPException(404, "not a mesh job")
+    meta = job.meta or {}
+    return _page(request, "mesh_viz.html", job=job.to_dict(),
+                 has_scaled=bool(meta.get("mesh_scaled_path")),
+                 mm_per_unit=meta.get("mm_per_unit"))
+
+
 @app.get("/api/jobs/{job_id}/scene.json")
 async def scene_json(job_id: str):
     job = manager.get(job_id)

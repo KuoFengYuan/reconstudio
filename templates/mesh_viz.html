@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesh · {{ job.title }}</title>
+<style>
+  :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#c9d1d9; --panel:rgba(22,26,33,.92);
+          --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  html,body { margin:0; height:100%; background:#0b0d11; color:var(--fg); overflow:hidden;
+              font:13px/1.45 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif; }
+  #c { position:fixed; inset:0; display:block; }
+  #gui { position:fixed; top:10px; right:10px; width:250px; background:var(--panel);
+         border:1px solid var(--line); border-radius:10px; backdrop-filter:blur(6px);
+         box-shadow:0 6px 24px rgba(0,0,0,.4); overflow:hidden; }
+  #gui .hd { display:flex; align-items:center; gap:8px; padding:9px 11px; cursor:pointer;
+             border-bottom:1px solid var(--line); user-select:none; }
+  #gui .hd b { font-size:13px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #gui .bd { padding:10px 11px; }
+  #gui.collapsed .bd { display:none; }
+  .stat { display:flex; justify-content:space-between; color:var(--mut); margin:1px 0; }
+  .stat b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  .ctl { margin-top:11px; }
+  .ctl > label { display:block; color:var(--mut); margin-bottom:4px; }
+  .seg { display:flex; gap:0; margin-top:6px; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg button { flex:1; background:transparent; color:var(--mut); border:0; border-radius:0; padding:6px 4px; }
+  .seg button.on { background:var(--accent); color:#0a0c10; font-weight:600; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  .rowbtn { display:flex; gap:10px; align-items:center; margin-top:11px; flex-wrap:wrap; }
+  .rowbtn label { display:flex; align-items:center; gap:5px; color:var(--mut); }
+  .rowbtn input { accent-color:var(--accent); }
+  button { background:#222733; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:5px 10px; cursor:pointer; font:inherit; }
+  button:hover { filter:brightness(1.2); }
+  button.go { background:var(--accent); color:#0a0c10; border-color:var(--accent); font-weight:600; }
+  #measbox { margin-top:11px; border-top:1px solid var(--line); padding-top:10px; }
+  #measval { color:var(--accent); font-size:20px; font-weight:700; font-variant-numeric:tabular-nums; }
+  #measval small { color:var(--mut); font-size:12px; font-weight:500; }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+             color:var(--mut); pointer-events:none; font-size:13px; }
+  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; color:var(--err); padding:20px; text-align:center; }
+  #hint { position:fixed; left:12px; bottom:10px; color:var(--mut); font-size:11px; }
+  #mlabel { position:fixed; transform:translate(-50%,-50%); background:var(--panel); border:1px solid var(--accent);
+            color:var(--fg); border-radius:6px; padding:2px 7px; font-size:12px; font-weight:600; display:none;
+            pointer-events:none; white-space:nowrap; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="loading">● 載入 mesh 中…</div>
+<div id="err"></div>
+<div id="mlabel"></div>
+<div id="gui">
+  <div class="hd" onclick="document.getElementById('gui').classList.toggle('collapsed')">
+    <span>▾</span><b>🧩 {{ job.title }}</b>
+  </div>
+  <div class="bd">
+    <div class="stat"><span>頂點</span><b id="s-v">…</b></div>
+    <div class="stat"><span>三角面</span><b id="s-f">…</b></div>
+    <div class="stat"><span>尺寸</span><b id="s-dim">…</b></div>
+    <div class="stat"><span>對角線</span><b id="s-diag">…</b></div>
+
+    {% if has_scaled %}
+    <div class="ctl"><label>顯示版本</label>
+      <div class="seg" id="src">
+        <button data-src="scaled" class="on">實際尺寸 (mm)</button>
+        <button data-src="raw">原始 (recon)</button>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="ctl"><label>亮度 <span id="lit-v">1.0</span></label>
+      <input id="lit" type="range" min="0.4" max="2.6" step="0.1" value="1.0"></div>
+
+    <div class="ctl"><label>顯示 / 對齊</label>
+      <div class="rowbtn">
+        <label><input id="wire" type="checkbox"> 線框</label>
+        <label><input id="vcol" type="checkbox" checked> 頂點色</label>
+        <label><input id="whitebg" type="checkbox"> 白底</label>
+      </div>
+      <div class="rowbtn">
+        <label><input id="rot-obj" type="checkbox"> 🔄 旋轉物體(對齊)</label>
+      </div>
+    </div>
+
+    <div id="measbox">
+      <div class="rowbtn" style="margin-top:0">
+        <label><input id="meas" type="checkbox"> 📏 量尺</label>
+        <button id="meas-clear" style="margin-left:auto">清除</button>
+      </div>
+      <div style="margin-top:8px"><span id="measval">—</span></div>
+      <div class="stat" style="margin-top:2px"><span id="meas-hint" class="hint">開啟後點兩個面上的點量距離</span></div>
+    </div>
+
+    <div class="rowbtn">
+      <button class="go" id="reset">重置視角</button>
+      <button id="reset-rot">歸零旋轉</button>
+    </div>
+  </div>
+</div>
+<div id="hint">拖曳=旋轉(360°) · 滾輪=縮放 · 右鍵=平移 · 開「量尺」後單擊面上兩點量距離</div>
+
+<script type="importmap">
+{ "imports": { "three": "/static/three/three.module.js",
+               "three/addons/": "/static/three/addons/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+
+const JOB = "{{ job.id }}";
+const HAS_SCALED = {{ has_scaled | tojson }};
+// Each version shows its file's NATIVE units: scaled = real mm, raw = arbitrary
+// COLMAP/recon units (NOT converted) — so the two genuinely differ.
+const SOURCES = {
+  raw:    { url: `/api/jobs/${JOB}/mesh.ply`,        unit: 'units' },
+  scaled: { url: `/api/jobs/${JOB}/mesh_scaled.ply`, unit: 'mm' },
+};
+let curSrc = HAS_SCALED ? 'scaled' : 'raw';
+const unit = () => SOURCES[curSrc].unit;
+
+const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias:true});
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b0d11);
+
+// Lighting: ambient + sky/ground + a headlight that follows the camera. A lit
+// mesh would otherwise look muddy vs. the unlit point cloud, so this is fairly
+// bright and the 亮度 slider scales all three together.
+const ambient = new THREE.AmbientLight(0xffffff, 0.55); scene.add(ambient);
+const hemi = new THREE.HemisphereLight(0xffffff, 0x666c77, 1.3); scene.add(hemi);
+const head = new THREE.DirectionalLight(0xffffff, 1.7); scene.add(head);
+const BASE_LIT = { a: 0.55, h: 1.3, d: 1.7 };
+function setBrightness(m){ ambient.intensity = BASE_LIT.a*m; hemi.intensity = BASE_LIT.h*m; head.intensity = BASE_LIT.d*m; }
+
+// obj -> flip(180° about X: COLMAP Y-down -> three Y-up) -> inner(-centre) -> mesh
+const obj = new THREE.Group();   scene.add(obj);
+const flip = new THREE.Group();  flip.rotation.x = Math.PI; obj.add(flip);
+const inner = new THREE.Group(); flip.add(inner);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.001, 1e7);
+const controls = new TrackballControls(camera, renderer.domElement);
+controls.rotateSpeed = 3.0; controls.zoomSpeed = 1.3; controls.panSpeed = 0.9;
+controls.staticMoving = false; controls.dynamicDampingFactor = 0.15;
+
+const gizmo = new TransformControls(camera, renderer.domElement);
+gizmo.setMode('rotate'); gizmo.setSize(0.9); gizmo.attach(obj);
+gizmo.enabled = gizmo.visible = false; scene.add(gizmo);
+gizmo.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
+
+const viewHelper = new ViewHelper(camera, renderer.domElement);
+viewHelper.center = controls.target;
+document.addEventListener('pointerup', e => viewHelper.handleClick(e));
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); controls.handleResize();
+});
+
+const flipW = v => new THREE.Vector3(v.x, -v.y, -v.z);
+let mesh, material, sceneSize = 1, centerC = new THREE.Vector3();
+const geoCache = {};
+
+function setStats(geo){
+  const nV = geo.attributes.position.count;
+  const nF = geo.index ? geo.index.count/3 : nV/3;
+  geo.computeBoundingBox();
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  const u = unit(), dp = u === 'mm' ? 1 : 3;     // recon units are small -> more decimals
+  document.getElementById('s-v').textContent = nV.toLocaleString();
+  document.getElementById('s-f').textContent = Math.round(nF).toLocaleString();
+  document.getElementById('s-dim').textContent =
+    `${sz.x.toFixed(dp)} × ${sz.y.toFixed(dp)} × ${sz.z.toFixed(dp)} ${u}`;
+  document.getElementById('s-diag').textContent = `${sz.length().toFixed(dp)} ${u}`;
+}
+
+function fitView(geo){
+  geo.computeBoundingBox();
+  geo.boundingBox.getCenter(centerC);
+  const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
+  sceneSize = Math.max(sz.x, sz.y, sz.z) || 1;
+  inner.position.copy(centerC).multiplyScalar(-1);
+  obj.position.copy(flipW(centerC));
+  obj.updateMatrixWorld(true);
+  const tgt = obj.position.clone();
+  controls.target.copy(tgt);
+  camera.up.set(0,1,0);
+  camera.position.set(tgt.x + sceneSize*0.6, tgt.y + sceneSize*0.45, tgt.z + sceneSize*1.2);
+  camera.near = sceneSize/1000; camera.far = sceneSize*100; camera.updateProjectionMatrix();
+  controls.update();
+}
+
+function applyColorMode(){
+  if (!material || !mesh) return;
+  const on = document.getElementById('vcol').checked && !!mesh.geometry.attributes.color;
+  material.vertexColors = on;
+  material.color.setHex(on ? 0xffffff : 0xb8c0cc);   // white = don't tint/darken vertex colours
+  material.needsUpdate = true;
+}
+function buildMesh(geo){
+  if (mesh){ inner.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
+  if (!geo.attributes.normal) geo.computeVertexNormals();
+  const hasColor = !!geo.attributes.color;
+  material = new THREE.MeshStandardMaterial({
+    color: 0xffffff, metalness: 0.0, roughness: 0.8, side: THREE.DoubleSide,
+    wireframe: document.getElementById('wire').checked, flatShading: false });
+  mesh = new THREE.Mesh(geo, material); inner.add(mesh);
+  document.getElementById('vcol').disabled = !hasColor;
+  applyColorMode();
+  setStats(geo);
+  clearMeasure();
+}
+
+function load(src){
+  curSrc = src;
+  document.getElementById('loading').style.display = 'flex';
+  const done = geo => { document.getElementById('loading').style.display = 'none'; buildMesh(geo); fitView(geo); };
+  if (geoCache[src]) { done(geoCache[src]); return; }
+  new PLYLoader().load(SOURCES[src].url,
+    geo => { geoCache[src] = geo; done(geo); },
+    undefined,
+    () => { document.getElementById('loading').style.display = 'none';
+            const e = document.getElementById('err'); e.style.display = 'flex';
+            e.textContent = `載入失敗:${SOURCES[src].url}`; });
+}
+
+// ---- measure tool (ruler) ------------------------------------------------- //
+const raycaster = new THREE.Raycaster();
+const measGroup = new THREE.Group(); inner.add(measGroup);
+let measPts = [], downXY = null, whiteBg = false;
+const measColor = () => whiteBg ? 0x1a1a1a : 0xffffff;   // contrast vs. background
+
+function clearMeasure(){
+  measGroup.clear();
+  measPts = [];
+  document.getElementById('measval').textContent = '—';
+  document.getElementById('mlabel').style.display = 'none';
+}
+function marker(p){
+  const m = new THREE.Mesh(new THREE.SphereGeometry(sceneSize*0.012, 16, 12),
+                           new THREE.MeshBasicMaterial({color:measColor()}));
+  m.position.copy(p); measGroup.add(m); return m;
+}
+function addMeasurePoint(worldPt){
+  const lp = inner.worldToLocal(worldPt.clone());
+  if (measPts.length === 2) clearMeasure();          // 3rd click -> start over
+  measPts.push(lp); marker(lp);
+  if (measPts.length === 2){
+    const g = new THREE.BufferGeometry().setFromPoints(measPts);
+    measGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({color:measColor()})));
+    const d = measPts[0].distanceTo(measPts[1]);   // current file's native units (no scale in graph)
+    document.getElementById('measval').innerHTML = `${d.toFixed(2)} <small>${unit()}</small>`;
+  }
+}
+renderer.domElement.addEventListener('pointerdown', e => { downXY = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!document.getElementById('meas').checked || !mesh || !downXY) return;
+  const moved = Math.hypot(e.clientX - downXY[0], e.clientY - downXY[1]);
+  downXY = null;
+  if (moved > 5) return;                              // it was a drag (orbit), not a pick
+  const r = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((e.clientX-r.left)/r.width)*2-1, -((e.clientY-r.top)/r.height)*2+1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObject(mesh, false)[0];
+  if (hit) addMeasurePoint(hit.point);
+});
+
+// ---- UI wiring ------------------------------------------------------------ //
+{% if has_scaled %}
+document.querySelectorAll('#src button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#src button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); load(b.dataset.src);
+});
+{% endif %}
+document.getElementById('wire').onchange = e => { if (material) material.wireframe = e.target.checked; };
+document.getElementById('vcol').onchange = applyColorMode;
+document.getElementById('lit').oninput = e => {
+  setBrightness(+e.target.value); document.getElementById('lit-v').textContent = (+e.target.value).toFixed(1); };
+document.getElementById('whitebg').onchange = e => {
+  whiteBg = e.target.checked;
+  scene.background = new THREE.Color(whiteBg ? 0xf2f2f2 : 0x0b0d11);
+  measGroup.traverse(o => { if (o.material && o.material.color) o.material.color.setHex(measColor()); });
+};
+document.getElementById('rot-obj').onchange = e => { gizmo.enabled = gizmo.visible = e.target.checked; };
+document.getElementById('meas').onchange = e => {
+  document.getElementById('meas-hint').textContent = e.target.checked ? '單擊面上兩點 → 顯示距離(第三點重新量)' : '開啟後點兩個面上的點量距離'; };
+document.getElementById('meas-clear').onclick = clearMeasure;
+document.getElementById('reset').onclick = () => mesh && fitView(mesh.geometry);
+document.getElementById('reset-rot').onclick = () => { obj.quaternion.identity(); if (mesh) fitView(mesh.geometry); };
+
+const clock = new THREE.Clock();
+const mid = new THREE.Vector3();
+(function loop(){
+  requestAnimationFrame(loop);
+  head.position.copy(camera.position);                // headlight follows camera
+  if (viewHelper.animating) viewHelper.update(clock.getDelta()); else clock.getDelta();
+  controls.update();
+  // floating distance label at the segment midpoint
+  const lab = document.getElementById('mlabel');
+  if (measPts.length === 2){
+    mid.copy(measPts[0]).add(measPts[1]).multiplyScalar(0.5);
+    inner.localToWorld(mid); mid.project(camera);
+    if (mid.z < 1){
+      lab.style.display = 'block';
+      lab.style.left = ((mid.x*0.5+0.5)*innerWidth) + 'px';
+      lab.style.top  = ((-mid.y*0.5+0.5)*innerHeight) + 'px';
+      lab.textContent = document.getElementById('measval').textContent;
+    } else lab.style.display = 'none';
+  }
+  renderer.clear();
+  renderer.render(scene, camera);
+  viewHelper.render(renderer);
+})();
+
+load(curSrc);
+</script>
+</body>
+</html>

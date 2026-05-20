@@ -7,91 +7,65 @@
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
     <span style="background:{{ badge[job.status] }};color:#0a0c10;font-weight:600;
                  padding:2px 10px;border-radius:20px;font-size:12px">{{ job.status }}</span>
-    {% if job.returncode is not none %}<span class="hint">rc={{ job.returncode }}</span>{% endif %}
     {% if job.status in ['queued','running'] %}
     <button class="ghost" style="margin-left:auto;border-color:var(--err);color:var(--err)"
             hx-post="/api/jobs/{{ job.id }}/cancel" hx-swap="none">取消</button>
     {% endif %}
   </div>
 
+  {% if job.status == 'failed' and job.error %}
+  <div class="hint" style="color:var(--err);margin-bottom:10px;word-break:break-all">⚠ {{ job.error }}</div>
+  {% endif %}
+
   {% if job.kind == 'frames' %}
-    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      {% if job.meta.get('total') %}
-      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
-        影片 {{ job.meta.get('cur', 0) }}/{{ job.meta.total }}
-      </span>{% endif %}
+    <div class="chips">
+      {% if job.meta.get('total') %}<span class="chip">影片 {{ job.meta.get('cur', 0) }}/{{ job.meta.total }}</span>{% endif %}
       {% if job.meta.get('kept') is not none %}
-      <span style="border:1px solid var(--ok);color:var(--ok);border-radius:6px;padding:3px 9px;font-size:12px">
-        清晰 {{ job.meta.get('kept', 0) }}
-      </span>
-      <span style="border:1px solid var(--mut);color:var(--mut);border-radius:6px;padding:3px 9px;font-size:12px">
-        丟棄 {{ job.meta.get('dropped', 0) }}
-      </span>{% endif %}
+      <span class="chip ok">清晰 {{ job.meta.get('kept', 0) }}</span>
+      <span class="chip" style="color:var(--mut)">丟棄 {{ job.meta.get('dropped', 0) }}</span>{% endif %}
     </div>
     {% if job.status == 'done' %}
     <div style="margin-top:12px">
       <button onclick="fillColmap('{{ job.meta.out }}','{{ job.meta.ws }}')">▶ 接著跑 COLMAP（自動帶入 {{ job.meta.out }}）</button>
     </div>
     {% endif %}
+
   {% elif job.kind == 'train' %}
-    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      {% if job.meta.get('phase') %}
-      <span style="background:var(--accent);color:#0a0c10;border-radius:6px;padding:3px 9px;font-size:12px;font-weight:600">
-        {{ job.meta.phase }}
-      </span>{% endif %}
+    <div class="chips">
+      {% if job.meta.get('phase') %}<span class="chip accent">{{ job.meta.phase }}</span>{% endif %}
       {% if job.meta.get('iter') is not none %}
-      <span style="border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:3px 9px;font-size:12px">
-        iter {{ job.meta.get('iter', 0) }}{% if job.meta.get('total') %} / {{ job.meta.total }}{% endif %}
-      </span>{% endif %}
-      {% if job.meta.get('loss') %}
-      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
-        loss {{ job.meta.loss }}
-      </span>{% endif %}
+      <span class="chip" style="border-color:var(--accent);color:var(--accent)">iter {{ job.meta.get('iter', 0) }}{% if job.meta.get('total') %} / {{ job.meta.total }}{% endif %}</span>{% endif %}
+      {% if job.meta.get('loss') %}<span class="chip">loss {{ job.meta.loss }}</span>{% endif %}
       <span class="hint">backend: {{ job.meta.get('backend','') }}</span>
     </div>
     {% if job.status == 'done' %}
-    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span class="hint">✅ 模型輸出：<code>{{ job.meta.get('model_path','') }}</code></span>
-      {% if job.meta.get('can_mesh') %}
-      <button class="ghost" onclick="fillMesh('{{ job.meta.get('model_path','') }}')">🧩 接著抽 Mesh</button>
-      {% endif %}
-    </div>
+    {% if job.meta.get('can_mesh') %}
+    <div style="margin-top:12px"><button class="ghost" onclick="fillMesh('{{ job.meta.get('model_path','') }}')">🧩 接著抽 Mesh</button></div>
     {% endif %}
+    <div class="hint pathline">✅ 模型輸出：<code>{{ job.meta.get('model_path','') }}</code></div>
+    {% endif %}
+
   {% elif job.kind == 'mesh' %}
-    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-      <span style="background:var(--accent);color:#0a0c10;border-radius:6px;padding:3px 9px;font-size:12px;font-weight:600">
-        {{ job.meta.get('phase') or job.current_stage or 'render' }}
-      </span>
-      {% if job.meta.get('vertices') %}
-      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
-        {{ job.meta.vertices }} verts
-      </span>{% endif %}
+    <div class="chips">
+      <span class="chip accent">{{ job.meta.get('phase') or job.current_stage or 'render' }}</span>
+      {% if job.meta.get('vertices') %}<span class="chip">{{ "{:,}".format(job.meta.vertices) }} 頂點</span>{% endif %}
+      {% if job.meta.get('mm_per_unit') %}<span class="chip">尺度 1 unit = {{ '%.3f'|format(job.meta.mm_per_unit) }} mm</span>{% endif %}
       <span class="hint">backend: {{ job.meta.get('backend','') }}</span>
     </div>
     {% if job.status == 'done' %}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <a href="/api/jobs/{{ job.id }}/mesh.ply" download
-         style="display:inline-block;background:var(--panel2);color:var(--fg);border:1px solid var(--line2);
-                border-radius:7px;padding:7px 11px;text-decoration:none;font-weight:500">⬇ 下載 tsdf_post.ply</a>
+      <button onclick="openMeshViz('{{ job.id }}')">🧊 檢視 Mesh</button>
+      <a class="dl" href="/api/jobs/{{ job.id }}/mesh.ply" download>⬇ 非實際尺寸 mesh</a>
       {% if job.meta.get('mesh_scaled_path') %}
-      <a href="/api/jobs/{{ job.id }}/mesh_scaled.ply" download
-         style="display:inline-block;background:var(--accent);color:#0a0c10;border:1px solid var(--accent);
-                border-radius:7px;padding:7px 11px;text-decoration:none;font-weight:600">⬇ 下載實際尺寸 mesh (mm)</a>
-      {% if job.meta.get('mm_per_unit') %}
-      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
-        1 unit = {{ '%.4f'|format(job.meta.mm_per_unit) }} mm</span>{% endif %}
-      {% endif %}
-      <span class="hint"><code>{{ job.meta.get('mesh_path') or (job.meta.get('model_path','') ~ '/train/ours_*/mesh/tsdf_post.ply') }}</code></span>
+      <a class="dl primary" href="/api/jobs/{{ job.id }}/mesh_scaled.ply" download>⬇ 實際尺寸 mesh (mm)</a>{% endif %}
     </div>
     {% endif %}
+
   {% else %}
-    <div style="display:flex;gap:6px;flex-wrap:wrap">
+    <div class="chips">
       {% for s in stages %}
       {% set st = job.stage_status.get(s, '') %}
-      <span style="border:1px solid {{ stepclr.get(st,'var(--line)') }};color:{{ stepclr.get(st,'var(--mut)') }};
-                   border-radius:6px;padding:3px 9px;font-size:12px">
-        {{ s }}{% if st %} · {{ st }}{% endif %}
-      </span>
+      <span class="chip" style="border-color:{{ stepclr.get(st,'var(--line)') }};color:{{ stepclr.get(st,'var(--mut)') }}">{{ s }}{% if st %} · {{ st }}{% endif %}</span>
       {% endfor %}
     </div>
     {% if job.status == 'done' %}
