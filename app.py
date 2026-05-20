@@ -61,6 +61,18 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
     return templates.TemplateResponse(request=request, name=name, context=ctx)
 
 
+def _scene_label(path: str) -> str:
+    """Short, dataset-distinguishing label = '<workspace>/<leaf>'.
+
+    Train/mesh inputs share generic leaf names (training_dataset_global_mapper,
+    or a model dir named after the backend), so the leaf alone can't tell two
+    datasets apart. The parent (the COLMAP workspace) is what differs, e.g.
+    /Disk0/.../0520_iron_13mm_colmap/gs2m -> '0520_iron_13mm_colmap/gs2m'.
+    """
+    p = Path(path)
+    return f"{p.parent.name}/{p.name}" if p.parent.name else p.name
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return _page(request, "index.html", colmap_defaults=COLMAP_DEFAULTS,
@@ -238,7 +250,7 @@ async def create_train(request: Request):
         total = int(m.group(1))
 
     job = Job(id=new_id(), kind="train",
-              title=f"{backend} · {Path(source).name} → {Path(out).name}",
+              title=f"{backend} · {_scene_label(out)}",
               subtitle=f"{source}  →  {out}  (gpu={gpu or 'default'})",
               params=params, mirror=str(Path(out) / "train.log"),
               meta={"source": source, "model_path": out, "backend": backend,
@@ -274,7 +286,7 @@ async def create_mesh(request: Request):
         return _page(request, "_error.html", message=str(exc))
 
     job = Job(id=new_id(), kind="mesh",
-              title=f"mesh · {backend} · {Path(model).name}",
+              title=f"mesh · {_scene_label(model)}",
               subtitle=f"{model}  (gpu={gpu or 'default'})",
               params=params, mirror=str(Path(model) / "mesh.log"),
               meta={"model_path": model, "backend": backend})
