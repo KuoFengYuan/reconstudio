@@ -161,6 +161,8 @@ def run_colmap(p: dict, r: Runner) -> None:
     r.log(f"=== run started {time.strftime('%F %T')} | folders: {' '.join(folders)} ===")
 
     # 0. stage (NESTED_LAYOUT): flatten <group>/<video>/*.jpg -> staging/<group>/<video>_<file> symlinks
+    if stage_on("stage") and not nested:
+        r.log("skip stage (not a nested layout)")
     if stage_on("stage") and nested:
         stage_root = ws / "staging"
         sentinel = ws / ".stage.done"

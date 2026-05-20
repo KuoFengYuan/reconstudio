@@ -36,7 +36,7 @@ _RUN_MARKERS = [
     (re.compile(r"feature_extractor"), "extract"),
     (re.compile(r"sequential_matcher|vocab_tree_matcher"), "match"),
     (re.compile(r"view_graph_calibrator"), "calibrate"),
-    (re.compile(r"global_mapper|colmap mapper "), "mapper"),
+    (re.compile(r"colmap global_mapper|colmap mapper "), "mapper"),
     (re.compile(r"image_undistorter"), "undistort"),
 ]
 _SKIP_RE = re.compile(r"^\s*skip (\w+)")
