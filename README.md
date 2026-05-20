@@ -4,7 +4,8 @@ A local web panel for the full reconstruction pipeline — **video → 清晰幀
 3D Gaussian Splatting 訓練 → Mesh** — implemented as pure-Python modules under
 [`pipeline/`](pipeline/). The panel itself is **torch-free**: heavy tools (`ffmpeg`,
 `colmap`) and trainers (GS-2M, …) are invoked as **subprocesses**, so progress,
-cancellation, live logs, an in-browser 3D viewer, and a mesh download are first-class.
+cancellation, live logs, in-browser 3D viewers (point cloud **and** mesh, with a
+mm ruler), and mesh downloads are first-class.
 
 Single-machine local tool, binds to `127.0.0.1` by default. Runs up to **`MAX_JOBS`
 (default 4) jobs concurrently**; GPU is chosen manually per job.
@@ -16,6 +17,8 @@ Single-machine local tool, binds to `127.0.0.1` by default. Runs up to **`MAX_JO
 ```
 
 Each finished stage offers a one-click button to prefill the next (frames→COLMAP→訓練→Mesh).
+The Mesh stage can optionally rescale the output to **real-world millimetres** from a
+ChArUco marker board, and ships an **in-browser mesh viewer with a mm ruler**.
 
 ---
 
@@ -74,9 +77,23 @@ are **data, not code** (see [Backends](#backends)); built-in default is **GS-2M*
 ### ④ Mesh — model → triangle mesh
 Backend-specific (only backends that declare `mesh_args`, e.g. GS-2M's
 `render.py --extract_mesh --skip_test`). Tunable: `--mesh_only` (加速), `--auto_voxel`
-(推薦), `voxel_size` / `sdf_trunc` / `max_depth` / `num_clusters` / `filter_depth`.
-Output `…/train/ours_<iter>/mesh/tsdf_post.ply` — downloadable from the done view
-(**⬇ 下載 tsdf_post.ply**).
+(推薦), `voxel_size` (預設 `0.006`，勾自動時停用) / `sdf_trunc` (留空 = 4×voxel) /
+`max_depth` / `num_clusters` / `filter_depth`. Output
+`…/train/ours_<iter>/mesh/tsdf_post.ply`.
+
+**實際尺寸 (mm) — 選用 ChArUco marker**：拍攝時在場景放一塊標定板，Mesh 表單勾
+**提供 marker** 即可。抽完 mesh 後會自動偵測標定板、估算 recon→mm 尺度
+(`tools/estimate_marker_scale.py`)，再把 mesh 縮放成實際毫米
+(`tools/scale_mesh.py` → `tsdf_post_scaled_mm.ply`)。板子規格寫在後端的
+`marker_defaults`（預設 9×6 格、方格 28.806mm、marker 21.12mm、`DICT_5X5_100`），
+可在 `backends.json` 覆寫，**不需在介面手填**。
+
+完成後：**🧊 檢視 Mesh**（內嵌 3D 檢視器）、**⬇ 非實際尺寸 mesh**（recon 單位）、
+**⬇ 實際尺寸 mesh (mm)**（有 marker 時）。
+
+**🧊 線上 Mesh 檢視器** (`/viz/mesh/<id>`)：打光的實體 mesh，360° 旋轉/縮放/平移；
+切換 **實際尺寸 (mm) / 原始 (recon)**（各顯示原生單位）；**📏 量尺**（單擊兩點量
+距離，單位隨版本 mm 或 units）；亮度滑桿、白底、線框、頂點色開關、旋轉對齊。
 
 ---
 
@@ -161,6 +178,13 @@ pip install -r requirements.txt           # python deps + builds the 5 submodule
                                           # fused-ssim, nvdiffrast, render-utils
 ```
 
+> **實際尺寸 (mm) 量測（選用）** 用 panel 的 `tools/` 腳本，但在這個 trainer env 內執行，
+> 需要 `opencv-contrib-python`（`cv2.aruco`）、`open3d`、`plyfile`、`scipy`
+> （`open3d`/`scipy` 已是 GS-2M 依賴）。缺的話補裝：
+> ```bash
+> conda run -n gs2m pip install opencv-contrib-python plyfile
+> ```
+
 **3) Wiring — usually nothing to do.** The built-in backend in `pipeline/backends.py`
 already maps it; if the env name and sibling path match, it works zero-config:
 
@@ -229,12 +253,17 @@ log 顯示 layout、各階段 banner、stage stepper。完成後可 **🧊 檢�
 **▶ 啟動訓練** → 右側狀態列顯示階段（載入相機 / 訓練中 / 存檔…）與 `iter N/total`、loss；
 log 的進度條原地更新不洗版。完成後 **🧩 接著抽 Mesh**。
 
-**④ Mesh**：選 backend（僅支援者出現）、`model_path`、GPU、TSDF 參數 → **▶ 抽取 Mesh** →
-完成後 **⬇ 下載 tsdf_post.ply**。
+**④ Mesh**：選 backend（僅支援者出現）、`model_path`、GPU、TSDF 參數（`voxel_size` 預設 0.006，
+勾「自動體素大小」會自動估）。要實際尺寸就勾 **提供 marker**（板子規格已在 `backends.json`，免手填）→
+**▶ 抽取 Mesh** → 完成後 **🧊 檢視 Mesh**、**⬇ 非實際尺寸 mesh**、**⬇ 實際尺寸 mesh (mm)**。
 
 **檢視 3D 結果**（COLMAP 完成後內嵌右側，**← 回 log** 返回）：拖曳=360°旋轉、滾輪=縮放、
 右鍵=平移；**雙擊相機**看影像名/分數/縮圖並高亮；座標 gizmo、旋轉物體對齊、點/相機大小滑桿；
 品質指標 `reproj err`（<1 綠 / <2 黃）、`track len`。
+
+**檢視 Mesh**（Mesh 完成後 **🧊 檢視 Mesh** 內嵌右側）：打光的實體 mesh，可切
+**實際尺寸 (mm) / 原始 (recon)**、用 **📏 量尺** 點兩點量距離（單位 mm/units）、
+調亮度與白底、切線框 / 頂點色（關＝純色看幾何）。
 
 **歷史**：狀態每 3 秒自動更新（保留勾選與捲動），勾選 → **🗑 刪除選取**（進行中先取消）。
 
@@ -262,15 +291,16 @@ form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX
 
 | file | role |
 |------|------|
-| `app.py` | FastAPI routes: page, htmx `/ui/*`, JSON `/api/*`, SSE logs, `/viz/<id>`, `/doctor`, mesh.ply download |
+| `app.py` | FastAPI routes: page, htmx `/ui/*`, JSON `/api/*`, SSE logs, `/viz/<id>` + `/viz/mesh/<id>` (mesh viewer), `/doctor`, `mesh.ply` / `mesh_scaled.ply` downloads |
 | `jobs.py` | `JobManager` (queue, N workers, cancel/delete) + per-kind log parsers + `MAX_JOBS` |
 | `pipeline/runner.py` | log emitter + subprocess streaming + cancel (multi-child) |
 | `pipeline/frames.py` | `run_frames`: fps extraction (NVDEC + CPU fallback), blur cutoff, parallel, flatten |
 | `pipeline/colmap.py` | `run_colmap`: layout detect, stages, sentinels, NESTED staging, **parallel Lanczos FullHD resize** |
-| `pipeline/train.py` | `run_train` (COLMAP→trainer scene + PINHOLE guard) and `run_mesh` (mesh extraction) |
+| `pipeline/train.py` | `run_train` (COLMAP→trainer scene + PINHOLE guard) and `run_mesh` (mesh extraction + optional ChArUco marker → mm scaling) |
 | `pipeline/backends.py` | backend registry, env/GPU resolution, CLI builder, `doctor` preflight |
 | `pipeline/model.py` | parse sparse model (poses/cameras/points/per-image score) + PLY export |
-| `templates/` | `index.html` (4 forms) + htmx partials + `viz.html` (three.js) + `doctor.html` |
+| `templates/` | `index.html` (4 forms) + htmx partials + `viz.html` / `mesh_viz.html` (three.js viewers) + `doctor.html` |
+| `tools/` | panel-owned scripts run in the trainer env: `estimate_marker_scale.py` (ChArUco → recon→mm scale), `scale_mesh.py` (scale mesh to mm), vendored `colmap_read_write_model.py` |
 | `backends.example.json` | template for per-machine `backends.json` (gitignored) |
 | `run.sh` + `local.env.example` | launcher with auto-detected defaults; per-machine overrides |
 

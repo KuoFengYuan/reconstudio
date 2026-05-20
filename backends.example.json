@@ -14,7 +14,11 @@
     "",
     "Mesh extraction is backend-specific: a backend supports it ONLY if it declares",
     "`mesh_args` (+ `mesh_script`/`mesh_params`). GS-2M does (render.py --extract_mesh);",
-    "gsplat below intentionally omits it, so the Mesh tab won't offer gsplat."
+    "gsplat below intentionally omits it, so the Mesh tab won't offer gsplat.",
+    "",
+    "Real-size (mm): set `marker_defaults` (physical ChArUco board geometry) to enable",
+    "the Mesh tab's 提供 marker option. Scaling scripts live in the panel's tools/ and",
+    "run in THIS backend's env (needs opencv-contrib-python / open3d / plyfile / scipy)."
   ],
 
   "gs2m": {
@@ -25,7 +29,8 @@
       { "key": "resolution", "flag": "-r", "type": "int", "default": "1", "label": "解析度降採樣 (-r)" },
       { "key": "data_device", "flag": "--data_device", "type": "select", "options": ["cpu", "cuda"], "default": "cpu", "label": "影像快取裝置" },
       { "key": "material", "flag": "--material", "type": "bool", "default": false, "label": "材質分解" }
-    ]
+    ],
+    "marker_defaults": { "squares_x": 9, "squares_y": 6, "square_mm": 28.806, "marker_mm": 21.12, "dict": "DICT_5X5_100" }
   },
 
   "gsplat": {
