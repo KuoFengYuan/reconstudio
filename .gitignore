@@ -1,0 +1,17 @@
+# runtime / scratch (job state, console + pipeline logs, points.ply cache, tmp)
+data/
+*.tmp
+
+# per-machine config (copy from local.env.example)
+local.env
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store

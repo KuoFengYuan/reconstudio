@@ -1,0 +1,52 @@
+{% set badge = {'queued':'var(--mut)','running':'var(--accent)','done':'var(--ok)','failed':'var(--err)','cancelled':'var(--warn)'} %}
+{% set stepclr = {'running':'var(--accent)','done':'var(--ok)','failed':'var(--err)','skipped':'var(--mut)','pending':'var(--line)'} %}
+<div id="jobstatus"
+     {% if job.status in ['queued','running'] %}
+     hx-get="/ui/jobstatus/{{ job.id }}" hx-trigger="every 2s" hx-swap="outerHTML"
+     {% endif %}>
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <span style="background:{{ badge[job.status] }};color:#0a0c10;font-weight:600;
+                 padding:2px 10px;border-radius:20px;font-size:12px">{{ job.status }}</span>
+    {% if job.returncode is not none %}<span class="hint">rc={{ job.returncode }}</span>{% endif %}
+    {% if job.status in ['queued','running'] %}
+    <button class="ghost" style="margin-left:auto;border-color:var(--err);color:var(--err)"
+            hx-post="/api/jobs/{{ job.id }}/cancel" hx-swap="none">取消</button>
+    {% endif %}
+  </div>
+
+  {% if job.kind == 'frames' %}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+      {% if job.meta.get('total') %}
+      <span style="border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:3px 9px;font-size:12px">
+        影片 {{ job.meta.get('cur', 0) }}/{{ job.meta.total }}
+      </span>{% endif %}
+      {% if job.meta.get('kept') is not none %}
+      <span style="border:1px solid var(--ok);color:var(--ok);border-radius:6px;padding:3px 9px;font-size:12px">
+        清晰 {{ job.meta.get('kept', 0) }}
+      </span>
+      <span style="border:1px solid var(--mut);color:var(--mut);border-radius:6px;padding:3px 9px;font-size:12px">
+        丟棄 {{ job.meta.get('dropped', 0) }}
+      </span>{% endif %}
+    </div>
+    {% if job.status == 'done' %}
+    <div style="margin-top:12px">
+      <button onclick="fillColmap('{{ job.meta.out }}','{{ job.meta.ws }}')">▶ 接著跑 COLMAP（自動帶入 {{ job.meta.out }}）</button>
+    </div>
+    {% endif %}
+  {% else %}
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      {% for s in stages %}
+      {% set st = job.stage_status.get(s, '') %}
+      <span style="border:1px solid {{ stepclr.get(st,'var(--line)') }};color:{{ stepclr.get(st,'var(--mut)') }};
+                   border-radius:6px;padding:3px 9px;font-size:12px">
+        {{ s }}{% if st %} · {{ st }}{% endif %}
+      </span>
+      {% endfor %}
+    </div>
+    {% if job.status == 'done' %}
+    <div style="margin-top:12px">
+      <button onclick="openViz('{{ job.id }}')">🧊 檢視 3D 結果（點雲 + 相機位置）</button>
+    </div>
+    {% endif %}
+  {% endif %}
+</div>

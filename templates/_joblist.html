@@ -1,0 +1,29 @@
+{% set badge = {'queued':'var(--mut)','running':'var(--accent)','done':'var(--ok)','failed':'var(--err)','cancelled':'var(--warn)'} %}
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+  <button class="ghost" onclick="deleteSelected()" style="border-color:var(--err);color:var(--err)">🗑 刪除選取</button>
+  <span class="hint">勾選後刪除;進行中的會先取消。狀態每 3 秒自動更新。</span>
+</div>
+{% if not jobs %}
+<p class="hint">尚無 job。</p>
+{% else %}
+<table style="width:100%;border-collapse:collapse;font-size:13px">
+  <thead><tr style="color:var(--mut);text-align:left">
+    <th style="padding:6px 8px"><input type="checkbox" onclick="toggleAllJobs(this)"></th>
+    <th>狀態</th><th>內容</th><th>id</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for j in jobs %}
+  <tr style="border-top:1px solid var(--line)">
+    <td style="padding:6px 8px"><input type="checkbox" class="jobsel" value="{{ j.id }}"></td>
+    <td>
+      <span style="background:{{ badge[j.status] }};color:#0a0c10;font-weight:600;
+                   padding:1px 8px;border-radius:20px;font-size:11px">{{ j.status }}</span>
+    </td>
+    <td>{{ '🎬' if j.kind=='frames' else '📐' }} {{ j.title }}{% if j.current_stage %} <span class="hint">@{{ j.current_stage }}</span>{% endif %}</td>
+    <td><code class="hint">{{ j.id }}</code></td>
+    <td><button class="ghost" onclick="loadJob('{{ j.id }}')">開啟</button></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}

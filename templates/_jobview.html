@@ -1,0 +1,20 @@
+<div>
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
+    <strong>{{ '🎬' if job.kind=='frames' else '📐' }} {{ job.title }}</strong>
+    <code class="hint">{{ job.kind }} · {{ job.id }}</code>
+  </div>
+  <div class="hint" style="margin-bottom:10px">{{ job.subtitle }}</div>
+
+  <!-- status + stage stepper; self-polls while running, then stops -->
+  <div id="jobstatus"
+       hx-get="/ui/jobstatus/{{ job.id }}"
+       hx-trigger="load, every 2s"
+       hx-swap="outerHTML"></div>
+
+  <!-- log stream is started by startLogStream() in index.html on htmx:afterSwap
+       (htmx doesn't reliably execute inline <script> in swapped fragments). -->
+  <pre id="log" data-log-job="{{ job.id }}"
+       style="background:#0a0c10;border:1px solid var(--line);border-radius:8px;
+       padding:12px;margin-top:12px;height:55vh;overflow:auto;white-space:pre-wrap;
+       font:12px/1.45 ui-monospace,monospace;color:#c9d1d9"></pre>
+</div>

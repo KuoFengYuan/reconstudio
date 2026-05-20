@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>COLMAP Panel</title>
+<script src="/static/htmx.min.js"></script>
+<style>
+  :root { --bg:#0e1014; --panel:#161922; --panel2:#1b1f29; --line:#2a3038; --line2:#363d49;
+          --fg:#e6e9ef; --mut:#8b93a3; --accent:#4c8bf5; --accent-d:#3a6fd0;
+          --ok:#3fb950; --warn:#d29922; --err:#f85149; --radius:9px; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif;
+         background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#2c333f; border-radius:6px; border:2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background:#3a4250; }
+  code { font-family:ui-monospace,monospace; }
+  header { padding:11px 18px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:10px; background:linear-gradient(180deg,#171b24,#13161d); }
+  header .dot { width:9px; height:9px; border-radius:50%; background:var(--accent);
+                box-shadow:0 0 10px var(--accent); }
+  header h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.02em; }
+  header .sub { color:var(--mut); font-size:12px; }
+  .wrap { display:grid; grid-template-columns:404px 1fr; height:calc(100vh - 47px); }
+  .col { overflow:auto; padding:16px 16px 28px; }
+  .col.left { border-right:1px solid var(--line); background:#101319; }
+  /* fixed (always-visible) section */
+  fieldset { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 12px;
+             padding:12px 13px; background:var(--panel); }
+  legend { color:var(--accent); font-size:11px; padding:0 6px; font-weight:600;
+           text-transform:uppercase; letter-spacing:.07em; }
+  /* collapsible advanced section */
+  details.grp { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 10px;
+                background:var(--panel); overflow:hidden; }
+  details.grp > summary { list-style:none; cursor:pointer; padding:10px 13px; color:var(--mut);
+        font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
+        user-select:none; display:flex; align-items:center; gap:7px; }
+  details.grp > summary::-webkit-details-marker { display:none; }
+  details.grp > summary::before { content:'▸'; font-size:9px; color:var(--mut); transition:transform .15s; }
+  details.grp[open] > summary::before { transform:rotate(90deg); }
+  details.grp > summary:hover { color:var(--fg); background:var(--panel2); }
+  details.grp .gbody { padding:2px 13px 13px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:9px 0 3px; }
+  input,select,textarea { width:100%; background:#0b0d12; border:1px solid var(--line);
+        color:var(--fg); border-radius:7px; padding:7px 9px; font:inherit; transition:border-color .12s,box-shadow .12s; }
+  input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accent);
+        box-shadow:0 0 0 3px rgba(76,139,245,.18); }
+  select { appearance:none; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238b93a3'/%3E%3C/svg%3E");
+           background-repeat:no-repeat; background-position:right 10px center; padding-right:26px; }
+  textarea { resize:vertical; min-height:44px; font-family:ui-monospace,monospace; }
+  .row { display:flex; gap:6px; align-items:flex-end; }
+  .row input { flex:1; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px;
+           padding:8px 14px; font:inherit; font-weight:550; cursor:pointer; transition:filter .12s,transform .04s; }
+  button:hover { filter:brightness(1.08); }
+  button:active { transform:translateY(1px); }
+  button.ghost { background:var(--panel2); color:var(--fg); border:1px solid var(--line2); padding:7px 11px; font-weight:500; }
+  .checks { display:flex; flex-wrap:wrap; gap:8px 14px; }
+  .checks label { display:flex; align-items:center; gap:5px; margin:0; color:var(--fg); font-size:13px; }
+  .checks input { width:auto; accent-color:var(--accent); }
+  .submit { width:100%; padding:11px; font-weight:650; margin-top:6px; font-size:14px;
+            background:linear-gradient(180deg,var(--accent),var(--accent-d)); box-shadow:0 2px 10px rgba(76,139,245,.25); }
+  .tabs { display:flex; gap:4px; margin-bottom:14px; background:var(--panel); padding:4px;
+          border-radius:10px; border:1px solid var(--line); }
+  .tabs button { flex:1; background:transparent; color:var(--mut); border:0; border-radius:7px; padding:7px 10px; font-weight:550; }
+  .tabs button.active { color:#fff; background:var(--accent); }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
+  .modal.open { display:flex; }
+  .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
+                width:560px; max-height:70vh; overflow:auto; padding:15px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .hint { color:var(--mut); font-size:11px; margin-top:3px; }
+  .empty { color:var(--mut); padding:30px; text-align:center; border:1px dashed var(--line2);
+           border-radius:12px; background:var(--panel); }
+</style>
+</head>
+<body>
+<header>
+  <h1>COLMAP Panel</h1>
+  <span class="sub">video → sharp frames → reconstruction</span>
+</header>
+
+<div class="wrap">
+  <!-- ============================= left: forms ============================= -->
+  <div class="col left">
+    <div class="tabs">
+      <button class="ghost active" id="t-frames" onclick="showForm('frames')">① 影片→清晰幀</button>
+      <button class="ghost" id="t-colmap" onclick="showForm('colmap')">② COLMAP</button>
+    </div>
+
+    <!-- ----- frames form ----- -->
+    <form id="form-frames" hx-post="/ui/frames" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>影片來源</legend>
+        <label>input（影片檔或資料夾；資料夾會遞迴掃描）</label>
+        <div class="row">
+          <input name="input" id="frames_input" oninput="suggestFromInput()"
+                 placeholder="{{ browse_root }}/FY115/FY115_0518" required>
+          <button type="button" class="ghost" onclick="openPicker('frames_input')">瀏覽</button>
+        </div>
+        <label>out_dir（每支影片 → &lt;out&gt;/&lt;group&gt;/frames_&lt;video&gt;/*.jpg）</label>
+        <div class="row">
+          <input name="out_dir" id="frames_out" placeholder="{{ browse_root }}/FY115/0518_colmap" required>
+          <button type="button" class="ghost" onclick="openPicker('frames_out')">瀏覽</button>
+        </div>
+        <div class="hint">已開啟 <code>-F</code> 攤平:只輸出清晰幀,丟掉模糊/原始幀。</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>抽幀 / 去模糊</legend>
+        <label>fps（每秒抽幀數）</label>
+        <input name="fps" value="{{ frames_defaults.FPS }}">
+        <div class="hint">解碼自動使用 GPU(NVDEC),失敗時自動退回 CPU。</div>
+        <label>去模糊方式</label>
+        <select name="mode" onchange="toggleBlurMode(this.value)">
+          <option value="percentile" {{ 'selected' if frames_defaults.MODE=='percentile' }}>百分位（保留最清晰 P%）</option>
+          <option value="threshold" {{ 'selected' if frames_defaults.MODE=='threshold' }}>絕對閾值（blur ≤ t）</option>
+        </select>
+        <div id="blur-pct">
+          <label>keep_percent（保留最清晰的 %）</label>
+          <input name="keep_pct" value="{{ frames_defaults.KEEP_PCT }}">
+        </div>
+        <div id="blur-thr" style="display:none">
+          <label>blur_threshold（內容相關;清晰約 2–6,模糊 10+）</label>
+          <input name="threshold" value="{{ frames_defaults.THRESHOLD }}">
+        </div>
+      </fieldset>
+
+      <button class="submit" type="submit">▶ 抽幀 + 去模糊</button>
+    </form>
+
+    <!-- ----- colmap form ----- -->
+    <form id="form-colmap" style="display:none" hx-post="/ui/jobs" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>Inputs</legend>
+        <label>image_root</label>
+        <div class="row">
+          <input name="image_root" id="image_root" placeholder="{{ browse_root }}/FY115/0518_colmap" required>
+          <button type="button" class="ghost" onclick="openPicker('image_root')">瀏覽</button>
+        </div>
+        <label>workspace</label>
+        <div class="row">
+          <input name="workspace" id="workspace" placeholder="{{ browse_root }}/FY115/0518_colmap_ws" required>
+          <button type="button" class="ghost" onclick="openPicker('workspace')">瀏覽</button>
+        </div>
+        <label>影像解析度</label>
+        <select name="resize">
+          <option value="keep" selected>保持原樣</option>
+          <option value="fullhd">等比縮小到 FullHD（長邊 ≤ 1920）</option>
+        </select>
+        <div class="hint">FullHD：特徵抽取與去畸變輸出都限制在 1920;加速且輸出較小,適合訓練。輸入格式自動偵測。</div>
+      </fieldset>
+
+      <details class="grp" id="fmt-grp">
+        <summary>輸入格式（手動指定 layout / subfolders）</summary>
+        <div class="gbody">
+          <label>layout</label>
+          <select name="layout" id="layout">
+            <option value="auto" selected>自動偵測（推薦）</option>
+            <option value="single">單一資料夾 XXX/*.jpg（單相機）</option>
+            <option value="multi">多目錄 ROOT/&lt;group&gt;/*.jpg（每群一相機）</option>
+            <option value="nested">巢狀 ROOT/&lt;group&gt;/&lt;video&gt;/*.jpg（影片幀）</option>
+          </select>
+          <label>subfolders（逗號或換行;留空=自動偵測,例如 A B）</label>
+          <textarea name="subfolders" id="subfolders" placeholder="A, B"></textarea>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Camera</summary>
+        <div class="gbody">
+          <label>CAMERA_MODEL</label>
+          <input name="CAMERA_MODEL" value="{{ colmap_defaults.CAMERA_MODEL }}">
+          <label>CAMERA_MODE（per_folder = 每個 group 一台相機,共用內參）</label>
+          <select name="CAMERA_MODE">
+            {% for o in enums.CAMERA_MODE %}<option {{ 'selected' if o==colmap_defaults.CAMERA_MODE }}>{{ o }}</option>{% endfor %}
+          </select>
+          <label>MAX_FEATURES</label>
+          <input name="MAX_FEATURES" value="{{ colmap_defaults.MAX_FEATURES }}">
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Matching</summary>
+        <div class="gbody">
+          <label>MATCHER</label>
+          <select name="MATCHER">
+            {% for o in enums.MATCHER %}<option {{ 'selected' if o==colmap_defaults.MATCHER }}>{{ o }}</option>{% endfor %}
+          </select>
+          <label>SEQ_OVERLAP</label>
+          <input name="SEQ_OVERLAP" value="{{ colmap_defaults.SEQ_OVERLAP }}">
+          <label>NUM_MATCHES</label>
+          <input name="NUM_MATCHES" value="{{ colmap_defaults.NUM_MATCHES }}">
+          <label class="checks" style="margin-top:10px;">
+            <input type="checkbox" name="GUIDED_MATCHING" value="1" {{ 'checked' if colmap_defaults.GUIDED_MATCHING=='1' }}>
+            GUIDED_MATCHING（較慢,低紋理多撿匹配）
+          </label>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Mapping</summary>
+        <div class="gbody">
+          <label>MAPPER</label>
+          <select name="MAPPER">
+            {% for o in enums.MAPPER %}<option {{ 'selected' if o==colmap_defaults.MAPPER }}>{{ o }}</option>{% endfor %}
+          </select>
+          <label>DATASET_NAME</label>
+          <input name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}">
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Pipeline</summary>
+        <div class="gbody">
+          <label>STAGES</label>
+          <div class="checks">
+            {% for s in stages %}<label><input type="checkbox" name="stages" value="{{ s }}" checked> {{ s }}</label>{% endfor %}
+          </div>
+          <div class="checks" style="margin-top:10px;">
+            <label><input type="checkbox" name="FORCE" value="1"> FORCE（重跑）</label>
+          </div>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Advanced</summary>
+        <div class="gbody">
+          <label>VOCAB_TREE（留空=預設路徑,缺檔自動下載）</label>
+          <input name="VOCAB_TREE" value="{{ colmap_defaults.VOCAB_TREE }}">
+          <label>VOCAB_TREE_URL</label>
+          <input name="VOCAB_TREE_URL" value="{{ colmap_defaults.VOCAB_TREE_URL }}">
+        </div>
+      </details>
+
+      <button class="submit" type="submit">▶ 啟動 COLMAP</button>
+    </form>
+  </div>
+
+  <!-- ============================ right: output ============================ -->
+  <div class="col">
+    <div class="tabs">
+      <button class="ghost active" onclick="showTab('run',this)">執行</button>
+      <button class="ghost" onclick="showTab('hist',this)">歷史</button>
+    </div>
+    <div id="tab-run">
+      <div id="main"><div class="empty">填左側設定後啟動,這裡會顯示進度、即時 log 與 3D 結果。</div></div>
+    </div>
+    <div id="tab-hist" style="display:none">
+      <div id="joblist" hx-get="/ui/joblist" hx-trigger="load, every 3s" hx-swap="innerHTML"></div>
+    </div>
+  </div>
+</div>
+
+<!-- directory picker modal -->
+<div class="modal" id="picker">
+  <div class="box">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <strong>選擇資料夾</strong>
+      <button class="ghost" onclick="document.getElementById('picker').classList.remove('open')">關閉</button>
+    </div>
+    <div id="picker-body"></div>
+  </div>
+</div>
+
+<script>
+  function showForm(which){
+    document.getElementById('form-frames').style.display = which==='frames' ? '' : 'none';
+    document.getElementById('form-colmap').style.display = which==='colmap' ? '' : 'none';
+    document.getElementById('t-frames').classList.toggle('active', which==='frames');
+    document.getElementById('t-colmap').classList.toggle('active', which==='colmap');
+  }
+  function showTab(which, btn){
+    document.getElementById('tab-run').style.display  = which==='run'  ? '' : 'none';
+    document.getElementById('tab-hist').style.display = which==='hist' ? '' : 'none';
+    document.querySelectorAll('.col:last-child > .tabs button').forEach(b=>b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+  }
+  function toggleBlurMode(v){
+    document.getElementById('blur-pct').style.display = v==='percentile' ? '' : 'none';
+    document.getElementById('blur-thr').style.display = v==='threshold'  ? '' : 'none';
+  }
+  function openPicker(target){
+    document.getElementById('picker').classList.add('open');
+    htmx.ajax('GET', '/ui/browse?target=' + target, {target:'#picker-body', swap:'innerHTML'});
+  }
+  // FY115_0518 -> 0518_colmap (token after last underscore + _colmap), workspace = +_ws
+  function suggestFromInput(){
+    var v = (document.getElementById('frames_input').value || '').replace(/\/+$/,'');
+    if (!v) return;
+    var slash = v.lastIndexOf('/');
+    var parent = slash >= 0 ? v.slice(0, slash) : '';
+    var base = v.slice(slash + 1);
+    var us = base.lastIndexOf('_');
+    var token = us >= 0 ? base.slice(us + 1) : base;
+    var out = (parent ? parent + '/' : '') + token + '_colmap';
+    var f = document.getElementById('frames_out');
+    if (f && !f.dataset.touched) f.value = out;
+  }
+  document.addEventListener('input', function(e){
+    if (e.target && e.target.id === 'frames_out') e.target.dataset.touched = '1';
+  });
+  // chain: frames output -> COLMAP form, prefilled for the nested group/video layout
+  function fillColmap(out, ws){
+    showForm('colmap');
+    document.getElementById('image_root').value = out;
+    document.getElementById('workspace').value = ws;
+    document.getElementById('subfolders').value = '';
+    var l = document.getElementById('layout');
+    if (l) l.value = 'auto';     // auto-detect handles the nested <group>/frames_<video>/ layout
+    window.scrollTo(0, 0);
+  }
+  function loadJob(id){
+    showTab('run', document.querySelector('.col:last-child > .tabs button'));
+    htmx.ajax('GET', '/ui/jobs/' + id, {target:'#main', swap:'innerHTML'});
+  }
+  // embed the 3D viewer inline (its own importmap needs an isolated document -> iframe)
+  function openViz(id){
+    if (window._es) { try { window._es.close(); } catch(e){} }
+    document.getElementById('main').innerHTML =
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
+      '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
+      '<span class="hint">3D 結果</span></div>' +
+      '<iframe src="/viz/' + id + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
+  }
+  // live log via SSE — started here (not in the swapped fragment) because htmx
+  // does not reliably execute inline <script> in swapped content.
+  function startLogStream(jobId){
+    if (window._es) { try { window._es.close(); } catch(e){} }
+    var pre = document.getElementById('log');
+    if (!pre) return;
+    pre.textContent = '';
+    var es = new EventSource('/api/jobs/' + jobId + '/logs');
+    window._es = es;
+    es.onmessage = function(ev){
+      var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+      pre.textContent += ev.data + '\n';
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    };
+    es.addEventListener('end', function(){ es.close(); });
+  }
+  function refreshJoblist(){ htmx.ajax('GET', '/ui/joblist', {target:'#joblist', swap:'innerHTML'}); }
+  function toggleAllJobs(cb){ document.querySelectorAll('.jobsel').forEach(x => x.checked = cb.checked); }
+  function deleteSelected(){
+    var ids = Array.from(document.querySelectorAll('.jobsel:checked')).map(x => x.value);
+    if (!ids.length) { alert('請先勾選要刪除的紀錄'); return; }
+    if (!confirm('刪除 ' + ids.length + ' 筆紀錄?(進行中的會先取消;已完成的會連同 log 一併移除)')) return;
+    fetch('/api/jobs/delete', {method:'POST', headers:{'Content-Type':'application/json'},
+                               body: JSON.stringify({ids: ids})})
+      .then(r => r.json()).then(() => refreshJoblist());
+  }
+  // before the joblist auto-refresh swaps, remember which rows are checked + scroll
+  window._jobSel = new Set(); window._jobScroll = 0;
+  document.body.addEventListener('htmx:beforeSwap', function(e){
+    var t = e.detail && e.detail.target;
+    if (t && t.id === 'joblist'){
+      window._jobSel = new Set(Array.from(document.querySelectorAll('.jobsel:checked')).map(x => x.value));
+      var sc = t.closest('.col'); window._jobScroll = sc ? sc.scrollTop : 0;
+    }
+  });
+  document.body.addEventListener('htmx:afterSwap', function(e){
+    var t = e.detail && e.detail.target;
+    if (t && t.id === 'main'){
+      var box = t.querySelector('[data-log-job]');
+      if (box) startLogStream(box.getAttribute('data-log-job'));
+    }
+    if (t && t.id === 'joblist'){           // restore selection + scroll after live refresh
+      document.querySelectorAll('.jobsel').forEach(x => { if (window._jobSel.has(x.value)) x.checked = true; });
+      var sc = t.closest('.col'); if (sc) sc.scrollTop = window._jobScroll;
+    }
+  });
+</script>
+</body>
+</html>

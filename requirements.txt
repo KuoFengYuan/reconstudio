@@ -1,0 +1,11 @@
+# COLMAP Panel — Python dependencies (Python 3.10+).
+#   pip install -r requirements.txt
+#
+# Frontend libs (three.js, htmx) are vendored under static/ — NOT installed via pip.
+# External binaries needed at runtime (set COLMAP_BIN / FFMPEG_BIN if not on PATH):
+#   - colmap            (3.x / 4.x)
+#   - ffmpeg            with the `blurdetect` filter; an NVDEC build adds GPU decode
+fastapi>=0.110
+uvicorn[standard]>=0.27
+jinja2>=3.1
+python-multipart>=0.0.9

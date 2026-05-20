@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>COLMAP 結果 · {{ job.title }}</title>
+<style>
+  :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#4c8bf5; --panel:rgba(22,26,33,.92);
+          --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  html,body { margin:0; height:100%; background:#0b0d11; color:var(--fg); overflow:hidden;
+              font:13px/1.45 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif; }
+  #c { position:fixed; inset:0; display:block; }
+  #gui { position:fixed; top:10px; right:10px; width:248px; background:var(--panel);
+         border:1px solid var(--line); border-radius:10px; backdrop-filter:blur(6px);
+         box-shadow:0 6px 24px rgba(0,0,0,.4); overflow:hidden; }
+  #gui .hd { display:flex; align-items:center; gap:8px; padding:9px 11px; cursor:pointer;
+             border-bottom:1px solid var(--line); user-select:none; }
+  #gui .hd b { font-size:13px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #gui .bd { padding:10px 11px; }
+  #gui.collapsed .bd { display:none; }
+  .stat { display:flex; justify-content:space-between; color:var(--mut); margin:1px 0; }
+  .stat b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  .ctl { margin-top:11px; }
+  .ctl > label { display:block; color:var(--mut); margin-bottom:4px; }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  .rowbtn { display:flex; gap:10px; align-items:center; margin-top:11px; flex-wrap:wrap; }
+  .rowbtn label { display:flex; align-items:center; gap:5px; color:var(--mut); }
+  .rowbtn input { accent-color:var(--accent); }
+  button { background:#222733; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:5px 10px; cursor:pointer; font:inherit; }
+  button:hover { filter:brightness(1.2); }
+  #legend { margin-top:10px; display:flex; flex-wrap:wrap; gap:4px 10px; max-height:84px; overflow:auto; }
+  #legend span { display:flex; align-items:center; gap:4px; color:var(--mut); font-size:12px; }
+  .sw { width:10px; height:10px; border-radius:2px; }
+  #sel { position:fixed; left:12px; top:12px; background:var(--panel); border:1px solid var(--accent);
+         border-radius:9px; padding:9px 12px; min-width:220px; max-width:300px; display:none; }
+  #sel img { width:100%; border-radius:6px; margin-top:7px; display:block; }
+  #sel .x { float:right; cursor:pointer; color:var(--mut); }
+  #sel b { color:var(--accent); }
+  #msg { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:var(--mut); }
+  #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+             color:var(--mut); pointer-events:none; font-size:13px; }
+  #hint { position:fixed; left:12px; bottom:10px; color:var(--mut); font-size:11px; }
+</style>
+</head>
+<body>
+{% if not has_model %}
+  <div id="msg">此 job 沒有 sparse 模型（workspace/sparse/0 不存在）。</div>
+{% else %}
+<canvas id="c"></canvas>
+<div id="loading">● 載入點雲中…</div>
+<div id="gui">
+  <div class="hd" onclick="document.getElementById('gui').classList.toggle('collapsed')">
+    <span>▾</span><b>🧊 {{ job.title }}</b>
+  </div>
+  <div class="bd">
+    <div class="stat"><span>images</span><b id="s-img">…</b></div>
+    <div class="stat"><span>cameras</span><b id="s-cam">…</b></div>
+    <div class="stat"><span>points</span><b id="s-pts">…</b></div>
+    <div class="stat"><span>reproj err</span><b id="s-err">…</b></div>
+    <div class="stat"><span>track len</span><b id="s-trk">…</b></div>
+    <div class="ctl"><label>點大小 <span id="psz-v">1.5</span></label>
+      <input id="psize" type="range" min="0.3" max="6" step="0.1" value="1.5"></div>
+    <div class="ctl"><label>相機大小 <span id="csz-v">1.0</span></label>
+      <input id="csize" type="range" min="0" max="3" step="0.05" value="1"></div>
+    <div class="rowbtn">
+      <label><input id="show-cams" type="checkbox" checked> 相機</label>
+      <label><input id="show-axes" type="checkbox" checked> 座標 gizmo</label>
+    </div>
+    <div class="rowbtn">
+      <label><input id="rot-obj" type="checkbox"> 🔄 旋轉物體(對齊)</label>
+    </div>
+    <div class="rowbtn">
+      <button id="reset">重置視角</button>
+      <button id="reset-rot">歸零旋轉</button>
+    </div>
+    <div id="legend"></div>
+  </div>
+</div>
+<div id="sel"><span class="x" onclick="clearSel()">✕</span>
+  <div id="sel-body"></div></div>
+<div id="hint">拖曳=旋轉(360°自由) · 滾輪=縮放 · 右鍵=平移 · 雙擊相機=顯示資訊並高亮 · 勾「旋轉物體」拖環對齊</div>
+
+<script type="importmap">
+{ "imports": { "three": "/static/three/three.module.js",
+               "three/addons/": "/static/three/addons/" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+
+const JOB = "{{ job.id }}";
+const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias:true});
+renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeight);
+renderer.autoClear = false;                       // ViewHelper renders in a corner viewport
+const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b0d11);
+
+// Scene graph for "rotate the object to align":
+//   obj (gizmo-rotated, at object centre) -> flip (180° about X: COLMAP Y-down -> three Y-up)
+//     -> inner (offset by -centre) -> points / cameras  (all in COLMAP coords)
+// With the gizmo untouched this maps a COLMAP point p exactly to flipW(p); the gizmo
+// rotates the whole object about its centre.
+const obj = new THREE.Group();   scene.add(obj);
+const flip = new THREE.Group();  flip.rotation.x = Math.PI; obj.add(flip);
+const inner = new THREE.Group(); flip.add(inner);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.001, 1e6);
+const controls = new TrackballControls(camera, renderer.domElement);   // free 360°, no pole lock
+controls.rotateSpeed = 3.2; controls.zoomSpeed = 1.3; controls.panSpeed = 0.9;
+controls.staticMoving = false; controls.dynamicDampingFactor = 0.15;
+
+// rotation gizmo on the object (drag rings to reorient/align); off by default
+const gizmo = new TransformControls(camera, renderer.domElement);
+gizmo.setMode('rotate'); gizmo.setSize(0.9); gizmo.attach(obj);
+gizmo.enabled = false; gizmo.visible = false; scene.add(gizmo);
+gizmo.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
+
+// corner orientation gizmo (the coordinate axes; click an axis to snap the view)
+const viewHelper = new ViewHelper(camera, renderer.domElement);
+viewHelper.center = controls.target;              // orbit pivot = object centre
+let showGizmo = true;
+document.addEventListener('pointerup', e => { if (showGizmo) viewHelper.handleClick(e); });
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); controls.handleResize();
+});
+
+const palette = [0x4c8bf5,0x3fb950,0xd29922,0xf85149,0xa371f7,0x39c5cf,0xff7b72,0xbf91f3];
+const flipW = v => new THREE.Vector3(v.x, -v.y, -v.z);
+let points, cams, camPoints, sceneSize = 1, imagesData = [], centerC = new THREE.Vector3(), colorOf = () => 0xffd24a, highlightIdx = -1;
+const HILITE = 0x00e5ff;   // selected-camera colour
+
+function fitView(){
+  if (!points) return;
+  // Robust centre + size (median / 5–95 percentile), so scattered outlier points
+  // don't drag the pivot (and gizmo) off the dense object.
+  const pos = points.geometry.attributes.position, N = pos.count;
+  const stepN = Math.max(1, Math.floor(N / 15000));
+  const xs = [], ys = [], zs = [];
+  for (let i = 0; i < N; i += stepN){ xs.push(pos.getX(i)); ys.push(pos.getY(i)); zs.push(pos.getZ(i)); }
+  xs.sort((a,b)=>a-b); ys.sort((a,b)=>a-b); zs.sort((a,b)=>a-b);
+  const Q = (a,p) => a[Math.floor((a.length-1)*p)];
+  centerC.set(Q(xs,.5), Q(ys,.5), Q(zs,.5));
+  const d = Math.max(Q(xs,.95)-Q(xs,.05), Q(ys,.95)-Q(ys,.05), Q(zs,.95)-Q(zs,.05)) || 1;
+  sceneSize = d;
+  inner.position.copy(centerC).multiplyScalar(-1);     // object centre -> obj origin
+  obj.position.copy(flipW(centerC));                   // place centre in world
+  obj.updateMatrixWorld(true);
+
+  const tgt = obj.position.clone();
+  controls.target.copy(tgt);
+  // start from the cameras' average facing direction (in current world orientation)
+  let coherent = false, fwd = new THREE.Vector3(), up = new THREE.Vector3();
+  if (imagesData.length){
+    const q = inner.getWorldQuaternion(new THREE.Quaternion());
+    for (const im of imagesData){
+      const Rt = im.Rt;
+      fwd.add(new THREE.Vector3(Rt[0][2],Rt[1][2],Rt[2][2]));
+      up.add(new THREE.Vector3(-Rt[0][1],-Rt[1][1],-Rt[2][1]));
+    }
+    coherent = fwd.length() / imagesData.length > 0.4;
+    fwd.applyQuaternion(q).normalize(); up.applyQuaternion(q).normalize();
+  }
+  if (coherent){ camera.up.copy(up); camera.position.copy(tgt.clone().addScaledVector(fwd, -d*1.6)); }
+  else { camera.up.set(0,1,0); camera.position.set(tgt.x+d*0.7, tgt.y+d*0.5, tgt.z+d*1.1); }
+  camera.near = d/1000; camera.far = d*100; camera.updateProjectionMatrix(); controls.update();
+}
+
+function buildCameras(scaleMul){
+  if (cams){ inner.remove(cams); cams.geometry.dispose(); cams.material.dispose(); cams = null; }
+  if (scaleMul <= 0 || !imagesData.length) return;
+  const s = sceneSize * 0.012 * scaleMul, w = s*1.3, h = s, d = s*1.8;
+  const pos = [], col = [];
+  const seg = (A,B,rgb)=>{ pos.push(A.x,A.y,A.z,B.x,B.y,B.z); for(let k=0;k<2;k++) col.push(rgb.r,rgb.g,rgb.b); };
+  imagesData.forEach((im, gi) => {
+    const C = new THREE.Vector3(...im.center), Rt = im.Rt;
+    const right = new THREE.Vector3(Rt[0][0],Rt[1][0],Rt[2][0]);
+    const down  = new THREE.Vector3(Rt[0][1],Rt[1][1],Rt[2][1]);
+    const fwd   = new THREE.Vector3(Rt[0][2],Rt[1][2],Rt[2][2]);
+    const ctr = C.clone().add(fwd.clone().multiplyScalar(d));
+    const corners = [[-w,-h],[w,-h],[w,h],[-w,h]].map(([a,b]) =>
+      ctr.clone().add(right.clone().multiplyScalar(a)).add(down.clone().multiplyScalar(b)));
+    const rgb = new THREE.Color(gi === highlightIdx ? HILITE : colorOf(im.camera_id));
+    corners.forEach(cor => seg(C, cor, rgb));
+    for (let k=0;k<4;k++) seg(corners[k], corners[(k+1)%4], rgb);
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col,3));
+  cams = new THREE.LineSegments(g, new THREE.LineBasicMaterial({vertexColors:true}));
+  cams.visible = document.getElementById('show-cams').checked;
+  inner.add(cams);
+}
+
+new PLYLoader().load(`/api/jobs/${JOB}/model.ply`, (geo) => {
+  document.getElementById('loading').style.display = 'none';
+  const mat = new THREE.PointsMaterial({size:1.5, vertexColors:true, sizeAttenuation:false});
+  points = new THREE.Points(geo, mat); inner.add(points);
+  fitView();
+  document.getElementById('psize').oninput = e => { mat.size = +e.target.value; document.getElementById('psz-v').textContent = e.target.value; };
+  loadCameras();
+});
+
+async function loadCameras(){
+  const data = await (await fetch(`/api/jobs/${JOB}/scene.json`)).json();
+  document.getElementById('s-img').textContent = data.num_images.toLocaleString();
+  document.getElementById('s-cam').textContent = data.num_cameras.toLocaleString();
+  document.getElementById('s-pts').textContent = data.num_points.toLocaleString();
+  const err = data.mean_reproj_error, ee = document.getElementById('s-err');
+  ee.textContent = err.toFixed(2) + ' px';
+  ee.style.color = err < 1 ? 'var(--ok)' : err < 2 ? 'var(--warn)' : 'var(--err)';
+  document.getElementById('s-trk').textContent = data.mean_track_length.toFixed(1);
+  imagesData = data.images;
+
+  const ids = [...new Set(imagesData.map(i => i.camera_id))].sort((a,b)=>a-b);
+  const legend = document.getElementById('legend');
+  if (ids.length <= 8){
+    colorOf = id => palette[ids.indexOf(id) % palette.length];
+    legend.innerHTML = ids.map(id =>
+      `<span><i class="sw" style="background:#${colorOf(id).toString(16).padStart(6,'0')}"></i>cam ${id}</span>`).join('');
+  } else {
+    colorOf = () => 0xffd24a;
+    legend.innerHTML = `<span class="hint">${ids.length} cameras（單色顯示）</span>`;
+  }
+
+  const cpos = [];
+  imagesData.forEach(im => cpos.push(im.center[0], im.center[1], im.center[2]));
+  const cg = new THREE.BufferGeometry();
+  cg.setAttribute('position', new THREE.Float32BufferAttribute(cpos,3));
+  camPoints = new THREE.Points(cg, new THREE.PointsMaterial({size:5, color:0xffffff, sizeAttenuation:false}));
+  inner.add(camPoints);
+
+  buildCameras(+document.getElementById('csize').value);
+  document.getElementById('csize').oninput = e => {
+    document.getElementById('csz-v').textContent = (+e.target.value).toFixed(2); buildCameras(+e.target.value); };
+  document.getElementById('show-cams').onchange = e => { if (cams) cams.visible = e.target.checked; if (camPoints) camPoints.visible = e.target.checked; };
+  fitView();
+}
+
+// double-click a camera -> show its info + photo (highlight, no fly)
+renderer.domElement.addEventListener('dblclick', async (e) => {
+  if (!imagesData.length) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const cx = e.clientX - r.left, cy = e.clientY - r.top;
+  // pick the camera whose CENTRE projects nearest to the cursor (screen-space) —
+  // reliable regardless of frustum size / overlap / object rotation
+  inner.updateWorldMatrix(true, false);
+  const v = new THREE.Vector3();
+  let idx = -1, best = Infinity;
+  for (let i = 0; i < imagesData.length; i++){
+    v.set(imagesData[i].center[0], imagesData[i].center[1], imagesData[i].center[2]);
+    inner.localToWorld(v); v.project(camera);
+    if (v.z > 1) continue;                              // behind the camera
+    const sx = (v.x*0.5+0.5)*r.width, sy = (-v.y*0.5+0.5)*r.height;
+    const dd = (sx-cx)*(sx-cx) + (sy-cy)*(sy-cy);
+    if (dd < best){ best = dd; idx = i; }
+  }
+  if (idx < 0 || best > 40*40) return;                  // need a camera centre within ~40px
+  const im = imagesData[idx];
+  highlightIdx = idx;                                   // recolour the selected camera (no fly)
+  buildCameras(+document.getElementById('csize').value);
+  const sel = document.getElementById('sel'), body = document.getElementById('sel-body');
+  sel.style.display = 'block';
+  // photo loads once; only the text line updates after the score fetch
+  body.innerHTML = `<div id="sel-txt"><b>${im.name}</b><br><span class="hint">影像 #${idx} · cam ${im.camera_id} · 載入分數…</span></div>` +
+    `<img src="/api/jobs/${JOB}/imagefile/${idx}" onerror="this.style.display='none'">`;
+  try {
+    const d = await (await fetch(`/api/jobs/${JOB}/image/${idx}`)).json();
+    document.getElementById('sel-txt').innerHTML = `<b>${d.name}</b><br>影像 #${idx} · cam ${d.camera_id}<br>` +
+      `<span class="hint">registered pts</span> <b>${d.n_registered.toLocaleString()}</b> / ${d.n_features.toLocaleString()} feats`;
+  } catch(_){}
+});
+
+window.clearSel = () => {           // close info box + clear camera highlight
+  document.getElementById('sel').style.display = 'none';
+  highlightIdx = -1; buildCameras(+document.getElementById('csize').value);
+};
+document.getElementById('show-axes').onchange = e => { showGizmo = e.target.checked; };
+document.getElementById('rot-obj').onchange = e => { gizmo.enabled = gizmo.visible = e.target.checked; };
+document.getElementById('reset').onclick = () => fitView();
+document.getElementById('reset-rot').onclick = () => { obj.quaternion.identity(); fitView(); };
+
+const clock = new THREE.Clock();
+(function loop(){
+  requestAnimationFrame(loop);
+  if (viewHelper.animating) viewHelper.update(clock.getDelta()); else clock.getDelta();
+  controls.update();
+  renderer.clear();
+  renderer.render(scene, camera);
+  if (showGizmo) viewHelper.render(renderer);
+})();
+</script>
+{% endif %}
+</body>
+</html>
