@@ -1,4 +1,3 @@
-{% set badge = {'queued':'var(--mut)','running':'var(--accent)','done':'var(--ok)','failed':'var(--err)','cancelled':'var(--warn)'} %}
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
   <button class="ghost" onclick="deleteSelected()" style="border-color:var(--err);color:var(--err)">🗑 刪除選取</button>
   <span class="hint">勾選後刪除;進行中的會先取消。狀態每 3 秒自動更新。
@@ -18,17 +17,16 @@
 <table style="width:100%;border-collapse:collapse;font-size:13px">
   <thead><tr style="color:var(--mut);text-align:left">
     <th style="padding:6px 8px"><input type="checkbox" onclick="toggleAllJobs(this)"></th>
-    <th>狀態</th><th>內容</th><th>id</th><th></th>
+    <th>狀態</th><th>內容</th><th>開始</th><th>結束</th><th>id</th><th></th>
   </tr></thead>
   <tbody>
   {% for j in jobs %}
   <tr data-kind="{{ j.kind }}" style="border-top:1px solid var(--line)">
     <td style="padding:6px 8px"><input type="checkbox" class="jobsel" value="{{ j.id }}"></td>
-    <td>
-      <span style="background:{{ badge[j.status] }};color:#0a0c10;font-weight:600;
-                   padding:1px 8px;border-radius:20px;font-size:11px">{{ j.status }}</span>
-    </td>
+    <td><span class="badge {{ j.status }}" style="padding:1px 8px;font-size:11px">{{ j.status }}</span></td>
     <td>{{ {'frames':'🎬','train':'🧠','mesh':'🧩'}.get(j.kind,'📐') }} {{ j.title }}{% if j.current_stage %} <span class="hint">@{{ j.current_stage }}</span>{% endif %}</td>
+    <td style="white-space:nowrap;color:var(--mut);font-size:12px">{{ j.started_at | dt('%Y-%m-%d') }}{% if j.started_at %}<br><span style="opacity:.65">{{ j.started_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
+    <td style="white-space:nowrap;color:var(--mut);font-size:12px">{{ j.finished_at | dt('%Y-%m-%d') }}{% if j.finished_at %}<br><span style="opacity:.65">{{ j.finished_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
     <td><code class="hint">{{ j.id }}</code></td>
     <td><button class="ghost" onclick="loadJob('{{ j.id }}')">開啟</button></td>
   </tr>

@@ -1,12 +1,9 @@
-{% set badge = {'queued':'var(--mut)','running':'var(--accent)','done':'var(--ok)','failed':'var(--err)','cancelled':'var(--warn)'} %}
-{% set stepclr = {'running':'var(--accent)','done':'var(--ok)','failed':'var(--err)','skipped':'var(--mut)','pending':'var(--line)'} %}
 <div id="jobstatus"
      {% if job.status in ['queued','running'] %}
      hx-get="/ui/jobstatus/{{ job.id }}" hx-trigger="every 2s" hx-swap="outerHTML"
      {% endif %}>
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-    <span style="background:{{ badge[job.status] }};color:#0a0c10;font-weight:600;
-                 padding:2px 10px;border-radius:20px;font-size:12px">{{ job.status }}</span>
+    <span class="badge {{ job.status }}" style="padding:2px 10px;font-size:12px">{{ job.status }}</span>
     {% if job.status in ['queued','running'] %}
     <button class="ghost" style="margin-left:auto;border-color:var(--err);color:var(--err)"
             hx-post="/api/jobs/{{ job.id }}/cancel" hx-swap="none">取消</button>
@@ -71,7 +68,7 @@
     <div class="chips">
       {% for s in stages %}
       {% set st = job.stage_status.get(s, '') %}
-      <span class="chip" style="border-color:{{ stepclr.get(st,'var(--line)') }};color:{{ stepclr.get(st,'var(--mut)') }}">{{ s }}{% if st %} · {{ st }}{% endif %}</span>
+      <span class="step {{ st }}">{{ s }}{% if st %} · {{ st }}{% endif %}</span>
       {% endfor %}
     </div>
     {% if job.status == 'done' %}

@@ -35,6 +35,17 @@ FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")   # PATH by default; overrid
 
 app = FastAPI(title="Recon Studio")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
+
+
+def _fmt_dt(epoch, fmt="%Y-%m-%d %H:%M:%S"):
+    """Jinja filter: epoch seconds -> local 'YYYY-MM-DD HH:MM:SS' (blank if unset)."""
+    try:
+        return time.strftime(fmt, time.localtime(float(epoch))) if epoch else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+templates.env.filters["dt"] = _fmt_dt
 (BASE / "static").mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 

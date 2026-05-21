@@ -68,6 +68,15 @@
   .dl:hover { border-color:var(--accent); color:var(--fg); }
   .dl.primary { background:var(--accent); color:#0a0c10; border-color:var(--accent); font-weight:600; }
   .pathline { margin-top:6px; word-break:break-all; }
+  /* status badge + stage-step colours as classes (so the colour isn't a Jinja
+     expression inside style="…", which trips the editor's CSS linter) */
+  .badge { color:#0a0c10; font-weight:600; border-radius:20px; background:var(--mut); }
+  .badge.running { background:var(--accent); } .badge.done { background:var(--ok); }
+  .badge.failed { background:var(--err); } .badge.cancelled { background:var(--warn); }
+  .step { border:1px solid var(--line); color:var(--mut); border-radius:6px; padding:3px 9px; font-size:12px; }
+  .step.running { border-color:var(--accent); color:var(--accent); }
+  .step.done { border-color:var(--ok); color:var(--ok); }
+  .step.failed { border-color:var(--err); color:var(--err); }
   .checks { display:flex; flex-wrap:wrap; gap:8px 14px; }
   .checks label { display:flex; align-items:center; gap:5px; margin:0; color:var(--fg); font-size:13px; }
   .checks input { width:auto; accent-color:var(--accent); }
