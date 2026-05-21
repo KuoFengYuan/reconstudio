@@ -16,6 +16,7 @@ is the single most common way this integration goes wrong.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from pathlib import Path
@@ -25,6 +26,9 @@ from .model import read_cameras
 from .runner import Cancelled, Runner
 
 TRAIN_DEFAULTS = {"backend": "gs2m", "gpu": "0", "extra": "", "force": False}
+
+# Panel repo root (configs/ live here; resolved for backends that ship a config).
+PANEL_BASE = Path(__file__).resolve().parent.parent
 
 # Marker-scaling tools are panel-owned (live in this project's tools/), but run
 # in the backend's env (they need cv2/open3d/plyfile, which the trainer env has).
@@ -86,11 +90,67 @@ def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
     r.log(f"scene ready: {scene}  (sparse/0 + images → {sparse_dir.parent})")
 
 
+def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
+    """Run a compiled (non-Python) trainer, e.g. LichtFeld Studio. Unlike the
+    conda-python path we invoke the executable directly and point `-d` at the
+    undistorted COLMAP dir (sparse/ + images/) — no symlink scene needed, since
+    LichtFeld's COLMAP loader reads `<data>/sparse/` natively. Strategy defaults
+    come from a shipped `--config` JSON; the panel's curated fields override via CLI."""
+    name = p.get("backend")
+    exe = Path(spec.get("exec", "")).expanduser()
+    if not (exe.is_file() and os.access(exe, os.X_OK)):
+        raise FileNotFoundError(
+            f"backend '{name}' 的執行檔不存在或不可執行：{str(exe)!r}。"
+            " 請在 backends.json 把 \"exec\" 指向已編譯的 binary（開 /doctor 檢查）。")
+
+    src = Path(p["source"])
+    out = Path(p["model_path"])
+    if not src.is_dir():
+        raise FileNotFoundError(f"source not found: {src}")
+
+    sparse_dir, images_dir = _resolve_dense(src)
+    _assert_pinhole(sparse_dir, r)
+    data_dir = images_dir.parent              # dir holding sparse/ + images/
+
+    config = (spec.get("config") or "").strip()
+    if config:
+        cp = Path(config).expanduser()
+        if not cp.is_absolute():
+            cp = PANEL_BASE / cp
+        if not cp.is_file():
+            raise FileNotFoundError(f"backend '{name}' 的 config 不存在：{cp}")
+        config = str(cp)
+    config_arg = f"--config {shlex.quote(config)}" if config else ""
+
+    args = (p.get("args") or "").strip()      # curated params (assembled in app)
+    extra = (p.get("extra") or "").strip()     # free escape-hatch flags
+    cmd = spec.get("train_args", "-d {scene} -o {out} {config} {args} {extra}").format(
+        scene=str(data_dir), out=str(out), config=config_arg, args=args, extra=extra)
+    argv = [str(exe), *shlex.split(cmd)]
+
+    env = {}
+    gpu = str(p.get("gpu", "")).strip()
+    if gpu != "":
+        env["CUDA_VISIBLE_DEVICES"] = gpu       # honored regardless of the queue's scheduling
+
+    out.mkdir(parents=True, exist_ok=True)
+    r.banner(f"train start | backend={name} (binary) exe={exe.name} gpu={gpu or 'default'}")
+    r.log(f"trainer: {exe} {cmd}")
+    r.log(f"data:    {data_dir}")
+    r.log(f"output:  {out}")
+    r.run(argv, cwd=str(out), env=env)          # cwd=out so ./train.log + splat_*.ply co-locate
+    r.banner(f"train done. model={out}")
+    r.log("[note] 此 backend 不支援 mesh;訓練雲可用「🧹 在 SuperSplat 去背景」清背景後下載。")
+
+
 def run_train(p: dict, r: Runner) -> None:
     name = p.get("backend") or "gs2m"
     spec = get_backend(name)
     if not spec:
         raise ValueError(f"unknown backend: {name}")
+
+    if spec.get("launch") == "binary":          # compiled trainer (e.g. LichtFeld)
+        return _run_train_binary(p, spec, r)
 
     py = env_python(spec)
     if not py:

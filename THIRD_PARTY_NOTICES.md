@@ -8,6 +8,7 @@ license — you are responsible for complying with all of them.
 |-----------|----------------------|---------|
 | **GS-2M** ([ndming/GS-2M](https://github.com/ndming/GS-2M)) + its CUDA submodules (`diff-gaussian-rasterization`, `simple-knn`, `fused-ssim`, `nvdiffrast`, `render-utils`) | training + mesh backend | **Gaussian-Splatting License (Inria & MPII) — non-commercial, research & evaluation only** |
 | **3D Gaussian Splatting** ([graphdeco-inria](https://github.com/graphdeco-inria/gaussian-splatting)) | basis of GS-2M | **Gaussian-Splatting License (Inria & MPII) — non-commercial** |
+| **LichtFeld Studio** ([MrNeRF/LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio)) — optional training backends (MR-NF / iGS+ strategies) | training only (no mesh) | **GPL-3.0-or-later** |
 | **COLMAP** | Structure-from-Motion / reconstruction | New BSD |
 | **FFmpeg** | frame extraction + FullHD resize | LGPL-2.1+ / GPL (depends on the build) |
 | **FastAPI, Uvicorn, Jinja2, python-multipart** | web panel runtime | MIT / BSD |
@@ -20,3 +21,9 @@ license — you are responsible for complying with all of them.
 > 3DGS). The frames and COLMAP stages rely on BSD/LGPL tools. For commercial
 > licensing of the Gaussian-Splatting technology, contact Inria — see GS-2M's
 > `LICENSE.md`.
+>
+> **LichtFeld Studio (GPL-3.0)** is invoked only as a *separate compiled binary*
+> (a subprocess; Recon Studio never links its code), so it is mere aggregation —
+> it does not relicense Recon Studio. Recon Studio does not bundle or distribute
+> the binary; it is built per-machine (like GS-2M) and located via `backends.json`.
+> If you redistribute that binary, comply with GPL-3.0.

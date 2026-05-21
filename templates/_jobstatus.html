@@ -39,12 +39,14 @@
       <span class="hint">backend: {{ job.meta.get('backend','') }}</span>
     </div>
     {% if job.status == 'done' %}
-    {% if job.meta.get('can_mesh') %}
+    {% if job.meta.get('model_path') %}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="ghost" onclick="openSuperSplat('{{ job.id }}')">🧹 在 SuperSplat 去背景</button>
+      {% if job.meta.get('can_mesh') %}
       <button class="ghost" onclick="fillMesh('{{ job.meta.get('model_path','') }}')">🧩 接著抽 Mesh</button>
+      {% endif %}
     </div>
-    <div class="hint">去背流程:框選物件 → <b>Ctrl+I</b> 反選 → Delete 刪背景（誤刪可 <b>Ctrl+Z</b>）→ 按「✅ 送回」自動帶入 Mesh（原模型不動）。</div>
+    <div class="hint">去背流程:框選物件 → <b>Ctrl+I</b> 反選 → Delete 刪背景（誤刪可 <b>Ctrl+Z</b>）→ 按「✅ 送回」{% if job.meta.get('can_mesh') %}自動帶入 Mesh{% else %}下載乾淨點雲{% endif %}（原模型不動）。</div>
     {% endif %}
     <div class="hint pathline">✅ 模型輸出：<code>{{ job.meta.get('model_path','') }}</code></div>
     {% endif %}

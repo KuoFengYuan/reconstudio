@@ -65,6 +65,13 @@ Output (workspace): `database.db`, `image_list.txt`, `images_fullhd/` (when Full
 Runs a Gaussian-splatting trainer in **its own conda env** as a subprocess. Backends
 are **data, not code** (see [Backends](#backends)); built-in default is **GS-2M**.
 
+> **其他後端 (選用):LichtFeld Studio（MR-NF / iGS+）** — 編譯型 C++ trainer,以
+> `"launch": "binary"` 後端宣告(直接跑 binary,不經 conda;見 [Backends](#backends)）。
+> 策略預設來自 `--config`（`configs/lichtfeld/*.json`，可調),GUI 露出精選常調項
+> （`--headless`/`--no-splash` 由後端自動帶入;MR-NF 另有 `--use-error-map`/`--use-edge-map`，預設開、可關）。
+> **這兩個 backend 不支援 mesh**(不宣告 `mesh_args` → 無 Mesh 按鈕),但訓練完一樣能
+> **🧹 在 SuperSplat 去背景**（送回後改為「下載乾淨點雲」,不抽 mesh）。
+
 - **Scene adaptation**: a COLMAP workspace is exposed to the trainer non-destructively
   as `<model>_scene/` (symlinks: `sparse/0/{cameras,images,points3D}.bin` + `images/`).
   The undistorted **PINHOLE** model is used; a distorted (OPENCV) model is rejected up
@@ -79,17 +86,22 @@ are **data, not code** (see [Backends](#backends)); built-in default is **GS-2M*
 ### 🧹 去背 (background removal, optional) — SuperSplat
 訓練完成面板的 **🧹 在 SuperSplat 去背景** 會在右側內嵌一個自架的
 [SuperSplat](https://github.com/playcanvas/supersplat) 編輯器（`static/supersplat/`，MIT），
-載入訓練好的 `point_cloud/iteration_*/point_cloud.ply`。常用流程：框選物件 → **Ctrl+I** 反選
-→ **Delete** 刪背景（誤刪 **Ctrl+Z** 還原）→ **✅ 送回去背點雲 → 抽 Mesh**。
+載入訓練好的雲（GS-2M `point_cloud/iteration_*/point_cloud.ply`、LichtFeld `splat_*.ply`）。
+常用流程：框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景（誤刪 **Ctrl+Z** 還原）→ **✅ 送回去背點雲**。
 
-送回時瀏覽器把去背後的雲序列化成 PLY，POST 到 `/api/jobs/<id>/edited_ply`；server 以原模型
-衍生一個**非破壞性**的 `<model>_edited_<時間>` 兄弟目錄（symlink 原 `cfg_args`，去背雲放進
-`point_cloud/iteration_<N>/point_cloud.ply`），並自動帶入 Mesh 表單的 `model_path`。
-**原模型完全不動** — 去背搞砸就重來，或把 Mesh 的去背欄位留空用原始點雲。`render.py` 因此會用
-乾淨的雲算 mesh、從原 `source_path` 讀相機、把結果寫進兄弟目錄。
+送回時瀏覽器把去背後的雲序列化成 PLY，POST 到 `/api/jobs/<id>/edited_ply`。**原模型完全不動**；
+依後端分流(`/api/doctor` 看得到哪個有 mesh)，輸出落點如下：
 
-- **去背 ≠ 即時更新 mesh**：編輯只改點雲，要重跑 Mesh 階段才會產出乾淨 mesh。
-- **GS-2M 不需改動**：靠兄弟目錄 + symlink，render.py 零修改就能吃去背後的雲。
+| 後端 | 送回後動作 | 去背雲輸出路徑 |
+|------|-----------|---------------|
+| **GS-2M**（有 mesh） | 衍生非破壞性兄弟目錄 + 自動帶入 Mesh 表單 | `<model>_edited_<時間>/point_cloud/iteration_<N>/point_cloud.ply`（symlink 原 `cfg_args`）;重抽的 mesh → `<model>_edited_<時間>/train/ours_<N>/mesh/tsdf_post.ply` |
+| **LichtFeld**（無 mesh） | 存檔 + 瀏覽器下載 `cleaned.ply` | `<model>/edited/cleaned_<時間>.ply` |
+
+GS-2M 因此可用乾淨的雲重抽 mesh：`render.py -m <兄弟目錄>` 從原 `source_path`（記在 `cfg_args`）
+讀相機、把結果寫進兄弟目錄;去背搞砸就重來，或把 Mesh 的去背欄位留空用原始點雲。
+
+- **去背 ≠ 即時更新 mesh**：編輯只改點雲，要重跑 Mesh 階段才會產出乾淨 mesh（僅 GS-2M）。
+- **GS-2M / 後端皆不需改動**：靠兄弟目錄 + symlink，trainer 零修改就能吃去背後的雲。
 - **build**：`static/supersplat/` 是建置產物（已 gitignore）。第一次或更新版本時跑
   `./tools/build_supersplat.sh`（需要 node ≥18 + npm + git；會 clone 釘版 SuperSplat、套
   `tools/supersplat-reconstudio.patch`〔滾輪縮放修正 + 送回 API〕、用 `BASE_HREF=/static/supersplat/`
@@ -172,10 +184,21 @@ Interpreter resolution (most portable first): explicit `python` path → `$CONDA
 → derived from the panel's own `sys.prefix` → `conda info --base`. So if the trainer env
 names match (e.g. `gs2m`), it works zero-config.
 
+**Compiled (non-Python) trainers** — set `"launch": "binary"` + `"exec"` (path to the built
+executable) instead of `conda_env`/`repo`. The panel runs the binary directly (no conda/torch);
+readiness just checks it's executable. A `"config"` (path, resolved relative to the panel)
+is passed as `--config` for defaults, and the `params` schema overrides via CLI flags. Example:
+**LichtFeld Studio** (`lichtfeld-mrnf` / `lichtfeld-igs+` in `backends.example.json`) — declares
+no `mesh_args`, so it's training-only; 去背 still works (送回 → 下載乾淨點雲). Build it per-machine
+([wiki](https://github.com/MrNeRF/LichtFeld-Studio/wiki/)) and point `"exec"` at `build/LichtFeld-Studio`.
+The panel auto-adds `--headless --no-splash`; if the binary can't find its shared libs when
+launched from the panel, set `LD_LIBRARY_PATH` in `local.env` (see `local.env.example`).
+
 **`/doctor`** — preflight page (also `/api/doctor`). Per backend it checks: env python,
 repo/script present, and (deep) imports `torch` + the compiled CUDA submodule (e.g.
 `diff_gaussian_rasterization`) inside that env — catching the most common
-move-to-new-machine failure (extension built for another GPU arch). Also reports COLMAP
+move-to-new-machine failure (extension built for another GPU arch). For `"launch": "binary"`
+backends it instead reports whether the `exec` exists and is executable. Also reports COLMAP
 version and GPUs.
 
 ### GS-2M — install & wiring
@@ -238,6 +261,52 @@ or the panel's own `sys.prefix`.
 `torch` + CUDA ✓, `diff_gaussian_rasterization` import ✓. Then it appears (un-greyed) in the
 訓練 / Mesh backend selectors.
 
+### LichtFeld Studio — install & wiring (選用;MR-NF / iGS+,訓練 only)
+
+LichtFeld Studio ([github.com/MrNeRF/LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio),
+**GPL-3.0**) is a compiled C++/CUDA trainer. Unlike GS-2M it runs as a **built binary**
+(no conda env), exposing two strategies — **MR-NF** and **iGS+**. It declares no `mesh_args`,
+so it's **training-only**; 去背 still works (送回 → 下載乾淨點雲). Recon Studio expects it as a
+**sibling of this repo** (`../LichtFeld-Studio`).
+
+**1) Get the code** (as a sibling of the panel repo):
+```bash
+cd /home/will/repo            # the dir that holds the panel repo
+git clone https://github.com/MrNeRF/LichtFeld-Studio.git
+```
+
+**2) Build from source** (GPU/arch-specific; per-machine). Needs **CUDA Toolkit 12.8+**, a recent
+NVIDIA driver, and **vcpkg** (`VCPKG_ROOT` set). Authoritative steps:
+[Wiki](https://github.com/MrNeRF/LichtFeld-Studio/wiki/) + `LichtFeld-Studio/docs/building_and_distribution.md`.
+Gist on Ubuntu:
+```bash
+sudo apt install git curl unzip cmake gcc-14 g++-14 ccache ninja-build zip tar pkg-config python3 python3-dev
+cd LichtFeld-Studio
+cmake -B build                 # configures (vcpkg pulls deps; first run is slow)
+cmake --build build -j"$(nproc)"
+./build/LichtFeld-Studio --help # sanity check -> the binary lives at build/LichtFeld-Studio
+```
+> The default build's binary needs CUDA + vcpkg present at runtime. A self-contained `dist/`
+> (`-DBUILD_PORTABLE=ON` + `cmake --install`) is also possible — see the build doc.
+
+**3) Wiring** — the two backends are pre-declared in [`backends.example.json`](backends.example.json)
+(copy to `backends.json`); per machine you only set the binary path:
+
+| backend `lichtfeld-mrnf` / `lichtfeld-igs+` | value |
+|---|---|
+| `launch` | `binary` (run the executable directly, no conda/torch) |
+| `exec` | abs path to `…/LichtFeld-Studio/build/LichtFeld-Studio` |
+| `config` | `configs/lichtfeld/{mrnf,igsplus}.json` (策略預設,shipped + 可調) |
+| train | `LichtFeld-Studio -d <colmap> -o <model> --strategy {mrnf\|igs+} --headless --no-splash --config … <params>` |
+| mesh | — (不支援) |
+
+`<colmap>` is your COLMAP workspace's undistorted PINHOLE dir (`sparse/` + `images/`), resolved
+automatically. `--headless --no-splash` are auto-added. If the binary can't find its shared libs
+when launched from the panel, set `LD_LIBRARY_PATH` in `local.env` (see `local.env.example`).
+
+**4) Verify** at `/doctor` — each `lichtfeld-*` row should show `launch: binary`, `exec_ok ✓`,
+`ready ✓`. Then they appear (un-greyed) in the **訓練** selector (not Mesh).
+
 ### Deploy to another machine
 The panel is torch-free, so deploying it is trivial; the heavy CUDA env is a per-machine
 prerequisite that backends merely locate and `/doctor` verifies:
@@ -250,7 +319,8 @@ cd reconstudio
 conda create -n rec python=3.10 -y
 conda run -n rec pip install -r requirements.txt
 # 2) prerequisites: install colmap (+ ffmpeg with blurdetect), and set up the trainer
-#    env(s) — for GS-2M follow "GS-2M — install & wiring" above (env create + pip build)
+#    env(s) — for GS-2M follow "GS-2M — install & wiring" above (env create + pip build);
+#    for LichtFeld (optional) follow "LichtFeld Studio — install & wiring" (cmake build)
 # 2b) (optional) build the in-browser 去背 editor into static/ (needs node>=18 + npm + git)
 ./tools/build_supersplat.sh
 # 3) per-machine config (optional if names/paths match)

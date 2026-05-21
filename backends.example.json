@@ -16,6 +16,12 @@
     "`mesh_args` (+ `mesh_script`/`mesh_params`). GS-2M does (render.py --extract_mesh);",
     "gsplat below intentionally omits it, so the Mesh tab won't offer gsplat.",
     "",
+    "Compiled (non-Python) trainers: set \"launch\": \"binary\" + \"exec\" (path to the",
+    "built executable). The panel runs it directly (no conda/torch); readiness checks",
+    "the file is executable. LichtFeld Studio backends below use a shipped --config",
+    "(configs/lichtfeld/*.json = strategy defaults); the panel's `params` override via",
+    "CLI. They declare no `mesh_args` (these models can't mesh) — but 去背 still works.",
+    "",
     "Real-size (mm): set `marker_defaults` (physical ChArUco board geometry) to enable",
     "the Mesh tab's 提供 marker option. Scaling scripts live in the panel's tools/ and",
     "run in THIS backend's env (needs opencv-contrib-python / open3d / plyfile / scipy)."
@@ -42,6 +48,44 @@
     "probe_imports": ["torch", "gsplat"],
     "params": [
       { "key": "max_steps", "flag": "--max_steps", "type": "int", "default": "30000", "label": "max steps" }
+    ]
+  },
+
+  "lichtfeld-mrnf": {
+    "label": "LichtFeld · MR-NF (無 mesh)",
+    "launch": "binary",
+    "exec": "/home/will/repo/LichtFeld-Studio/build/LichtFeld-Studio",
+    "config": "configs/lichtfeld/mrnf.json",
+    "train_args": "-d {scene} -o {out} --strategy mrnf --headless --no-splash {config} {args} {extra}",
+    "params": [
+      { "key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數" },
+      { "key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "", "label": "步數縮放 (留空=用 config)", "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值(LichtFeld 內部換算,不必自己乘)。留空 = 用 config 預設。" },
+      { "key": "sh_degree", "flag": "--sh-degree", "type": "select", "options": ["0", "1", "2", "3"], "default": "3", "label": "SH 階數" },
+      { "key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)" },
+      { "key": "resize_factor", "flag": "--resize_factor", "type": "select", "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣" },
+      { "key": "use_error_map", "flag": "--use-error-map", "type": "bool", "default": true, "label": "誤差圖加權 (use-error-map)", "hint": "MR-NF 用 per-pixel SSIM 誤差圖加權 refine 訊號;預設開。" },
+      { "key": "use_edge_map", "flag": "--use-edge-map", "type": "bool", "default": true, "label": "邊緣圖加權 (use-edge-map)", "hint": "MR-NF 用 Sobel 邊緣圖加權 refine 訊號;預設開。" },
+      { "key": "mask_mode", "flag": "--mask-mode", "type": "select", "options": ["none", "segment", "ignore", "alpha_consistent"], "default": "none", "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。" },
+      { "key": "bilateral_grid", "flag": "--bilateral-grid", "type": "bool", "default": false, "label": "雙邊網格 (曝光補償)" },
+      { "key": "enable_mip", "flag": "--enable-mip", "type": "bool", "default": true, "label": "Mip 濾波 (抗鋸齒)" }
+    ]
+  },
+
+  "lichtfeld-igs+": {
+    "label": "LichtFeld · iGS+ (無 mesh)",
+    "launch": "binary",
+    "exec": "/home/will/repo/LichtFeld-Studio/build/LichtFeld-Studio",
+    "config": "configs/lichtfeld/igsplus.json",
+    "train_args": "-d {scene} -o {out} --strategy igs+ --headless --no-splash {config} {args} {extra}",
+    "params": [
+      { "key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數" },
+      { "key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "", "label": "步數縮放 (留空=用 config)", "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值(LichtFeld 內部換算,不必自己乘)。留空 = 用 config 預設。" },
+      { "key": "sh_degree", "flag": "--sh-degree", "type": "select", "options": ["0", "1", "2", "3"], "default": "3", "label": "SH 階數" },
+      { "key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)" },
+      { "key": "resize_factor", "flag": "--resize_factor", "type": "select", "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣" },
+      { "key": "mask_mode", "flag": "--mask-mode", "type": "select", "options": ["none", "segment", "ignore", "alpha_consistent"], "default": "none", "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。" },
+      { "key": "bilateral_grid", "flag": "--bilateral-grid", "type": "bool", "default": false, "label": "雙邊網格 (曝光補償)" },
+      { "key": "enable_mip", "flag": "--enable-mip", "type": "bool", "default": true, "label": "Mip 濾波 (抗鋸齒)" }
     ]
   }
 }

@@ -426,22 +426,27 @@ def _model_dir(job) -> Path | None:
 
 
 def _trained_model_dir(job) -> Path | None:
-    """The trained-model output dir (cfg_args + point_cloud/), from a train job's
-    meta. Distinct from _model_dir, which is the COLMAP sparse reconstruction."""
+    """The trained-model output dir, from a train job's meta. Validated by the
+    presence of a trained 3DGS .ply (backend-agnostic). Distinct from _model_dir,
+    which is the COLMAP sparse reconstruction."""
     mp = (job.meta or {}).get("model_path")
     if not mp:
         return None
     d = Path(mp)
-    return d if (d / "cfg_args").is_file() else None
+    return d if (d.is_dir() and _trained_ply(d)) else None
 
 
 def _trained_ply(model_dir: Path) -> Path | None:
-    """Highest-iteration trained 3DGS point_cloud.ply under a model dir."""
+    """Highest-iteration trained 3DGS .ply, across trainer layouts:
+       GS-2M     → point_cloud/iteration_<N>/point_cloud.ply
+       LichtFeld → splat_<N>.ply (in the output dir)."""
     cands = list(model_dir.glob("point_cloud/iteration_*/point_cloud.ply"))
+    cands += list(model_dir.glob("splat_*.ply"))
     if not cands:
         return None
     def it(p: Path) -> int:
-        m = re.search(r"iteration_(\d+)", p.parent.name)
+        token = p.parent.name if p.name == "point_cloud.ply" else p.stem
+        m = re.search(r"(\d+)", token)
         return int(m.group(1)) if m else -1
     return max(cands, key=it)
 
@@ -619,21 +624,36 @@ async def gaussians_ply(job_id: str):
 
 @app.post("/api/jobs/{job_id}/edited_ply")
 async def edited_ply_upload(job_id: str, request: Request):
-    """Receive a SuperSplat-edited (去背) .ply (raw body) from the embedded editor
-    and stage it as a non-destructive `_edited_<time>` sibling model dir. Returns
-    the new model_path so the UI can prefill + run the Mesh stage on it. The
-    original trained model is never touched."""
+    """Receive a SuperSplat-edited (去背) .ply (raw body) from the embedded editor.
+
+    Mesh backends (GS-2M): stage a non-destructive `_edited_<time>` sibling model
+    dir and return its path → the UI prefills + re-meshes from the clean cloud.
+    No-mesh backends (LichtFeld): save the cleaned cloud under `<model>/edited/`
+    and return its path → the UI offers a download. The original is never touched."""
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
     md = _trained_model_dir(job)
     if not md:
-        raise HTTPException(404, "此 job 沒有訓練輸出（缺 model_path / cfg_args）。")
-    edited, dest = await asyncio.to_thread(_make_edited_model, md)
-    with open(dest, "wb") as out:                 # stream to disk (the cloud may be large)
-        async for chunk in request.stream():
-            out.write(chunk)
-    return JSONResponse({"ok": True, "model_path": str(edited), "backend": (job.meta or {}).get("backend", "")})
+        raise HTTPException(404, "此 job 沒有訓練輸出（找不到 point_cloud / splat ply）。")
+    spec = get_backend((job.meta or {}).get("backend", "") or "")
+    can_mesh = bool(spec and spec.get("mesh_args"))
+
+    async def _save(dest: Path) -> None:          # stream to disk (the cloud may be large)
+        with open(dest, "wb") as out:
+            async for chunk in request.stream():
+                out.write(chunk)
+
+    if can_mesh:
+        edited, dest = await asyncio.to_thread(_make_edited_model, md)
+        await _save(dest)
+        return JSONResponse({"ok": True, "mode": "mesh", "model_path": str(edited)})
+    # no-mesh backend (e.g. LichtFeld): keep the cleaned cloud for download, no re-mesh dir
+    ed = md / "edited"
+    ed.mkdir(parents=True, exist_ok=True)
+    dest = ed / f"cleaned_{time.strftime('%Y%m%d_%H%M%S')}.ply"
+    await _save(dest)
+    return JSONResponse({"ok": True, "mode": "download", "saved": str(dest)})
 
 
 @app.get("/api/jobs/{job_id}/logs")

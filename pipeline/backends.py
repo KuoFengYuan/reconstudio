@@ -198,6 +198,16 @@ def repo_path(spec: dict) -> Path:
     return r if r.is_absolute() else (BASE / r).resolve()
 
 
+def binary_exec(spec: dict) -> Path | None:
+    """Resolved executable for a `launch: "binary"` backend (e.g. LichtFeld Studio),
+    or None if missing / not executable. Such backends invoke a compiled binary
+    directly instead of a conda-env python (so env_python / torch checks don't apply)."""
+    exe = Path(spec.get("exec", "")).expanduser()
+    if not exe.is_absolute():
+        exe = (BASE / exe).resolve()
+    return exe if (exe.is_file() and os.access(exe, os.X_OK)) else None
+
+
 # --------------------------------------------------------------------------- #
 # Backend listing (built-ins merged with per-machine backends.json)
 # --------------------------------------------------------------------------- #
@@ -223,13 +233,17 @@ def available_backends() -> list[dict]:
     """Light summary for the UI form: each backend with a resolved `ready` flag."""
     res = []
     for name, spec in load_backends().items():
-        py = env_python(spec)
-        repo = repo_path(spec)
-        ready = bool(py) and (repo / spec.get("train_script", "train.py")).is_file()
+        if spec.get("launch") == "binary":            # compiled trainer (LichtFeld)
+            ready = bool(binary_exec(spec))
+        else:
+            py = env_python(spec)
+            repo = repo_path(spec)
+            ready = bool(py) and (repo / spec.get("train_script", "train.py")).is_file()
         res.append({
             "name": name,
             "label": spec.get("label", name),
             "ready": ready,
+            "binary": spec.get("launch") == "binary",  # compiled trainer (LichtFeld): no conda/extra
             "params": spec.get("params", []),         # training-param schema
             # mesh extraction is backend-specific (e.g. GS-2M's render.py); a backend
             # supports it only if it declares mesh_args. gsplat & co. won't.
@@ -323,6 +337,19 @@ def doctor(deep: bool = True) -> dict:
         "backends": {},
     }
     for name, spec in load_backends().items():
+        if spec.get("launch") == "binary":            # compiled trainer (LichtFeld)
+            exe = binary_exec(spec)
+            item = {
+                "label": spec.get("label", name),
+                "launch": "binary",
+                "exec": str(Path(spec.get("exec", "")).expanduser()),
+                "exec_ok": bool(exe),
+                "config": spec.get("config", ""),
+                "mesh": bool(spec.get("mesh_args")),
+                "ready": bool(exe),
+            }
+            report["backends"][name] = item
+            continue
         py = env_python(spec)
         repo = repo_path(spec)
         script_ok = (repo / spec.get("train_script", "train.py")).is_file()

@@ -61,15 +61,19 @@ _FR_RESULT = re.compile(r"-> (\d+) kept / (\d+) dropped")
 _TR_BAR = re.compile(r"(\d+)/(\d+)\s*\[")
 _TR_ITER = re.compile(r"\[ITER\s+(\d+)\]")
 _TR_LOSS = re.compile(r"loss[=:]\s*([0-9.]+)", re.IGNORECASE)
-_TR_DONE = re.compile(r"Training complete")
+_TR_DONE = re.compile(r"Training complete")     # also matches LichtFeld "Training completed in"
+# LichtFeld Studio's headless progress bar postfix: "<iter>/<total> | Loss: .. | Splats: ..".
+# Its "Loss:" is already caught by _TR_LOSS; this captures iter/total from the same line.
+_LF_BAR = re.compile(r"(\d+)/(\d+)\s*\|\s*Loss:")
 # Human-readable phase, so the status chip shows life during the long, output-quiet
 # stages (camera loading etc.) instead of looking frozen.
 _TR_PHASES = [
     (re.compile(r"Loading train cameras"), "載入訓練相機"),
     (re.compile(r"Loading test cameras"), "載入測試相機"),
+    (re.compile(r"Loading COLMAP|Loading dataset"), "載入資料集"),   # LichtFeld
     (re.compile(r"Number of points at init"), "初始化點雲"),
     (re.compile(r"Populating"), "建立多視角資料"),
-    (re.compile(r"Saving Gaussians"), "存檔中"),
+    (re.compile(r"Saving Gaussians|Saving final model"), "存檔中"),  # +LichtFeld
     (re.compile(r"Saving checkpoint"), "存 checkpoint"),
 ]
 
@@ -168,6 +172,11 @@ def _parse_train(job: Job, line: str) -> None:
             job.meta["iter"], job.meta["total"] = int(m.group(1)), int(m.group(2))
             job.meta["phase"] = "訓練中"
             job.current_stage = "train"
+    m = _LF_BAR.search(line)          # LichtFeld: "<iter>/<total> | Loss: …"
+    if m:
+        job.meta["iter"], job.meta["total"] = int(m.group(1)), int(m.group(2))
+        job.meta["phase"] = "訓練中"
+        job.current_stage = "train"
     m = _TR_ITER.search(line)
     if m:
         job.meta["iter"] = int(m.group(1))
