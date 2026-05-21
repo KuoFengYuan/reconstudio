@@ -140,13 +140,20 @@ def build_cli(params: list, values: dict) -> str:
     submitted `values` (keyed by each param's `key`). Bools emit just the flag
     when truthy; others emit `flag value` when non-empty. Values are shell-quoted
     so paths with spaces survive the round-trip through shlex.split in train.py.
+
+    A bool param may set `"invert": true` for "feature on by default, flag DISABLES
+    it" CLIs (e.g. LichtFeld's --no-cpu-cache): the checkbox reads as the feature
+    being ON (checked by default) and the flag is emitted only when UNchecked.
     Reused for both training (`params`) and mesh extraction (`mesh_params`)."""
     import shlex
     toks: list[str] = []
     for pr in params:
         v = values.get(pr["key"])
         if pr.get("type") == "bool":
-            if v:
+            on = bool(v)
+            if pr.get("invert"):
+                on = not on          # checked = feature on -> don't emit the disable flag
+            if on:
                 toks.append(pr["flag"])
         else:
             s = ("" if v is None else str(v)).strip()

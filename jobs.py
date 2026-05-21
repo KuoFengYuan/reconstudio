@@ -39,9 +39,10 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
 _RUN_MARKERS = [
     (re.compile(r"stage nested layout"), "stage"),
     (re.compile(r"feature_extractor"), "extract"),
-    (re.compile(r"sequential_matcher|vocab_tree_matcher"), "match"),
+    (re.compile(r"sequential_matcher|vocab_tree_matcher|spatial_matcher"), "match"),
     (re.compile(r"view_graph_calibrator"), "calibrate"),
-    (re.compile(r"colmap global_mapper|colmap mapper "), "mapper"),
+    (re.compile(r"colmap global_mapper|colmap mapper |colmap pose_prior_mapper"), "mapper"),
+    (re.compile(r"model_aligner"), "align"),
     (re.compile(r"image_undistorter"), "undistort"),
 ]
 _SKIP_RE = re.compile(r"^\s*skip (\w+)")

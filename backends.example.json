@@ -11,6 +11,8 @@
     "  3. <envs>/<conda_env>/bin/python derived from the panel's own sys.prefix",
     "Repos are relative to the Recon Studio repo dir unless given as an absolute path.",
     "Param `type`: int | float | str | bool | select (select needs \"options\").",
+    "A bool may add \"invert\": true so the flag is emitted only when UNchecked —",
+    "for \"on by default, flag disables it\" CLIs (e.g. LichtFeld --no-cpu-cache).",
     "",
     "Mesh extraction is backend-specific: a backend supports it ONLY if it declares",
     "`mesh_args` (+ `mesh_script`/`mesh_params`). GS-2M does (render.py --extract_mesh);",

@@ -44,12 +44,20 @@ COLMAP_DEFAULTS = {
     "MATCHER": "both", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
     "GUIDED_MATCHING": "1", "MAPPER": "global", "DATASET_NAME": "training_dataset",
     "FORCE": "0", "NESTED_LAYOUT": "1", "VOCAB_TREE": "", "VOCAB_TREE_URL": "",
+    # spatial_matcher (MATCHER=spatial)
+    "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
+    # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
+    "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
+    # GPU bundle adjustment (incremental / pose_prior) — on by default
+    "MAPPER_BA_GPU": "1",
+    # GPS metric alignment (model_aligner) — off by default, needs GPS in the inputs
+    "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
 }
 FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOLD": ""}
 ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
-    "MATCHER": ["sequential", "vocab", "both"],
-    "MAPPER": ["global", "incremental"],
+    "MATCHER": ["sequential", "vocab", "both", "spatial"],
+    "MAPPER": ["global", "incremental", "pose_prior"],
 }
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}
 
@@ -205,16 +213,37 @@ def _build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "force": bool(form.get("FORCE")),
         "layout": form.get("layout") or "auto",
         "resize": form.get("resize") or "fullhd",
+        # spatial_matcher (MATCHER=spatial)
+        "spatial_max_neighbors": g("SPATIAL_MAX_NEIGHBORS", "50"),
+        "spatial_max_distance": g("SPATIAL_MAX_DISTANCE", "100"),
+        "spatial_ignore_z": "1" if form.get("SPATIAL_IGNORE_Z") else "0",
+        # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
+        "prior_std_x": g("PRIOR_STD_X", "3.0"),
+        "prior_std_y": g("PRIOR_STD_Y", "3.0"),
+        "prior_std_z": g("PRIOR_STD_Z", "5.0"),
+        "prior_robust_loss": "1",
+        "ba_gpu": bool(form.get("MAPPER_BA_GPU")),
+        # GPS metric alignment (model_aligner) — off unless ticked AND GPS is present
+        "gps_align": bool(form.get("GPS_ALIGN")),
+        "gps_align_type": g("GPS_ALIGN_TYPE", "enu"),
+        "gps_align_max_error": g("GPS_ALIGN_MAX_ERROR", "3.0"),
     }
     for key, allowed in (("camera_mode", ENUMS["CAMERA_MODE"]),
                          ("matcher", ENUMS["MATCHER"]), ("mapper", ENUMS["MAPPER"]),
                          ("layout", ["auto", "single", "multi", "nested"]),
-                         ("resize", ["keep", "fullhd"])):
+                         ("resize", ["keep", "fullhd"]),
+                         ("gps_align_type", ["enu", "ecef", "enu-plane", "plane"])):
         if params[key] not in allowed:
             raise ValueError(f"{key} must be one of {allowed}")
-    for key in ("max_features", "seq_overlap", "num_matches"):
+    for key in ("max_features", "seq_overlap", "num_matches", "spatial_max_neighbors"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
+    for key in ("spatial_max_distance", "prior_std_x", "prior_std_y", "prior_std_z",
+                "gps_align_max_error"):
+        try:
+            float(params[key])
+        except ValueError:
+            raise ValueError(f"{key} must be a number")
     return params
 
 

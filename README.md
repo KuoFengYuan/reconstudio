@@ -37,29 +37,37 @@ OUT  <out>/<group>/frames_<video>/*.jpg  e.g.  FY115/0518_colmap/A/frames_IMG_36
 ```
 
 ### ② COLMAP — images → reconstruction
-Layout auto-detected (or forced via the `layout` selector); a workspace nested inside
-`image_root` is ignored when detecting groups:
+Layout auto-detected (or forced via `layout`); a workspace nested in `image_root` is
+ignored when detecting groups:
 
 ```
-single  XXX/*.jpg                -> 1 shared camera (also when the root itself holds images)
+single  XXX/*.jpg                -> 1 shared camera (also when the root holds images)
 multi   ROOT/<group>/*.jpg       -> 1 camera per group   (CAMERA_MODE=per_folder)
 nested  ROOT/<group>/<vid>/*.jpg -> staged, 1 camera per group   (① feeds this)
 ```
 
-**影像解析度 (resize, 預設 FullHD)** — unlike a max-size cap, FullHD **physically
-downscales** every input to a real FullHD copy under `workspace/images_fullhd/`
-(longest side ≤ 1920, **aspect-ratio preserving, never upscaled**), and the whole
-COLMAP run (features / mapping / undistort) operates on those.
-- Quality: **Lanczos** downscaling + max-quality encode (JPEG `q=1`, 4:4:4 no chroma
-  subsampling; PNG/TIFF kept lossless), so 4K → FullHD stays sharp.
-- Speed: many `ffmpeg` workers in parallel (CPU-bound; NVDEC can't accelerate JPEG
-  stills). ~18× over serial on a many-core box. Tune with `COLMAP_PANEL_RESIZE_WORKERS`.
-- Idempotent (sentinel), resumable (skips done files), cancellable.
+**影像解析度 (預設 FullHD)** — 把每張輸入**實體**等比縮成長邊 ≤1920 的副本(存
+`workspace/images_fullhd/`,保比例、不放大),整條 COLMAP 跑這些縮圖。Lanczos + 最高品質
+編碼(JPEG `q=1` 4:4:4、PNG/TIFF 無損)使 4K→FullHD 仍銳利;多 `ffmpeg` 並行
+(`COLMAP_PANEL_RESIZE_WORKERS` 可調);idempotent、可續跑、可取消。選「保持原樣」則不縮。
 
-Output (workspace): `database.db`, `image_list.txt`, `images_fullhd/` (when FullHD),
-`sparse/0/{cameras,images,points3D}.bin`, `<dataset>_<mapper>_mapper/` (undistorted
-**PINHOLE** dense input — what the trainer consumes), `pipeline.log`, sentinels, and
-`sparse/points.ply` (cached for the viewer).
+**GPS / 大場景** — 逐張檢查輸入的 EXIF GPS(純 stdlib;影片轉幀無 per-frame GPS)。GPS 流程
+需要**每張**都有 GPS(否則該幀無法被空間比對/錨定),所以勾了任一 GPS 選項時會先確認 100%
+覆蓋。FullHD 縮圖**照常等比縮放**,只是把原圖的 EXIF GPS **接回每張縮圖**(ffmpeg 重編原會
+洗掉),讓 COLMAP 仍讀得到 GPS 寫進 DB pose prior。可解鎖:
+
+| 選項 | COLMAP 指令 | 作用 | 主要參數 |
+|------|------------|------|---------|
+| `MATCHER=spatial` | `spatial_matcher` | 用 GPS 鄰近度限制比對候選,大場景比 vocab/sequential 快且穩 | `SPATIAL_MAX_NEIGHBORS` · `SPATIAL_MAX_DISTANCE`(m) · `SPATIAL_IGNORE_Z` |
+| `MAPPER=pose_prior` | `pose_prior_mapper` | GPS 先驗進 BA,抗漂移、輸出**直接公制+地理對齊** | `PRIOR_STD_X/Y/Z`(GPS 精度 m;消費級 3~5、RTK ~0.02) |
+| `GPS_ALIGN`(選填) | `model_aligner` | 事後把稀疏模型對齊到 ENU 公尺 | `GPS_ALIGN_MAX_ERROR`(m) |
+
+> `GPS_ALIGN` 與 Mesh 的 ChArUco mm 校正擇一;用 `pose_prior` 已對齊則免。勾了任一 GPS 選項
+> 但**並非每張都有 GPS(< 100%)→ 開跑前直接中斷**,不白跑整條。
+
+**Output** (workspace):`database.db`、`image_list.txt`、`images_fullhd/`(縮圖時)、
+`sparse/0/{cameras,images,points3D}.bin`、`<dataset>_<mapper>_mapper/`(去畸變 **PINHOLE**
+dense,訓練吃這個)、`pipeline.log`、sentinels、`sparse/points.ply`(viewer 快取)。
 
 ### ③ 訓練 (training) — reconstruction → 3DGS model
 Runs a Gaussian-splatting trainer in **its own conda env** as a subprocess. Backends

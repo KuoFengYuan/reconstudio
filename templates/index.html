@@ -199,16 +199,36 @@
         <summary>Matching</summary>
         <div class="gbody">
           <label>MATCHER</label>
-          <select name="MATCHER">
+          <select name="MATCHER" id="matcher-sel" onchange="syncMatcher()">
             {% for o in enums.MATCHER %}<option {{ 'selected' if o==colmap_defaults.MATCHER }}>{{ o }}</option>{% endfor %}
           </select>
-          <label>SEQ_OVERLAP</label>
-          <input name="SEQ_OVERLAP" value="{{ colmap_defaults.SEQ_OVERLAP }}">
-          <label>NUM_MATCHES</label>
-          <input name="NUM_MATCHES" value="{{ colmap_defaults.NUM_MATCHES }}">
+          <!-- 說明:只顯示所選 matcher 的 -->
+          <div class="hint mhint" data-m="sequential">sequential = 連續幀重疊比對 + 迴圈偵測(loop detection),適合有序連拍 / 影片幀。</div>
+          <div class="hint mhint" data-m="vocab">vocab = 用 vocab tree 找外觀相近的影像比對,適合無序 / 大量照片。</div>
+          <div class="hint mhint" data-m="both">both = sequential + vocab(預設):連續性 + 外觀迴圈閉合,最穩。</div>
+          <div class="hint mhint" data-m="spatial">spatial = 用 GPS 鄰近度限制比對候選,適合大場景空拍 / 掃街(需每張帶 EXIF GPS)。</div>
+          <!-- 參數:只顯示所選 matcher 用得到的 -->
+          <div class="mgrp" data-m="seq_overlap">
+            <label>SEQ_OVERLAP</label>
+            <input name="SEQ_OVERLAP" value="{{ colmap_defaults.SEQ_OVERLAP }}">
+          </div>
+          <div class="mgrp" data-m="num_matches">
+            <label>NUM_MATCHES</label>
+            <input name="NUM_MATCHES" value="{{ colmap_defaults.NUM_MATCHES }}">
+          </div>
+          <div class="mgrp" data-m="spatial">
+            <label>SPATIAL_MAX_NEIGHBORS（每張比對的鄰近影像數）</label>
+            <input name="SPATIAL_MAX_NEIGHBORS" value="{{ colmap_defaults.SPATIAL_MAX_NEIGHBORS }}">
+            <label>SPATIAL_MAX_DISTANCE（公尺;依場景尺度調）</label>
+            <input name="SPATIAL_MAX_DISTANCE" value="{{ colmap_defaults.SPATIAL_MAX_DISTANCE }}">
+            <label class="checks" style="margin-top:10px;">
+              <input type="checkbox" name="SPATIAL_IGNORE_Z" value="1" {{ 'checked' if colmap_defaults.SPATIAL_IGNORE_Z=='1' }}>
+              SPATIAL_IGNORE_Z（忽略高度,GPS 高程雜訊大時建議開）
+            </label>
+          </div>
           <label class="checks" style="margin-top:10px;">
             <input type="checkbox" name="GUIDED_MATCHING" value="1" {{ 'checked' if colmap_defaults.GUIDED_MATCHING=='1' }}>
-            GUIDED_MATCHING（較慢,低紋理多撿匹配）
+            GUIDED_MATCHING（較慢,低紋理多撿匹配;所有 matcher 通用）
           </label>
         </div>
       </details>
@@ -217,11 +237,44 @@
         <summary>Mapping</summary>
         <div class="gbody">
           <label>MAPPER</label>
-          <select name="MAPPER">
+          <select name="MAPPER" id="mapper-sel" onchange="syncMapper()">
             {% for o in enums.MAPPER %}<option {{ 'selected' if o==colmap_defaults.MAPPER }}>{{ o }}</option>{% endfor %}
           </select>
+          <!-- 說明:只顯示所選 mapper 的 -->
+          <div class="hint phint" data-p="global">global = 全域式 mapper(預設):先 view_graph_calibrator,再一次解整張圖。</div>
+          <div class="hint phint" data-p="incremental">incremental = COLMAP 經典增量式 mapper,逐張加入重建。</div>
+          <div class="hint phint" data-p="pose_prior">pose_prior = 把 GPS 位置先驗放進 BA,大場景抗漂移、輸出直接是公制+地理對齊(需每張帶 GPS;此時不必再開下方 GPS 對齊)。</div>
           <label>DATASET_NAME</label>
           <input name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}">
+          <!-- 參數:僅 pose_prior 用得到 -->
+          <div class="pgrp" data-p="pose_prior">
+            <div class="hint" style="margin-top:10px;">GPS 位置精度 std (公尺):消費級 3~5、RTK ~0.02。</div>
+            <label>PRIOR_STD_X / Y / Z</label>
+            <div class="row">
+              <input name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
+              <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
+              <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
+            </div>
+          </div>
+          <!-- GPU BA:incremental / pose_prior 適用(global_mapper 不支援) -->
+          <label class="checks pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
+            <input type="checkbox" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}>
+            GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）
+          </label>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>GPS / 大場景</summary>
+        <div class="gbody">
+          <div class="hint">系統逐張檢查輸入的 EXIF GPS。GPS 流程需要<b>每張都有</b> GPS:勾了任一 GPS 選項(MATCHER=spatial / MAPPER=pose_prior / 下方對齊)卻非 100% 覆蓋 → 開跑前直接中斷。FullHD 仍照常等比縮放,但會把 EXIF GPS 接回縮圖(否則 ffmpeg 重編會洗掉)。影片轉幀無 per-frame GPS。</div>
+          <label class="checks" style="margin-top:10px;">
+            <input type="checkbox" name="GPS_ALIGN" value="1" {{ 'checked' if colmap_defaults.GPS_ALIGN=='1' }}>
+            GPS 對齊（公制尺度,model_aligner → ENU 公尺）
+          </label>
+          <div class="hint">只有偵測到 GPS 才會跑;會把稀疏模型改寫成真實公尺座標。與 Mesh 的 ChArUco mm 校正擇一使用,別同時開。MAPPER=pose_prior 已經對齊過,可不必再勾。</div>
+          <label>GPS_ALIGN_MAX_ERROR（RANSAC 內點門檻,公尺）</label>
+          <input name="GPS_ALIGN_MAX_ERROR" value="{{ colmap_defaults.GPS_ALIGN_MAX_ERROR }}">
         </div>
       </details>
 
@@ -526,6 +579,26 @@
       if (e.target && (e.target.name === 'iterations' || e.target.name === 'steps_scaler')) updateLfIters();
     });
   })();
+  // COLMAP Matching / Mapping: show only the params + 說明 for the chosen method
+  // (everything else stays hidden so the panel doesn't get confusing). Hidden inputs
+  // still submit their default values, which run_colmap simply ignores off-method.
+  function syncMatcher(){
+    var sel = document.getElementById('matcher-sel'); if (!sel) return;
+    var m = sel.value;
+    document.querySelectorAll('.mhint').forEach(function(e){ e.style.display = (e.dataset.m === m) ? '' : 'none'; });
+    var show = {sequential:['seq_overlap','num_matches'], vocab:['num_matches'],
+                both:['seq_overlap','num_matches'], spatial:['spatial']}[m] || [];
+    document.querySelectorAll('.mgrp').forEach(function(e){ e.style.display = (show.indexOf(e.dataset.m) >= 0) ? '' : 'none'; });
+  }
+  function syncMapper(){
+    var sel = document.getElementById('mapper-sel'); if (!sel) return;
+    var m = sel.value;
+    // data-p may list several mappers (e.g. "incremental pose_prior") — show if m is in it.
+    document.querySelectorAll('.phint,.pgrp').forEach(function(e){
+      e.style.display = (e.dataset.p.split(' ').indexOf(m) >= 0) ? '' : 'none';
+    });
+  }
+  syncMatcher(); syncMapper();   // set initial visibility from the prefilled defaults
   document.addEventListener('change', function(e){
     if (e.target && e.target.name === 'auto_voxel'){
       var f = e.target.closest('form');

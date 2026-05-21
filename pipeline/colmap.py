@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .runner import Cancelled, Runner
 
-COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "undistort"]
+COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "align", "undistort"]
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 # colmap binary: PATH by default, override with COLMAP_BIN for non-standard installs.
 COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
@@ -31,6 +31,15 @@ COLMAP_DEFAULTS = {
     "matcher": "both", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",
+    # spatial_matcher (large GPS scenes): match only GPS-near images.
+    "spatial_max_neighbors": "50", "spatial_max_distance": "100", "spatial_ignore_z": "1",
+    # GPS metric alignment via model_aligner (optional, off by default): rewrite the
+    # sparse model into a local ENU frame in real-world metres.
+    "gps_align": False, "gps_align_type": "enu", "gps_align_max_error": "3.0",
+    # pose_prior_mapper: GPS position uncertainty (metres). Consumer GPS ~3-5 m; RTK ~0.02.
+    "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
+    # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
+    "ba_gpu": True,
 }
 FULLHD_MAX = "1920"   # longest side cap for the "fullhd" resize option
 
@@ -71,7 +80,7 @@ def _resize_enc_args(rel: str) -> list[str]:
 
 
 def _resize_to_fullhd(img_root: str, lines: list[str], ws: Path,
-                      force: bool, r: Runner) -> str:
+                      force: bool, r: Runner, preserve_exif: bool = False) -> str:
     """Physically downscale every listed image so its longest side is <= FULLHD_MAX,
     writing real FullHD copies under ws/images_fullhd/<relpath> (aspect kept, never
     upscaled). The whole COLMAP run then operates on these — no in-COLMAP size cap.
@@ -79,20 +88,29 @@ def _resize_to_fullhd(img_root: str, lines: list[str], ws: Path,
     Speed: many ffmpeg workers in parallel (NVDEC/GPU can't accelerate JPEG stills,
     so we saturate CPU cores instead). Quality: Lanczos downscaling + max-quality
     encode. Idempotent via a sentinel; honors FORCE; resumes by skipping done files.
+
+    preserve_exif (GPS flow): ffmpeg's JPEG encoder drops EXIF, so each resized JPEG
+    gets the original's Exif APP1 grafted back in — keeping the FullHD downscale AND
+    the GPS priors. Uses a distinct sentinel so toggling the mode rebuilds cleanly.
     Returns the new image root."""
     if not shutil.which(FFMPEG_BIN):
         raise RuntimeError(f"ffmpeg not found: '{FFMPEG_BIN}' (set FFMPEG_BIN); "
                            "needed for the FullHD resize")
     out_root = ws / "images_fullhd"
-    sentinel = ws / ".resize_fullhd.done"
+    sentinel = ws / (".resize_fullhd_exif.done" if preserve_exif else ".resize_fullhd.done")
+    other = ws / (".resize_fullhd.done" if preserve_exif else ".resize_fullhd_exif.done")
     if sentinel.exists() and not force:
         r.log(f"skip resize (sentinel exists; set FORCE=1 to redo) -> {out_root}")
         return str(out_root)
-    if force:
+    # force, or a complete run in the *other* EXIF mode -> rebuild from scratch (the
+    # existing copies have the wrong EXIF state); otherwise keep partial files to resume.
+    if force or (other.exists() and not sentinel.exists()):
         shutil.rmtree(out_root, ignore_errors=True)
+        other.unlink(missing_ok=True)
     workers = _resize_workers()
     r.banner(f"resize input -> FullHD (longest side <= {FULLHD_MAX}px, Lanczos, "
-             f"max quality, {workers} parallel) -> {out_root}")
+             f"max quality, {workers} parallel"
+             f"{', EXIF/GPS preserved' if preserve_exif else ''}) -> {out_root}")
     # cap the longest side, keep aspect, never upscale (min with original); -2 keeps
     # the other side an even number; Lanczos = best-quality downscaling filter.
     vf = (f"scale='if(gte(iw,ih),min({FULLHD_MAX},iw),-2)':"
@@ -103,14 +121,18 @@ def _resize_to_fullhd(img_root: str, lines: list[str], ws: Path,
         if dst.exists() and not force:
             return                                   # resume a partial run cheaply
         dst.parent.mkdir(parents=True, exist_ok=True)
+        src = Path(img_root) / rel
         argv = [FFMPEG_BIN, "-y", "-nostdin", "-loglevel", "error",
-                "-i", str(Path(img_root) / rel), "-vf", vf,
-                *_resize_enc_args(rel), str(dst)]
+                "-i", str(src), "-vf", vf, *_resize_enc_args(rel), str(dst)]
         res = subprocess.run(argv, stdout=subprocess.DEVNULL,
                              stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"ffmpeg resize failed for {rel}: "
                                f"{res.stderr.strip()[:200]}")
+        if preserve_exif and Path(rel).suffix.lower() in (".jpg", ".jpeg"):
+            app1 = _read_app1_exif(src)              # carry GPS (+focal) past the re-encode
+            if app1:
+                _graft_app1(dst, app1)
 
     n, done = len(lines), 0
     with futures.ThreadPoolExecutor(max_workers=workers) as ex:
@@ -190,6 +212,119 @@ def _resolve_layout(img_root: str, folders: list[str], layout: str,
     return chosen, nested, ("nested" if nested else "multi")
 
 
+def _jpeg_gps_present(path: Path) -> bool:
+    """True iff the JPEG at `path` carries a non-empty EXIF GPS IFD (lat + lon).
+
+    Pure stdlib (the project ships no Pillow/piexif): walk JPEG segments to the Exif
+    APP1, parse the TIFF/IFD0 for the GPS IFD pointer (tag 0x8825), then confirm that
+    GPS IFD holds GPSLatitude (0x0002) and GPSLongitude (0x0004). Best-effort — any
+    parse hiccup or non-JPEG returns False."""
+    import struct
+    try:
+        with path.open("rb") as fh:
+            if fh.read(2) != b"\xff\xd8":                 # not a JPEG (no SOI)
+                return False
+            app1 = b""
+            while True:                                   # find the Exif APP1 segment
+                hdr = fh.read(2)
+                if len(hdr) < 2 or hdr[0] != 0xFF:
+                    return False
+                marker = hdr[1]
+                if marker == 0xD8 or 0xD0 <= marker <= 0xD7:
+                    continue                              # standalone markers, no length
+                if marker == 0xDA or marker == 0xD9:      # SOS / EOI: pixel data, give up
+                    return False
+                seg_len = int.from_bytes(fh.read(2), "big")
+                if seg_len < 2:
+                    return False
+                body = fh.read(seg_len - 2)
+                if marker == 0xE1 and body[:6] == b"Exif\x00\x00":
+                    app1 = body[6:]                       # the TIFF block
+                    break
+        if len(app1) < 8 or app1[:2] not in (b"II", b"MM"):
+            return False
+        bo = "<" if app1[:2] == b"II" else ">"
+        ifd0 = struct.unpack(bo + "I", app1[4:8])[0]
+
+        def tags(off: int) -> dict[int, int]:
+            n = struct.unpack(bo + "H", app1[off:off + 2])[0]
+            out: dict[int, int] = {}
+            for k in range(n):
+                e = off + 2 + k * 12
+                tag = struct.unpack(bo + "H", app1[e:e + 2])[0]
+                out[tag] = struct.unpack(bo + "I", app1[e + 8:e + 12])[0]
+            return out
+
+        gps_off = tags(ifd0).get(0x8825)
+        if not gps_off:
+            return False
+        g = tags(gps_off)
+        return 0x0002 in g and 0x0004 in g                # GPSLatitude + GPSLongitude
+    except Exception:                                     # noqa: BLE001 — detection is best-effort
+        return False
+
+
+def _read_app1_exif(path: Path) -> bytes | None:
+    """Return the raw Exif APP1 segment (FF E1 + length + body) from a JPEG, or None.
+    Walks the JPEG segments rather than scanning, so it grabs the real Exif block."""
+    try:
+        with path.open("rb") as fh:
+            if fh.read(2) != b"\xff\xd8":
+                return None
+            while True:
+                hdr = fh.read(2)
+                if len(hdr) < 2 or hdr[0] != 0xFF:
+                    return None
+                marker = hdr[1]
+                if marker == 0xD8 or 0xD0 <= marker <= 0xD7:
+                    continue
+                if marker == 0xDA or marker == 0xD9:      # SOS / EOI: header is over
+                    return None
+                ln = fh.read(2)
+                body = fh.read(int.from_bytes(ln, "big") - 2)
+                if marker == 0xE1 and body[:6] == b"Exif\x00\x00":
+                    return b"\xff\xe1" + ln + body
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _graft_app1(dst: Path, app1: bytes) -> bool:
+    """Splice an Exif APP1 segment in right after the SOI of the JPEG at `dst`.
+    ffmpeg's mjpeg output has no EXIF, so re-inserting the original's restores GPS
+    (and focal). The TIFF block is copied verbatim — its internal offsets stay valid.
+    Returns True on success."""
+    try:
+        data = dst.read_bytes()
+        if data[:2] != b"\xff\xd8" or not app1:
+            return False
+        dst.write_bytes(data[:2] + app1 + data[2:])
+        return True
+    except OSError:
+        return False
+
+
+def _gps_coverage(img_root: str, lines: list[str], r: Runner) -> tuple[int, int]:
+    """Return (n_with_gps, n_total) for the inputs. The GPS pipeline needs a prior on
+    EVERY image (a frame without one can't be spatially matched or anchored), so this
+    can't sample — it checks each image (in parallel, the set can be large). Only JPEGs
+    can carry EXIF GPS, so non-JPEG inputs count toward n_total but never toward
+    n_with_gps — any PNG/TIFF therefore makes coverage incomplete."""
+    n_total = len(lines)
+    cand = [l for l in lines if Path(l).suffix.lower() in (".jpg", ".jpeg")]
+    if not cand:
+        return 0, n_total
+    n_gps = 0
+    with futures.ThreadPoolExecutor(max_workers=_resize_workers()) as ex:
+        pending = [ex.submit(_jpeg_gps_present, Path(img_root) / rel) for rel in cand]
+        for fut in futures.as_completed(pending):
+            if r.cancelled:
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise Cancelled()
+            if fut.result():
+                n_gps += 1
+    return n_gps, n_total
+
+
 def run_colmap(p: dict, r: Runner) -> None:
     d = {**COLMAP_DEFAULTS, **{k: v for k, v in p.items() if v is not None}}
     img_root = p["image_root"]
@@ -201,13 +336,17 @@ def run_colmap(p: dict, r: Runner) -> None:
     vocab_tree = Path(d["vocab_tree"])
     # FullHD resize: cap longest side at 1920 for feature extraction + undistorted output.
     fullhd = str(d.get("resize")) == "fullhd"
+    gps_align = bool(d["gps_align"])
+    gps_align_type = str(d["gps_align_type"])
+    gps_align_max_error = str(d["gps_align_max_error"])
+    ba_gpu = bool(d["ba_gpu"])   # GPU bundle adjustment (incremental / pose_prior only)
 
-    if mapper not in ("global", "incremental"):
-        raise ValueError(f"MAPPER must be 'global' or 'incremental' (got: {mapper})")
+    if mapper not in ("global", "incremental", "pose_prior"):
+        raise ValueError(f"MAPPER must be 'global', 'incremental', or 'pose_prior' (got: {mapper})")
     if camera_mode not in ("per_folder", "single"):
         raise ValueError(f"CAMERA_MODE must be 'per_folder' or 'single' (got: {camera_mode})")
-    if matcher not in ("sequential", "vocab", "both"):
-        raise ValueError(f"MATCHER must be 'sequential', 'vocab', or 'both' (got: {matcher})")
+    if matcher not in ("sequential", "vocab", "both", "spatial"):
+        raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', or 'spatial' (got: {matcher})")
 
     if not Path(img_root).is_dir():
         raise FileNotFoundError(f"image_root not found: {img_root}")
@@ -283,11 +422,38 @@ def run_colmap(p: dict, r: Runner) -> None:
     if not lines:
         raise FileNotFoundError("no images found")
 
+    # EXIF GPS coverage. COLMAP reads EXIF GPS into the DB pose priors that
+    # spatial_matcher / pose_prior_mapper / model_aligner consume. The GPS pipeline
+    # requires GPS on EVERY image — a frame without a prior can't be spatially matched
+    # or anchored — so any GPS option needs FULL coverage, checked here before any work
+    # runs. The FullHD resize still runs (so we keep the downscale); it just preserves
+    # the EXIF GPS through the re-encode (see preserve_exif below).
+    n_gps, n_total = _gps_coverage(img_root, lines, r)
+    gps_present = (n_total > 0 and n_gps == n_total)   # GPS flow valid only at 100%
+    gps_opts = [name for name, on in (("MATCHER=spatial", matcher == "spatial"),
+                                      ("MAPPER=pose_prior", mapper == "pose_prior"),
+                                      ("GPS_ALIGN", gps_align)) if on]
+    if gps_opts:
+        if not gps_present:
+            raise RuntimeError(
+                f"GPS option(s) selected ({', '.join(gps_opts)}) but only {n_gps}/{n_total} "
+                "inputs carry EXIF GPS — the GPS pipeline needs GPS on EVERY image, so it "
+                "aborts before any work runs. Provide GPS-tagged photos for all inputs, or "
+                "switch to a non-GPS setup (MATCHER=vocab/both, MAPPER=global/incremental, "
+                "GPS 對齊 off). Note: video frames carry no per-frame GPS — it lives in the "
+                "container, not the frames.")
+        r.log(f"EXIF GPS on all {n_total} inputs -> GPS flow enabled ({', '.join(gps_opts)})"
+              + ("; FullHD resize will preserve the GPS EXIF" if fullhd else ""))
+    elif n_gps:
+        r.log(f"note: {n_gps}/{n_total} inputs have EXIF GPS but no GPS option selected; "
+              "running normally" + (" (the FullHD resize will drop the GPS)" if fullhd else ""))
+
     # FullHD: physically downscale the inputs to FullHD copies and run the entire
-    # pipeline on those. The image_list paths stay relative, so they remain valid
-    # against the rebased root.
+    # pipeline on those (image_list paths stay relative, so they remain valid). When the
+    # GPS flow is on, the resize grafts each original's EXIF back so GPS survives.
     if fullhd:
-        img_root = _resize_to_fullhd(img_root, lines, ws, force, r)
+        img_root = _resize_to_fullhd(img_root, lines, ws, force, r,
+                                     preserve_exif=bool(gps_opts))
 
     # 1. feature_extractor
     if stage_on("extract"):
@@ -328,6 +494,15 @@ def run_colmap(p: dict, r: Runner) -> None:
                        "--FeatureMatching.guided_matching", str(d["guided_matching"]),
                        "--VocabTreeMatching.vocab_tree_path", str(vocab_tree),
                        "--VocabTreeMatching.num_images", str(d["num_matches"])])
+            if matcher == "spatial":
+                r.banner(f"spatial_matcher (GPS priors; max_neighbors="
+                         f"{d['spatial_max_neighbors']}, max_distance="
+                         f"{d['spatial_max_distance']}m, ignore_z={d['spatial_ignore_z']})")
+                r.run([COLMAP_BIN, "spatial_matcher", "--database_path", str(db),
+                       "--FeatureMatching.guided_matching", str(d["guided_matching"]),
+                       "--SpatialMatching.max_num_neighbors", str(d["spatial_max_neighbors"]),
+                       "--SpatialMatching.max_distance", str(d["spatial_max_distance"]),
+                       "--SpatialMatching.ignore_z", str(d["spatial_ignore_z"])])
             sentinel.touch()
         else:
             r.log("skip match (sentinel exists; set FORCE=1 to redo)")
@@ -348,13 +523,58 @@ def run_colmap(p: dict, r: Runner) -> None:
     if stage_on("mapper"):
         cameras = ws / "sparse" / "0" / "cameras.bin"
         if need(cameras):
-            sub = "global_mapper" if mapper == "global" else "mapper"
-            label = "colmap global_mapper" if mapper == "global" else "colmap mapper (incremental)"
+            extra: list[str] = []
+            if mapper == "global":
+                sub, label = "global_mapper", "colmap global_mapper"
+            elif mapper == "pose_prior":
+                # GPS priors folded into BA -> the output is already georeferenced
+                # and metric (model_aligner is then redundant). overwrite_priors_
+                # covariance=1 means the std_* below set the GPS uncertainty (metres).
+                sub, label = "pose_prior_mapper", "colmap pose_prior_mapper (GPS)"
+                extra = ["--use_robust_loss_on_prior_position", str(d["prior_robust_loss"]),
+                         "--overwrite_priors_covariance", "1",
+                         "--prior_position_std_x", str(d["prior_std_x"]),
+                         "--prior_position_std_y", str(d["prior_std_y"]),
+                         "--prior_position_std_z", str(d["prior_std_z"])]
+            else:
+                sub, label = "mapper", "colmap mapper (incremental)"
+            # GPU bundle adjustment: BA dominates incremental/pose_prior runtime, so
+            # offloading it to CUDA is a big speedup (global_mapper has no such flag —
+            # it'd reject the option — so only the two incremental-based mappers get it).
+            if ba_gpu and mapper != "global":
+                extra += ["--Mapper.ba_use_gpu", "1"]
+                label += " [GPU BA]"
             r.banner(f"{label} -> {ws / 'sparse'}")
             r.run([COLMAP_BIN, sub, "--database_path", str(db),
-                   "--image_path", img_root, "--output_path", str(ws / "sparse")])
+                   "--image_path", img_root, "--output_path", str(ws / "sparse"), *extra])
         else:
             r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
+
+    # 4b. model_aligner (optional GPS metric alignment): rewrite sparse/0 in place
+    # into a local ENU frame in real-world metres, using the DB's GPS pose priors.
+    # Only runs when explicitly enabled AND GPS was actually found (otherwise it has
+    # nothing to align to). Independent of MAPPER; complements the mesh ChArUco
+    # mm-scaling — don't enable both on one dataset.
+    if stage_on("align"):
+        sentinel = ws / ".align.done"
+        if not gps_align:
+            r.log("skip align (GPS_ALIGN off)")
+        elif not gps_present:
+            r.log("skip align (GPS_ALIGN on but no EXIF GPS detected in inputs)")
+        elif need(sentinel):
+            if not (ws / "sparse" / "0" / "cameras.bin").is_file():
+                raise RuntimeError("sparse model missing, cannot GPS-align")
+            r.banner(f"model_aligner (GPS -> {gps_align_type} metres, "
+                     f"max_error={gps_align_max_error}m) -> {ws / 'sparse' / '0'}")
+            r.run([COLMAP_BIN, "model_aligner",
+                   "--input_path", str(ws / "sparse" / "0"),
+                   "--output_path", str(ws / "sparse" / "0"),
+                   "--database_path", str(db), "--ref_is_gps", "1",
+                   "--alignment_type", gps_align_type,
+                   "--alignment_max_error", gps_align_max_error])
+            sentinel.touch()
+        else:
+            r.log("skip align (sentinel exists; set FORCE=1 to redo)")
 
     # 5. image_undistorter -> dense_dir
     if stage_on("undistort"):
