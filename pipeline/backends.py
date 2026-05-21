@@ -207,6 +207,8 @@ def load_backends() -> dict[str, dict]:
         try:
             user = json.loads(BACKENDS_FILE.read_text())
             for name, spec in (user or {}).items():
+                if name.startswith("_") or not isinstance(spec, dict):
+                    continue    # skip comment / non-backend keys (e.g. "_comment")
                 out[name] = {**out.get(name, {}), **spec}     # shallow override
         except Exception:
             pass            # a broken backends.json must not take the panel down
