@@ -28,7 +28,7 @@ from pipeline import (TRAIN_DEFAULTS, available_backends, build_cli,
 
 BASE = Path(__file__).parent
 # Restrict the directory browser to this root (the data disk by default).
-BROWSE_ROOT = Path(os.environ.get("COLMAP_PANEL_BROWSE_ROOT", "/")).resolve()
+BROWSE_ROOT = Path(os.environ.get("RECON_STUDIO_BROWSE_ROOT", "/")).resolve()
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")   # PATH by default; override via env
 
 app = FastAPI(title="Recon Studio")

@@ -26,7 +26,7 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent.parent          # colmap_panel/
+BASE = Path(__file__).resolve().parent.parent          # reconstudio/
 COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
 BACKENDS_FILE = Path(os.environ.get("COLMAP_PANEL_BACKENDS", BASE / "backends.json"))
 

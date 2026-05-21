@@ -35,12 +35,12 @@ fi
 : "${FFMPEG_BIN:=ffmpeg}"; export FFMPEG_BIN
 
 # Job state + scratch on a roomy disk (not the small root fs), with sensible fallbacks.
-: "${COLMAP_PANEL_DATA:=$( [[ -d /mnt/ssd1 ]] && echo /mnt/ssd1/colmap_panel/data || echo "$HOME/.colmap_panel" )}"
-export COLMAP_PANEL_DATA; mkdir -p "$COLMAP_PANEL_DATA"
-: "${TMPDIR:=$COLMAP_PANEL_DATA/tmp}"; export TMPDIR; mkdir -p "$TMPDIR"
+: "${RECON_STUDIO_DATA:=$( [[ -d /mnt/ssd1 ]] && echo /mnt/ssd1/recon_studio/data || echo "$HOME/.recon_studio" )}"
+export RECON_STUDIO_DATA; mkdir -p "$RECON_STUDIO_DATA"
+: "${TMPDIR:=$RECON_STUDIO_DATA/tmp}"; export TMPDIR; mkdir -p "$TMPDIR"
 # directory-picker root (defaults to the data disk if present, else filesystem root)
-: "${COLMAP_PANEL_BROWSE_ROOT:=$( [[ -d /mnt/ssd1 ]] && echo /mnt/ssd1 || echo / )}"
-export COLMAP_PANEL_BROWSE_ROOT
+: "${RECON_STUDIO_BROWSE_ROOT:=$( [[ -d /mnt/ssd1 ]] && echo /mnt/ssd1 || echo / )}"
+export RECON_STUDIO_BROWSE_ROOT
 
 export CONDA_ROOT   # so backends.py / doctor can locate sibling trainer envs (gs2m, …)
 ENVPY="$CONDA_ROOT/envs/$CONDA_ENV/bin/python"

@@ -23,7 +23,7 @@ from pipeline import (COLMAP_STAGES, Cancelled, Runner, run_colmap, run_frames,
 from pipeline.colmap import COLMAP_DEFAULTS  # noqa: F401  (re-exported for app)
 from pipeline.frames import FRAMES_DEFAULTS  # noqa: F401
 
-DATA_DIR = Path(os.environ.get("COLMAP_PANEL_DATA", str(Path.home() / ".colmap_panel")))
+DATA_DIR = Path(os.environ.get("RECON_STUDIO_DATA", str(Path.home() / ".recon_studio")))
 JOBS_DIR = DATA_DIR / "jobs"
 # How many jobs may run concurrently. Tune per machine via the env var.
 MAX_JOBS = max(1, int(os.environ.get("COLMAP_PANEL_MAX_JOBS", "4")))

@@ -124,9 +124,9 @@ file (copy `local.env.example` → `local.env`; gitignored). **Backend changes (
 | `COLMAP_BIN` | `colmap` (PATH) | colmap binary; set for non-standard installs |
 | `FFMPEG_BIN` | NVDEC build if present, else PATH `ffmpeg` | needs `blurdetect`; NVDEC = GPU decode; also used for FullHD resize |
 | `FFMPEG_HWACCEL` | `cuda` | set `none` to force CPU decode |
-| `COLMAP_PANEL_DATA` | `/mnt/ssd1/colmap_panel/data` else `~/.colmap_panel` | job state + logs (keep off a small root fs) |
-| `TMPDIR` | `$COLMAP_PANEL_DATA/tmp` | keep ffmpeg/colmap scratch off root `/tmp` |
-| `COLMAP_PANEL_BROWSE_ROOT` | `/mnt/ssd1` if present, else `/` | directory-picker root |
+| `RECON_STUDIO_DATA` | `/mnt/ssd1/recon_studio/data` else `~/.recon_studio` | job state + logs (keep off a small root fs) |
+| `TMPDIR` | `$RECON_STUDIO_DATA/tmp` | keep ffmpeg/colmap scratch off root `/tmp` |
+| `RECON_STUDIO_BROWSE_ROOT` | `/mnt/ssd1` if present, else `/` | directory-picker root |
 | `COLMAP_PANEL_MAX_JOBS` | `4` | concurrent jobs (shared across all stages) |
 | `COLMAP_PANEL_RESIZE_WORKERS` | CPU count (≤32) | parallel ffmpeg workers for FullHD resize |
 | `COLMAP_PANEL_BACKENDS` | `./backends.json` | per-machine training backends file |
@@ -281,7 +281,7 @@ form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX
         train:  "[ITER n]" / "Training:" / phase    mesh: "TSDF config" / "Num vertices post"  ─► progress / stepper
 ```
 
-- **Job state** persists under `COLMAP_PANEL_DATA/jobs/<id>/` (`job.json` + `console.log`);
+- **Job state** persists under `RECON_STUDIO_DATA/jobs/<id>/` (`job.json` + `console.log`);
   jobs left running when the server stops are marked failed on reload.
 - **Cancel** sets a flag and `SIGTERM`s every child process group the Runner started.
 - **Idempotency**: COLMAP & resize use sentinels / output checks — tick `FORCE` to re-run.

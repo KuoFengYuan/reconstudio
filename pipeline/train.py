@@ -6,7 +6,7 @@ module only:
   1. adapts the COLMAP output into the layout the trainer expects, and
   2. builds + runs the command, streaming its log through the Runner.
 
-Why the adaptation matters: colmap_panel's `undistort` stage writes a *flat*
+Why the adaptation matters: Recon Studio's `undistort` stage writes a *flat*
 `sparse/` with a PINHOLE model + undistorted `images/`, but GS-2M reads
 `sparse/0/{cameras,images,points3D}.bin`. We expose that via symlinks in a
 dedicated scene dir, so the original workspace is never touched. We also refuse
