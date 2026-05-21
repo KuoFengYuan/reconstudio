@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -294,10 +296,12 @@ async def create_train(request: Request):
 @app.post("/ui/mesh", response_class=HTMLResponse)
 async def create_mesh(request: Request):
     form = dict(await request.form())
+    upload = form.pop("edited_ply", None)        # optional SuperSplat-edited (去背) cloud
     model = (form.get("model_path") or "").strip().rstrip("/")
     backend = (form.get("backend") or "").strip()
     gpu = (form.get("gpu") or "").strip()
     extra = (form.get("extra") or "").strip()
+    edited_from = None
     try:
         if not Path(model).is_dir():
             raise ValueError(f"model_path 不是資料夾: {model!r}")
@@ -308,6 +312,13 @@ async def create_mesh(request: Request):
             raise ValueError(f"未知 backend: {backend}")
         if not spec.get("mesh_args"):
             raise ValueError(f"backend '{backend}' 不支援 mesh 抽取。")
+        # A去背過的點雲上傳時:從原模型衍生一個非破壞性的 _edited_<時間> 兄弟目錄,
+        # 對它抽 mesh;原模型完全不動(這就是 pipeline 層的「還原」)。
+        if upload is not None and getattr(upload, "filename", ""):
+            if not upload.filename.lower().endswith(".ply"):
+                raise ValueError("編輯後的點雲需為 .ply 檔（SuperSplat 匯出的 PLY）。")
+            edited_dir = await asyncio.to_thread(_prepare_edited_model, Path(model), upload)
+            edited_from, model = model, str(edited_dir)
         cli = build_cli(spec.get("mesh_params", []), form)
         params = {"backend": backend, "model_path": model, "gpu": gpu,
                   "args": cli, "extra": extra}
@@ -317,11 +328,15 @@ async def create_mesh(request: Request):
     except ValueError as exc:
         return _page(request, "_error.html", message=str(exc))
 
+    meta = {"model_path": model, "backend": backend, "marker": bool(marker)}
+    if edited_from:
+        meta["edited_from"] = edited_from
     job = Job(id=new_id(), kind="mesh",
-              title=f"mesh · {_scene_label(model)}" + (" · scaled" if marker else ""),
+              title=f"mesh · {_scene_label(model)}" + (" · 去背" if edited_from else "")
+                    + (" · scaled" if marker else ""),
               subtitle=f"{model}  (gpu={gpu or 'default'})",
               params=params, mirror=str(Path(model) / "mesh.log"),
-              meta={"model_path": model, "backend": backend, "marker": bool(marker)})
+              meta=meta)
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
@@ -408,6 +423,59 @@ def _model_dir(job) -> Path | None:
         return None
     md = Path(ws) / "sparse" / "0"
     return md if (md / "images.bin").exists() and (md / "points3D.bin").exists() else None
+
+
+def _trained_model_dir(job) -> Path | None:
+    """The trained-model output dir (cfg_args + point_cloud/), from a train job's
+    meta. Distinct from _model_dir, which is the COLMAP sparse reconstruction."""
+    mp = (job.meta or {}).get("model_path")
+    if not mp:
+        return None
+    d = Path(mp)
+    return d if (d / "cfg_args").is_file() else None
+
+
+def _trained_ply(model_dir: Path) -> Path | None:
+    """Highest-iteration trained 3DGS point_cloud.ply under a model dir."""
+    cands = list(model_dir.glob("point_cloud/iteration_*/point_cloud.ply"))
+    if not cands:
+        return None
+    def it(p: Path) -> int:
+        m = re.search(r"iteration_(\d+)", p.parent.name)
+        return int(m.group(1)) if m else -1
+    return max(cands, key=it)
+
+
+def _make_edited_model(model: Path) -> tuple[Path, Path]:
+    """Create a non-destructive sibling model dir for a SuperSplat-edited (去背)
+    cloud and return (edited_root, dest_ply_path). The caller writes the bytes.
+
+    Mirrors the `<model>_scene` symlink trick (train.py): the original model dir
+    is never touched. The sibling gets its own
+    point_cloud/iteration_<N>/point_cloud.ply (the edited cloud goes there) and a
+    symlink to the original cfg_args. GS-2M's render.py then loads the edited
+    cloud, reads cameras from the original source_path (recorded in cfg_args),
+    and writes the mesh under the sibling — so a bad去背 can't destroy the source."""
+    src_ply = _trained_ply(model)
+    if not src_ply:
+        raise ValueError(f"原模型找不到 point_cloud.ply（{model}）。")
+    it_dir = src_ply.parent                       # .../point_cloud/iteration_<N>
+    edited = model.parent / f"{model.name}_edited_{time.strftime('%Y%m%d_%H%M%S')}"
+    dst_it = edited / "point_cloud" / it_dir.name
+    dst_it.mkdir(parents=True, exist_ok=True)
+    (edited / "cfg_args").symlink_to((model / "cfg_args").resolve())
+    light = it_dir / "lighting.pth"               # only present if trained with --material
+    if light.is_file():
+        (dst_it / "lighting.pth").symlink_to(light.resolve())
+    return edited, dst_it / "point_cloud.ply"
+
+
+def _prepare_edited_model(model: Path, upload) -> Path:
+    """Build the sibling edited model dir from an uploaded file (Mesh form)."""
+    edited, dest = _make_edited_model(model)
+    with open(dest, "wb") as out:
+        shutil.copyfileobj(upload.file, out)
+    return edited
 
 
 @app.get("/viz/{job_id}", response_class=HTMLResponse)
@@ -530,6 +598,42 @@ async def model_ply(job_id: str):
     out = Path(job.meta["workspace"]) / "sparse" / "points.ply"
     await asyncio.to_thread(ensure_ply, md, out)
     return FileResponse(out, media_type="application/octet-stream", filename="points.ply")
+
+
+@app.get("/api/jobs/{job_id}/gaussians.ply")
+async def gaussians_ply(job_id: str):
+    """Serve the trained 3DGS cloud (point_cloud/iteration_*/point_cloud.ply) so it
+    can be opened in SuperSplat for background removal. Unlike /model.ply (the sparse
+    COLMAP cloud), this is the full Gaussian model the mesh stage renders from."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    md = _trained_model_dir(job)
+    if not md:
+        raise HTTPException(404, "此 job 沒有訓練輸出（缺 model_path / cfg_args）。")
+    ply = _trained_ply(md)
+    if not ply:
+        raise HTTPException(404, "找不到 point_cloud.ply（訓練可能尚未完成）。")
+    return FileResponse(ply, media_type="application/octet-stream", filename="point_cloud.ply")
+
+
+@app.post("/api/jobs/{job_id}/edited_ply")
+async def edited_ply_upload(job_id: str, request: Request):
+    """Receive a SuperSplat-edited (去背) .ply (raw body) from the embedded editor
+    and stage it as a non-destructive `_edited_<time>` sibling model dir. Returns
+    the new model_path so the UI can prefill + run the Mesh stage on it. The
+    original trained model is never touched."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    md = _trained_model_dir(job)
+    if not md:
+        raise HTTPException(404, "此 job 沒有訓練輸出（缺 model_path / cfg_args）。")
+    edited, dest = await asyncio.to_thread(_make_edited_model, md)
+    with open(dest, "wb") as out:                 # stream to disk (the cloud may be large)
+        async for chunk in request.stream():
+            out.write(chunk)
+    return JSONResponse({"ok": True, "model_path": str(edited), "backend": (job.meta or {}).get("backend", "")})
 
 
 @app.get("/api/jobs/{job_id}/logs")

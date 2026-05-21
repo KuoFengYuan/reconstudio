@@ -12,6 +12,8 @@ license — you are responsible for complying with all of them.
 | **FFmpeg** | frame extraction + FullHD resize | LGPL-2.1+ / GPL (depends on the build) |
 | **FastAPI, Uvicorn, Jinja2, python-multipart** | web panel runtime | MIT / BSD |
 | **three.js, htmx** (vendored under `static/`) | 3D viewer / frontend | MIT |
+| **SuperSplat** ([playcanvas/supersplat](https://github.com/playcanvas/supersplat)) (built + vendored under `static/supersplat/`; patched via `tools/supersplat-reconstudio.patch`) | in-browser 3DGS editor for background removal (去背) | MIT |
+| **PlayCanvas engine / PCUI** (bundled into the SuperSplat build) | SuperSplat rendering + UI | MIT |
 
 > The non-commercial restriction of the Gaussian-Splatting license effectively
 > governs the **training** and **mesh** stages of the pipeline (which use GS-2M /

@@ -1,0 +1,91 @@
+diff --git a/src/controllers.ts b/src/controllers.ts
+index 64df15e..b120d5b 100644
+--- a/src/controllers.ts
++++ b/src/controllers.ts
+@@ -293,7 +293,10 @@ class PointerController {
+             } else if (event.shiftKey) {
+                 pan(event.offsetX, event.offsetY, deltaX, deltaY);
+             } else {
+-                orbit(deltaX, deltaY);
++                // ReconStudio patch: a plain wheel always zooms. SuperSplat's
++                // wheel-vs-trackpad heuristic misclassifies hi-res Linux wheels
++                // (wheelDeltaY not a multiple of 120) and would otherwise orbit.
++                zoom(wheelDelta * -0.002);
+             }
+ 
+             event.preventDefault();
+diff --git a/src/iframe-api.ts b/src/iframe-api.ts
+index d6f6cb5..b0b5a80 100644
+--- a/src/iframe-api.ts
++++ b/src/iframe-api.ts
+@@ -1,6 +1,10 @@
+ import { Events } from './events';
+ 
+ const IS_SCENE_DIRTY = 'supersplat:is-scene-dirty';
++// ReconStudio extension: serialize the current (background-removed) scene to a
++// 3DGS .ply and post the bytes back to the parent window, which uploads them to
++// the server. Lets the editor live in an iframe with a one-click "送回" round-trip.
++const EXPORT_PLY = 'supersplat:export-ply';
+ 
+ interface IsSceneDirtyQuery {
+     type: typeof IS_SCENE_DIRTY;
+@@ -19,8 +23,41 @@ const isSceneDirtyQuery = (data: any): data is IsSceneDirtyQuery => {
+     );
+ };
+ 
++const isExportPlyQuery = (data: any): boolean => {
++    return data && typeof data === 'object' && data.type === EXPORT_PLY && !data.data;
++};
++
++// Buffer scene.write output instead of downloading it. Implements the slice of
++// FileSystemWritableFileStream that BrowserFileWriter uses (seek/write/truncate/close).
++const exportPlyBytes = async (events: Events): Promise<ArrayBuffer> => {
++    const chunks: Uint8Array[] = [];
++    const stream = {
++        seek: async (_pos: number) => {},
++        write: async (data: ArrayBuffer | Uint8Array) => {
++            const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
++            chunks.push(u8.slice(0));
++        },
++        truncate: async (_size: number) => {},
++        close: async () => {}
++    };
++    await events.invoke('scene.write', 'ply', {
++        filename: 'point_cloud.ply',
++        splatIdx: 'all',
++        serializeSettings: {}            // defaults: deleted splats are always dropped
++    }, stream as unknown as FileSystemWritableFileStream);
++
++    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
++    const out = new Uint8Array(total);
++    let offset = 0;
++    for (const c of chunks) {
++        out.set(c, offset);
++        offset += c.byteLength;
++    }
++    return out.buffer;
++};
++
+ const registerIframeApi = (events: Events) => {
+-    window.addEventListener('message', (event: MessageEvent) => {
++    window.addEventListener('message', async (event: MessageEvent) => {
+         const source = event.source as Window | null;
+         if (!source) {
+             return;
+@@ -32,6 +69,16 @@ const registerIframeApi = (events: Events) => {
+                 result: events.invoke('scene.dirty') as boolean
+             };
+             source.postMessage(response, event.origin);
++            return;
++        }
++
++        if (isExportPlyQuery(event.data)) {
++            try {
++                const buffer = await exportPlyBytes(events);
++                source.postMessage({ type: EXPORT_PLY, data: buffer }, event.origin, [buffer]);
++            } catch (err) {
++                source.postMessage({ type: EXPORT_PLY, error: String(err) }, event.origin);
++            }
+         }
+     });
+ };

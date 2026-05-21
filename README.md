@@ -17,6 +17,8 @@ Single-machine local tool, binds to `127.0.0.1` by default. Runs up to **`MAX_JO
 ```
 
 Each finished stage offers a one-click button to prefill the next (frames→COLMAP→訓練→Mesh).
+訓練完還可選擇在瀏覽器內用內嵌的 **SuperSplat** 編輯器去背(刪掉背景 splat),一鍵送回後對乾淨
+點雲抽 mesh — **非破壞性**,原模型保留(見 [🧹 去背](#-去背-background-removal-optional--supersplat))。
 The Mesh stage can optionally rescale the output to **real-world millimetres** from a
 ChArUco marker board, and ships an **in-browser mesh viewer with a mm ruler**.
 
@@ -74,6 +76,25 @@ are **data, not code** (see [Backends](#backends)); built-in default is **GS-2M*
   `--reflection_threshold`, `--masks`/`--mask_gt` (前景去背), `--eval`, plus a free `extra` field.
 - **GPU**: chosen manually per job → `CUDA_VISIBLE_DEVICES` (no auto GPU selection).
 
+### 🧹 去背 (background removal, optional) — SuperSplat
+訓練完成面板的 **🧹 在 SuperSplat 去背景** 會在右側內嵌一個自架的
+[SuperSplat](https://github.com/playcanvas/supersplat) 編輯器（`static/supersplat/`，MIT），
+載入訓練好的 `point_cloud/iteration_*/point_cloud.ply`。常用流程：框選物件 → **Ctrl+I** 反選
+→ **Delete** 刪背景（誤刪 **Ctrl+Z** 還原）→ **✅ 送回去背點雲 → 抽 Mesh**。
+
+送回時瀏覽器把去背後的雲序列化成 PLY，POST 到 `/api/jobs/<id>/edited_ply`；server 以原模型
+衍生一個**非破壞性**的 `<model>_edited_<時間>` 兄弟目錄（symlink 原 `cfg_args`，去背雲放進
+`point_cloud/iteration_<N>/point_cloud.ply`），並自動帶入 Mesh 表單的 `model_path`。
+**原模型完全不動** — 去背搞砸就重來，或把 Mesh 的去背欄位留空用原始點雲。`render.py` 因此會用
+乾淨的雲算 mesh、從原 `source_path` 讀相機、把結果寫進兄弟目錄。
+
+- **去背 ≠ 即時更新 mesh**：編輯只改點雲，要重跑 Mesh 階段才會產出乾淨 mesh。
+- **GS-2M 不需改動**：靠兄弟目錄 + symlink，render.py 零修改就能吃去背後的雲。
+- **build**：`static/supersplat/` 是建置產物（已 gitignore）。第一次或更新版本時跑
+  `./tools/build_supersplat.sh`（需要 node ≥18 + npm + git；會 clone 釘版 SuperSplat、套
+  `tools/supersplat-reconstudio.patch`〔滾輪縮放修正 + 送回 API〕、用 `BASE_HREF=/static/supersplat/`
+  build、部署並去掉 sourcemap）。
+
 ### ④ Mesh — model → triangle mesh
 Backend-specific (only backends that declare `mesh_args`, e.g. GS-2M's
 `render.py --extract_mesh --skip_test`). Tunable: `--mesh_only` (加速), `--auto_voxel`
@@ -118,6 +139,8 @@ COLMAP_PANEL_MAX_JOBS=4   # how many jobs run at once (default 4)
 `run.sh` auto-detects sensible defaults; override via the environment or a **`local.env`**
 file (copy `local.env.example` → `local.env`; gitignored). **Backend changes (`app.py` /
 `pipeline/` / `jobs.py`) need a restart; template (`templates/`) changes just need a refresh.**
+**去背編輯器**：`static/supersplat/` 是建置產物，第一次要先 `./tools/build_supersplat.sh`
+（node + npm；見 [🧹 去背](#-去背-background-removal-optional--supersplat)）。
 
 | env | default | why |
 |-----|---------|-----|
@@ -228,6 +251,8 @@ conda create -n rec python=3.10 -y
 conda run -n rec pip install -r requirements.txt
 # 2) prerequisites: install colmap (+ ffmpeg with blurdetect), and set up the trainer
 #    env(s) — for GS-2M follow "GS-2M — install & wiring" above (env create + pip build)
+# 2b) (optional) build the in-browser 去背 editor into static/ (needs node>=18 + npm + git)
+./tools/build_supersplat.sh
 # 3) per-machine config (optional if names/paths match)
 cp local.env.example local.env          # paths/ports
 cp backends.example.json backends.json  # trainer envs/repos
@@ -251,7 +276,11 @@ log 顯示 layout、各階段 banner、stage stepper。完成後可 **🧊 檢�
 **③ 訓練**：選 backend（環境未就緒會灰掉，旁邊有 `/doctor` 連結）、`source`（COLMAP workspace）、
 `model_path`（輸出）、**GPU**（手動選 #0 / #1）。參數依 backend schema 顯示，材質/遮罩收在摺疊區。
 **▶ 啟動訓練** → 右側狀態列顯示階段（載入相機 / 訓練中 / 存檔…）與 `iter N/total`、loss；
-log 的進度條原地更新不洗版。完成後 **🧩 接著抽 Mesh**。
+log 的進度條原地更新不洗版。完成後 **🧩 接著抽 Mesh**（或先 **🧹 在 SuperSplat 去背景**）。
+
+**🧹 去背（選用）**：訓練完成面板按 **🧹 在 SuperSplat 去背景** → 右側內嵌編輯器載入訓練雲。
+**滾輪=縮放、左鍵拖=旋轉、右鍵=平移**；框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景
+（**Ctrl+Z** 還原）→ **✅ 送回去背點雲 → 抽 Mesh**（自動帶入 `_edited_` 路徑到 Mesh 表單，原模型不動）。
 
 **④ Mesh**：選 backend（僅支援者出現）、`model_path`、GPU、TSDF 參數（`voxel_size` 預設 0.006，
 勾「自動體素大小」會自動估）。要實際尺寸就勾 **提供 marker**（板子規格已在 `backends.json`，免手填）→

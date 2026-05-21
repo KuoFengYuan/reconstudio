@@ -16,3 +16,6 @@ __pycache__/
 .vscode/
 .idea/
 .DS_Store
+
+# vendored build artifact — regenerate with tools/build_supersplat.sh
+static/supersplat/

@@ -336,7 +336,7 @@
     </form>
 
     <!-- ----- mesh form ----- -->
-    <form id="form-mesh" style="display:none" hx-post="/ui/mesh" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-mesh" style="display:none" hx-post="/ui/mesh" hx-target="#main" hx-swap="innerHTML" hx-encoding="multipart/form-data">
       <fieldset>
         <legend>Mesh 抽取</legend>
         {% set mesh_backends = backends | selectattr('mesh') | list %}
@@ -408,6 +408,15 @@
       {% endfor %}
 
       {% if mesh_backends %}
+      <details class="grp">
+        <summary>🧹 SuperSplat 去背後的點雲（選填）</summary>
+        <div class="gbody">
+          <label>編輯後的點雲 (.ply)</label>
+          <input type="file" name="edited_ply" accept=".ply">
+          <div class="hint">在訓練完成面板按「🧹 在 SuperSplat 去背景」,刪掉背景後 <b>匯出 PLY</b>,在此選檔。
+            會以原模型衍生一個 <code>_edited_&lt;時間&gt;</code> 兄弟目錄抽 mesh,<b>原模型不會被覆蓋</b>;留空則用原始點雲。</div>
+        </div>
+      </details>
       <details class="grp">
         <summary>進階（額外旗標）</summary>
         <div class="gbody">
@@ -564,6 +573,48 @@
       '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
       '<span class="hint">Mesh 檢視 · 量尺單位 mm</span></div>' +
       '<iframe src="/viz/mesh/' + id + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
+  }
+  // embed the self-hosted SuperSplat editor inline in the output column (not a new tab),
+  // pre-loaded with the trained 3DGS cloud. 去背: box/sphere select → Ctrl+I invert →
+  // Delete → Ctrl+Z to undo. The「送回」button asks the iframe (postMessage) to serialize
+  // the edited cloud and POSTs it back; the server stages a non-destructive _edited_ dir.
+  function openSuperSplat(jobId){
+    if (window._es) { try { window._es.close(); } catch(e){} }
+    var ply = location.origin + '/api/jobs/' + jobId + '/gaussians.ply';
+    var url = '/static/supersplat/index.html?load=' + encodeURIComponent(ply) + '&filename=point_cloud.ply';
+    document.getElementById('main').innerHTML =
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
+      '<button class="ghost" onclick="loadJob(\'' + jobId + '\')">← 回 log</button>' +
+      '<button class="ghost" style="border-color:var(--ok);color:var(--ok)" onclick="superSplatSendBack(\'' + jobId + '\')">✅ 送回去背點雲 → 抽 Mesh</button>' +
+      '<span class="hint">框選物件 → Ctrl+I 反選 → Delete 刪背景（Ctrl+Z 還原）→ 按綠色鈕送回</span>' +
+      '<span id="ss-status" class="hint"></span></div>' +
+      '<iframe id="ss-frame" src="' + url + '" ' +
+      'style="width:100%;height:78vh;border:1px solid var(--line);border-radius:8px"></iframe>';
+  }
+  // ask the embedded editor to serialize the 去背'd cloud, then upload it to the server,
+  // which stages a non-destructive _edited_<time> model dir and returns its path.
+  function superSplatSendBack(jobId){
+    var f = document.getElementById('ss-frame');
+    var st = document.getElementById('ss-status');
+    function setSt(t, c){ if (st){ st.textContent = t; st.style.color = c || 'var(--mut)'; } }
+    if (!f || !f.contentWindow){ setSt('· 找不到編輯器', 'var(--err)'); return; }
+    setSt('· 匯出中…');
+    function onMsg(e){
+      var d = e.data;
+      if (!d || d.type !== 'supersplat:export-ply') return;
+      window.removeEventListener('message', onMsg);
+      if (d.error || !d.data){ setSt('· 匯出失敗: ' + (d.error || 'no data'), 'var(--err)'); return; }
+      setSt('· 上傳中…（' + (d.data.byteLength/1048576).toFixed(1) + ' MB）');
+      fetch('/api/jobs/' + jobId + '/edited_ply', { method:'POST', body: d.data })
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          if (j && j.ok){ setSt('✓ 已送回，已帶入 Mesh 表單', 'var(--ok)'); fillMesh(j.model_path); }
+          else { setSt('· 上傳失敗', 'var(--err)'); }
+        })
+        .catch(function(err){ setSt('· 上傳失敗: ' + err, 'var(--err)'); });
+    }
+    window.addEventListener('message', onMsg);
+    f.contentWindow.postMessage({ type:'supersplat:export-ply' }, '*');
   }
   // live log via SSE — started here (not in the swapped fragment) because htmx
   // does not reliably execute inline <script> in swapped content.

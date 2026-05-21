@@ -2,6 +2,8 @@
 #   pip install -r requirements.txt
 #
 # Frontend libs (three.js, htmx) are vendored under static/ — NOT installed via pip.
+# The SuperSplat 去背 editor under static/supersplat/ is a BUILD artifact (gitignored) —
+#   build it once with ./tools/build_supersplat.sh (needs node>=18 + npm + git). Not a pip dep.
 # External binaries needed at runtime (set COLMAP_BIN / FFMPEG_BIN if not on PATH):
 #   - colmap            (3.x / 4.x)
 #   - ffmpeg            with the `blurdetect` filter; an NVDEC build adds GPU decode
