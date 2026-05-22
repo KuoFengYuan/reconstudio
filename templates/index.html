@@ -751,30 +751,30 @@
     var pre = document.getElementById('log');
     if (!pre) return;
     pre.textContent = '';
-    pre.dataset.lastProg = '0';
+    // Keep the log text in memory and write the DOM once per SSE event. Reading +
+    // rewriting the whole pre.textContent for *every* line was O(n²): replaying a
+    // finished job's multi-MB log froze the tab ("Page Unresponsive").
+    var lines = [];
+    var lastProg = false;
     var es = new EventSource('/api/jobs/' + jobId + '/logs');
     window._es = es;
     es.onmessage = function(ev){
       var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-      ev.data.split('\n').forEach(function(ln){ pushLogLine(pre, ln); });
+      ev.data.split('\n').forEach(function(ln){ lastProg = pushLogLine(lines, ln, lastProg); });
+      pre.textContent = lines.length ? lines.join('\n') + '\n' : '';
       if (atBottom) pre.scrollTop = pre.scrollHeight;
     };
     es.addEventListener('end', function(){ es.close(); });
   }
   // tqdm refreshes the same bar with \r; treat progress lines as in-place updates
   // so the bar moves at the bottom instead of flooding the pane with thousands of
-  // near-identical lines (which made the log feel laggy / stuck).
-  function pushLogLine(pre, line){
+  // near-identical lines (which made the log feel laggy / stuck). Appends to an
+  // in-memory line array (O(1) per line); returns whether this line was progress.
+  function pushLogLine(lines, line, lastProg){
     var isProg = /\d+%\|/.test(line) || /it\/s/.test(line);
-    var t = pre.textContent;
-    if (isProg && pre.dataset.lastProg === '1'){
-      var body = t.endsWith('\n') ? t.slice(0, -1) : t;
-      var nl = body.lastIndexOf('\n');
-      pre.textContent = (nl >= 0 ? body.slice(0, nl + 1) : '') + line + '\n';
-    } else {
-      pre.textContent = t + line + '\n';
-    }
-    pre.dataset.lastProg = isProg ? '1' : '0';
+    if (isProg && lastProg && lines.length) lines[lines.length - 1] = line;
+    else lines.push(line);
+    return isProg;
   }
   function refreshJoblist(){ htmx.ajax('GET', '/ui/joblist', {target:'#joblist', swap:'innerHTML'}); }
   // History filter by kind (frames/colmap/train/mesh). Persisted across the 3s
