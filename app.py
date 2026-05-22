@@ -12,6 +12,7 @@ JSON API lives under /api/*; logs stream over SSE.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -465,6 +466,33 @@ def _model_dir(job) -> Path | None:
     return md if (md / "images.bin").exists() and (md / "points3D.bin").exists() else None
 
 
+def _dense_dir(job) -> Path | None:
+    """The undistorted dataset dir (sparse/ + images/) that 3DGS training reads."""
+    ws = (job.meta or {}).get("workspace")
+    if not ws:
+        return None
+    p = job.params or {}
+    d = Path(ws) / f"{p.get('dataset_name', 'training_dataset')}_{p.get('mapper', 'global')}_mapper"
+    return d if (d / "sparse" / "cameras.bin").is_file() and (d / "images").is_dir() else None
+
+
+def _resolve_model(job, sub: str | None) -> Path | None:
+    """Sparse model to visualize: the default sparse/0, or — when `sub` is given —
+    a camera-culled variant under the workspace's cleaned/ tree (e.g.
+    'cleaned/20260522_103000/sparse/0'). `sub` is confined to <ws>/cleaned to keep
+    it from escaping the workspace via .. ."""
+    if not sub:
+        return _model_dir(job)
+    ws = (job.meta or {}).get("workspace")
+    if not ws:
+        return None
+    cleaned = (Path(ws) / "cleaned").resolve()
+    cand = (Path(ws) / sub).resolve()
+    if cand != cleaned and not str(cand).startswith(str(cleaned) + os.sep):
+        return None
+    return cand if (cand / "images.bin").exists() and (cand / "points3D.bin").exists() else None
+
+
 def _trained_model_dir(job) -> Path | None:
     """The trained-model output dir, from a train job's meta. Validated by the
     presence of a trained 3DGS .ply (backend-agnostic). Distinct from _model_dir,
@@ -524,11 +552,21 @@ def _prepare_edited_model(model: Path, upload) -> Path:
 
 
 @app.get("/viz/{job_id}", response_class=HTMLResponse)
-async def viz(request: Request, job_id: str):
+async def viz(request: Request, job_id: str, m: str | None = None):
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-    return _page(request, "viz.html", job=job.to_dict(), has_model=bool(_model_dir(job)))
+    md = _resolve_model(job, m)
+    # when viewing a cleaned variant, surface its folder + trainable dataset path so the
+    # user can see/copy where it lives (the post-cull message is transient).
+    clean_dir = clean_dataset = ""
+    if m and md and md != _model_dir(job):
+        root = md.parent.parent                         # .../cleaned/<ts>
+        clean_dir = str(root)
+        ds = root / "dataset"
+        clean_dataset = str(ds) if (ds / "sparse" / "cameras.bin").is_file() else ""
+    return _page(request, "viz.html", job=job.to_dict(), has_model=bool(md),
+                 model_sub=(m or ""), clean_dir=clean_dir, clean_dataset=clean_dataset)
 
 
 @app.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
@@ -547,11 +585,11 @@ async def mesh_viz(request: Request, job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/scene.json")
-async def scene_json(job_id: str):
+async def scene_json(job_id: str, m: str | None = None):
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-    md = _model_dir(job)
+    md = _resolve_model(job, m)
     if not md:
         raise HTTPException(404, "no sparse model for this job")
     from pipeline.model import scene
@@ -559,11 +597,11 @@ async def scene_json(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/image/{idx}")
-async def image_detail_ep(job_id: str, idx: int):
+async def image_detail_ep(job_id: str, idx: int, m: str | None = None):
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-    md = _model_dir(job)
+    md = _resolve_model(job, m)
     if not md:
         raise HTTPException(404, "no sparse model for this job")
     from pipeline.model import image_detail
@@ -571,11 +609,11 @@ async def image_detail_ep(job_id: str, idx: int):
 
 
 @app.get("/api/jobs/{job_id}/imagefile/{idx}")
-async def image_file(job_id: str, idx: int):
+async def image_file(job_id: str, idx: int, m: str | None = None):
     """Serve the source photo for image #idx (checked across the undistorted output,
     the original image_root, and the NESTED staging dir)."""
     job = manager.get(job_id)
-    md = _model_dir(job) if job else None
+    md = _resolve_model(job, m) if job else None
     if not md:
         raise HTTPException(404, "no sparse model for this job")
     from pipeline.model import read_images
@@ -632,17 +670,101 @@ async def mesh_scaled_ply(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/model.ply")
-async def model_ply(job_id: str):
+async def model_ply(job_id: str, m: str | None = None):
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-    md = _model_dir(job)
+    md = _resolve_model(job, m)
     if not md:
         raise HTTPException(404, "no sparse model for this job")
     from pipeline.model import ensure_ply
-    out = Path(job.meta["workspace"]) / "sparse" / "points.ply"
+    out = md / "points.ply"          # next to the model (cleaned variants get their own)
     await asyncio.to_thread(ensure_ply, md, out)
     return FileResponse(out, media_type="application/octet-stream", filename="points.ply")
+
+
+@app.post("/api/jobs/{job_id}/cull")
+async def cull_ep(job_id: str, request: Request):
+    """Remove the named (bad) cameras and write a NON-DESTRUCTIVE cleaned copy under
+    <workspace>/cleaned/<timestamp>/:
+        sparse/0/            pruned distorted model — reopen in the viewer to confirm
+        dataset/sparse/      pruned undistorted model (what training reads)
+        dataset/images  ->   symlink to the original images (never copied)
+        removed.json         audit (which cameras, counts, source job)
+    The originals (sparse/0, *_mapper) are only read. Works for one camera or many —
+    the body is just the list of image names to drop. Returns the cleaned paths so
+    the UI can reopen the result and prefill it as a Train `source`."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    md = _model_dir(job)                       # distorted model the viewer shows
+    if not md:
+        raise HTTPException(404, "no sparse model for this job")
+    body = await request.json()
+    names = sorted({str(n).strip() for n in (body.get("names") or []) if str(n).strip()})
+    if not names:
+        raise HTTPException(400, "沒有指定要移除的相機（names 為空）。")
+    # also drop the 3D points the removed cameras leave under-supported (default on)
+    filter_points = bool(body.get("filter_points", True))
+
+    # Iterative culling: cull FROM the model currently shown in the viewer (a cleaned
+    # variant, passed as `from`), so repeated removals ACCUMULATE instead of each
+    # starting over from the original. Empty/stale `from` -> cull the original.
+    from_ = (body.get("from") or "").strip()
+    src_model = (_resolve_model(job, from_) if from_ else None) or md
+    dense = _dense_dir(job)
+    src_dataset = dense / "sparse" if dense else None
+    prev_removed: list[str] = []
+    if src_model != md:                                # culling a previous cleaned variant
+        variant_root = src_model.parent.parent         # .../cleaned/<ts>
+        cand = variant_root / "dataset" / "sparse"
+        if (cand / "cameras.bin").is_file():
+            src_dataset = cand                          # keep pruning the variant's dataset
+        rj = variant_root / "removed.json"
+        if rj.is_file():
+            try:
+                prev_removed = json.loads(rj.read_text()).get("removed_total") \
+                    or json.loads(rj.read_text()).get("removed", [])
+            except (ValueError, OSError):
+                prev_removed = []
+
+    ws = Path(job.meta["workspace"])
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    clean_root = ws / "cleaned" / ts
+    img_target = (dense / "images") if dense else None  # symlink always -> ORIGINAL images
+    from pipeline.model import cull_cameras, read_images, count_points
+
+    def _build() -> dict:
+        s0 = clean_root / "sparse" / "0"
+        cull_cameras(src_model, s0, names, filter_points=filter_points)   # for the viewer
+        kept = len(read_images(s0 / "images.bin"))
+        pts = count_points(s0 / "points3D.bin")
+        dataset = None
+        if src_dataset is not None:                                      # for training/mesh
+            ds = clean_root / "dataset"
+            cull_cameras(src_dataset, ds / "sparse", names, filter_points=filter_points)
+            link = ds / "images"
+            if img_target and not os.path.lexists(link):
+                link.symlink_to(os.path.relpath(img_target, ds))
+            dataset = str(ds)
+        return {"kept": kept, "points": pts, "dataset": dataset}
+
+    pts_before = await asyncio.to_thread(count_points, src_model / "points3D.bin")
+    info = await asyncio.to_thread(_build)
+    removed_total = sorted(set(prev_removed) | set(names))
+    audit = {"removed": names, "removed_count": len(names),
+             "removed_total": removed_total, "removed_total_count": len(removed_total),
+             "from": from_ or None, "kept_images": info["kept"],
+             "filter_points": filter_points, "points_before": pts_before,
+             "points_after": info["points"], "source_job": job_id,
+             "source_model": str(src_model), "created": ts}
+    (clean_root / "removed.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2))
+    rel = clean_root.relative_to(ws).as_posix()                    # e.g. cleaned/20260522_103000
+    return JSONResponse({"ok": True, "cleaned_dir": str(clean_root),
+                         "dataset_dir": info["dataset"], "viz_model": f"{rel}/sparse/0",
+                         "removed": len(names), "removed_total": len(removed_total),
+                         "kept": info["kept"], "points_before": pts_before,
+                         "points_after": info["points"]})
 
 
 @app.get("/api/jobs/{job_id}/gaussians.ply")

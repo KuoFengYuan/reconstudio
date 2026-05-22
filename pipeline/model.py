@@ -105,6 +105,40 @@ def ensure_ply(model_dir: Path, out_ply: Path, force: bool = False) -> Path:
     return out_ply
 
 
+def cull_cameras(src_model: Path, out_model: Path, names: list[str],
+                 filter_points: bool = True) -> None:
+    """Write a copy of `src_model` to `out_model` with the named images removed
+    (their 2D observations and now-empty 3D points are pruned too), via
+    `colmap image_deleter`. The input model is never modified; `out_model` is
+    created if needed. Removal is keyed by image name, which is stable across the
+    distorted (sparse/0) and undistorted (dense) models.
+
+    `image_deleter` alone only drops a 3D point when ALL its observations are gone;
+    points still seen by a kept camera survive. When `filter_points` is set, follow
+    with `colmap point_filtering` (track_len>=2, reproj<=4px, tri_angle>=1.5deg) so
+    the points a removed (e.g. mis-located) camera leaves under-supported — the
+    floaters / junk it contributed — are dropped too."""
+    out_model.mkdir(parents=True, exist_ok=True)
+    import tempfile
+    fd, names_path = tempfile.mkstemp(suffix=".txt", text=True)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(names) + "\n")
+        subprocess.run([COLMAP_BIN, "image_deleter",
+                        "--input_path", str(src_model),
+                        "--output_path", str(out_model),
+                        "--image_names_path", names_path],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    finally:
+        os.unlink(names_path)
+    if filter_points:
+        subprocess.run([COLMAP_BIN, "point_filtering",        # in-place is safe (tested)
+                        "--input_path", str(out_model), "--output_path", str(out_model),
+                        "--min_track_len", "2", "--max_reproj_error", "4",
+                        "--min_tri_angle", "1.5"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def scene(model_dir: Path) -> dict:
     md = Path(model_dir)
     cams = read_cameras(md / "cameras.bin")

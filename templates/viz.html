@@ -41,6 +41,22 @@
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
              color:var(--mut); pointer-events:none; font-size:13px; }
   #hint { position:fixed; left:12px; bottom:10px; color:var(--mut); font-size:11px; }
+  #cull { position:fixed; left:12px; bottom:32px; width:300px; max-width:46vw; background:var(--panel);
+          border:1px solid var(--err); border-radius:9px; padding:9px 11px; display:none; }
+  #cull-hd { color:var(--err); font-weight:600; margin-bottom:4px; }
+  #cull-list { max-height:150px; overflow:auto; margin:4px 0; }
+  #cull-list .row { display:flex; justify-content:space-between; gap:8px; color:var(--mut);
+                    font-size:12px; padding:1px 0; }
+  #cull-list .row .x { cursor:pointer; color:var(--err); padding-left:6px; }
+  .cull-btns { display:flex; gap:8px; margin-top:4px; }
+  button.danger { border-color:var(--err); color:var(--err); }
+  button:disabled { opacity:.5; cursor:default; }
+  #cull-msg { margin-top:7px; font-size:12px; color:var(--mut); word-break:break-all; }
+  #cull-msg code { color:var(--fg); }  #cull-msg a { color:var(--accent); }
+  #rband { position:fixed; border:1px solid var(--accent); background:rgba(201,209,217,.12);
+           display:none; pointer-events:none; z-index:5; }
+  #viewbanner { margin-top:8px; padding:5px 8px; border:1px solid var(--warn); border-radius:6px;
+                color:var(--warn); font-size:12px; display:none; }
 </style>
 </head>
 <body>
@@ -74,12 +90,35 @@
       <button id="reset">重置視角</button>
       <button id="reset-rot">歸零旋轉</button>
     </div>
+    <div class="rowbtn">
+      <label><input id="cull-mode" type="checkbox"> 🗑 挑選要移除的相機</label>
+    </div>
+    <div id="culltip" style="display:none;margin-top:-4px;color:var(--mut);font-size:11px">拖曳=框選多台 · 點=單選 · Shift+拖曳=轉視角</div>
+    <div id="viewbanner">👁 正在看清理後結果 · 可繼續挑選移除（會累積在這版之上）</div>
+    <div id="cleanpaths" style="display:none;margin-top:8px;font-size:11px;color:var(--mut);word-break:break-all">
+      <div>📁 清理後資料夾</div><code id="cp-dir" style="color:var(--fg)"></code>
+      <div style="margin-top:5px">🎯 訓練 source 用這個</div><code id="cp-ds" style="color:var(--accent)"></code>
+    </div>
     <div id="legend"></div>
   </div>
 </div>
 <div id="sel"><span class="x" onclick="clearSel()">✕</span>
   <div id="sel-body"></div></div>
-<div id="hint">拖曳=旋轉(360°自由) · 滾輪=縮放 · 右鍵=平移 · 雙擊相機=顯示資訊並高亮 · 勾「旋轉物體」拖環對齊</div>
+<div id="cull">
+  <div id="cull-hd">🗑 要移除的相機 · <span id="cull-n">0</span> 台</div>
+  <label style="display:flex;align-items:center;gap:5px;color:var(--mut);font-size:12px;margin-bottom:4px">
+    <input id="box-mode" type="checkbox"> ✏️ 框選模式（拖曳框一群;關閉時拖曳=旋轉）</label>
+  <div id="cull-list"></div>
+  <label style="display:flex;align-items:center;gap:5px;color:var(--mut);font-size:12px;margin:4px 0">
+    <input id="cull-filter" type="checkbox" checked> 同時清掉對應的 3D 點（point_filtering）</label>
+  <div class="cull-btns">
+    <button id="cull-go" class="danger" disabled>移除選取</button>
+    <button id="cull-clear">清除選取</button>
+  </div>
+  <div id="cull-msg"></div>
+</div>
+<div id="rband"></div>
+<div id="hint"><b>WASD</b>=移動 · <b>Q/E</b>=上下 · 拖曳=旋轉 · 滾輪=縮放 · 右鍵=平移 · 雙擊相機=資訊 ‖ 挑選模式:點=單選/取消 · 勾「框選模式」後拖曳=框選一群</div>
 
 <script type="importmap">
 { "imports": { "three": "/static/three/three.module.js",
@@ -93,6 +132,8 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 
 const JOB = "{{ job.id }}";
+const MSUB = "{{ model_sub }}";                    // viewing a cleaned variant if set
+const MQ = MSUB ? ('?m=' + encodeURIComponent(MSUB)) : '';
 const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias:true});
 renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeight);
 renderer.autoClear = false;                       // ViewHelper renders in a corner viewport
@@ -111,6 +152,7 @@ const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.001, 1e
 const controls = new TrackballControls(camera, renderer.domElement);   // free 360°, no pole lock
 controls.rotateSpeed = 3.2; controls.zoomSpeed = 1.3; controls.panSpeed = 0.9;
 controls.staticMoving = false; controls.dynamicDampingFactor = 0.15;
+controls.keys = [];                 // free A/S/D for WASD fly-nav (else they switch modes)
 
 // rotation gizmo on the object (drag rings to reorient/align); off by default
 const gizmo = new TransformControls(camera, renderer.domElement);
@@ -132,7 +174,11 @@ addEventListener('resize', () => {
 const palette = [0x4c8bf5,0x3fb950,0xd29922,0xf85149,0xa371f7,0x39c5cf,0xff7b72,0xbf91f3];
 const flipW = v => new THREE.Vector3(v.x, -v.y, -v.z);
 let points, cams, camPoints, sceneSize = 1, imagesData = [], centerC = new THREE.Vector3(), colorOf = () => 0xffd24a, highlightIdx = -1;
-const HILITE = 0x00e5ff;   // selected-camera colour
+const HILITE = 0x00e5ff;   // double-clicked (info) camera colour
+const CULLCLR = 0xf85149;  // marked-for-removal camera colour
+let selectMode = false;            // 挑選要移除的相機
+let boxMode = false;               // 框選模式: drag=box-select (off: drag=rotate)
+const selected = new Set();        // camera indices (gi) marked for removal
 
 function fitView(){
   if (!points) return;
@@ -184,7 +230,8 @@ function buildCameras(scaleMul){
     const ctr = C.clone().add(fwd.clone().multiplyScalar(d));
     const corners = [[-w,-h],[w,-h],[w,h],[-w,h]].map(([a,b]) =>
       ctr.clone().add(right.clone().multiplyScalar(a)).add(down.clone().multiplyScalar(b)));
-    const rgb = new THREE.Color(gi === highlightIdx ? HILITE : colorOf(im.camera_id));
+    const rgb = new THREE.Color(selected.has(gi) ? CULLCLR
+                : gi === highlightIdx ? HILITE : colorOf(im.camera_id));
     corners.forEach(cor => seg(C, cor, rgb));
     for (let k=0;k<4;k++) seg(corners[k], corners[(k+1)%4], rgb);
   });
@@ -196,7 +243,7 @@ function buildCameras(scaleMul){
   inner.add(cams);
 }
 
-new PLYLoader().load(`/api/jobs/${JOB}/model.ply`, (geo) => {
+new PLYLoader().load(`/api/jobs/${JOB}/model.ply${MQ}`, (geo) => {
   document.getElementById('loading').style.display = 'none';
   const mat = new THREE.PointsMaterial({size:1.5, vertexColors:true, sizeAttenuation:false});
   points = new THREE.Points(geo, mat); inner.add(points);
@@ -206,7 +253,7 @@ new PLYLoader().load(`/api/jobs/${JOB}/model.ply`, (geo) => {
 });
 
 async function loadCameras(){
-  const data = await (await fetch(`/api/jobs/${JOB}/scene.json`)).json();
+  const data = await (await fetch(`/api/jobs/${JOB}/scene.json${MQ}`)).json();
   document.getElementById('s-img').textContent = data.num_images.toLocaleString();
   document.getElementById('s-cam').textContent = data.num_cameras.toLocaleString();
   document.getElementById('s-pts').textContent = data.num_points.toLocaleString();
@@ -241,13 +288,13 @@ async function loadCameras(){
   fitView();
 }
 
-// double-click a camera -> show its info + photo (highlight, no fly)
-renderer.domElement.addEventListener('dblclick', async (e) => {
-  if (!imagesData.length) return;
+// pick the camera whose CENTRE projects nearest to (clientX, clientY) in screen
+// space — reliable regardless of frustum size / overlap / object rotation. Returns
+// the index or -1 if none is within ~40px.
+function pickCamera(clientX, clientY){
+  if (!imagesData.length) return -1;
   const r = renderer.domElement.getBoundingClientRect();
-  const cx = e.clientX - r.left, cy = e.clientY - r.top;
-  // pick the camera whose CENTRE projects nearest to the cursor (screen-space) —
-  // reliable regardless of frustum size / overlap / object rotation
+  const cx = clientX - r.left, cy = clientY - r.top;
   inner.updateWorldMatrix(true, false);
   const v = new THREE.Vector3();
   let idx = -1, best = Infinity;
@@ -259,7 +306,13 @@ renderer.domElement.addEventListener('dblclick', async (e) => {
     const dd = (sx-cx)*(sx-cx) + (sy-cy)*(sy-cy);
     if (dd < best){ best = dd; idx = i; }
   }
-  if (idx < 0 || best > 40*40) return;                  // need a camera centre within ~40px
+  return (idx >= 0 && best <= 40*40) ? idx : -1;        // need a centre within ~40px
+}
+
+// double-click a camera -> show its info + photo (highlight, no fly)
+renderer.domElement.addEventListener('dblclick', async (e) => {
+  const idx = pickCamera(e.clientX, e.clientY);
+  if (idx < 0) return;
   const im = imagesData[idx];
   highlightIdx = idx;                                   // recolour the selected camera (no fly)
   buildCameras(+document.getElementById('csize').value);
@@ -267,9 +320,9 @@ renderer.domElement.addEventListener('dblclick', async (e) => {
   sel.style.display = 'block';
   // photo loads once; only the text line updates after the score fetch
   body.innerHTML = `<div id="sel-txt"><b>${im.name}</b><br><span class="hint">影像 #${idx} · cam ${im.camera_id} · 載入分數…</span></div>` +
-    `<img src="/api/jobs/${JOB}/imagefile/${idx}" onerror="this.style.display='none'">`;
+    `<img src="/api/jobs/${JOB}/imagefile/${idx}${MQ}" onerror="this.style.display='none'">`;
   try {
-    const d = await (await fetch(`/api/jobs/${JOB}/image/${idx}`)).json();
+    const d = await (await fetch(`/api/jobs/${JOB}/image/${idx}${MQ}`)).json();
     document.getElementById('sel-txt').innerHTML = `<b>${d.name}</b><br>影像 #${idx} · cam ${d.camera_id}<br>` +
       `<span class="hint">registered pts</span> <b>${d.n_registered.toLocaleString()}</b> / ${d.n_features.toLocaleString()} feats`;
   } catch(_){}
@@ -284,10 +337,172 @@ document.getElementById('rot-obj').onchange = e => { gizmo.enabled = gizmo.visib
 document.getElementById('reset').onclick = () => fitView();
 document.getElementById('reset-rot').onclick = () => { obj.quaternion.identity(); fitView(); };
 
+// ── camera culling (挑選要移除的相機) ───────────────────────────────────────
+// 點相機 = 單選/取消(individual);Shift+拖曳框 = 群選(group)。選好按「移除選取」→
+// POST /cull → 後端用 colmap image_deleter 砍掉這些相機,寫到 cleaned/<時間>/(不動原檔)。
+const cull = document.getElementById('cull'), cullN = document.getElementById('cull-n'),
+      cullList = document.getElementById('cull-list'), cullGo = document.getElementById('cull-go'),
+      cullMsg = document.getElementById('cull-msg'), rband = document.getElementById('rband');
+const csizeEl = document.getElementById('csize');
+const refreshCams = () => buildCameras(+csizeEl.value);
+
+const CLEAN_DIR = "{{ clean_dir }}", CLEAN_DS = "{{ clean_dataset }}";
+if (MSUB){          // viewing a cleaned variant — culling here ACCUMULATES onto it
+  document.getElementById('viewbanner').style.display = 'block';
+  if (CLEAN_DIR){
+    document.getElementById('cleanpaths').style.display = 'block';
+    document.getElementById('cp-dir').textContent = CLEAN_DIR;
+    document.getElementById('cp-ds').textContent = CLEAN_DS || '（此 job 無去畸變資料集）';
+  }
+}
+
+function updateCullTip(){
+  document.getElementById('culltip').textContent = boxMode
+    ? '拖曳=框選一群 · 點=單選/取消 · Shift+拖曳=旋轉視角'
+    : '拖曳=旋轉 · 點=單選/取消 · 勾「框選模式」可拖曳框選一群';
+}
+document.getElementById('cull-mode').onchange = e => {
+  selectMode = e.target.checked;
+  cull.style.display = selectMode ? 'block' : 'none';
+  document.getElementById('culltip').style.display = selectMode ? 'block' : 'none';
+  controls.enabled = true;                     // leaving box-drag mid-way can't strand it
+  if (!selectMode){ selected.clear(); refreshCams(); }
+  updateCullTip(); updateCullPanel();
+};
+document.getElementById('box-mode').onchange = e => { boxMode = e.target.checked; updateCullTip(); };
+
+function updateCullPanel(){
+  cullN.textContent = selected.size;
+  cullGo.disabled = selected.size === 0;
+  cullGo.textContent = selected.size ? `移除選取 (${selected.size})` : '移除選取';
+  cullList.innerHTML = [...selected].map(i =>
+    `<div class="row"><span>${imagesData[i].name}</span>` +
+    `<span class="x" data-i="${i}" title="取消這台">✕</span></div>`).join('');
+  cullList.querySelectorAll('.x').forEach(x => x.onclick = () => {
+    selected.delete(+x.dataset.i); refreshCams(); updateCullPanel(); });
+}
+
+// project every camera centre to client coords and return those inside the rect
+function camsInRect(x0, y0, x1, y1){
+  const r = renderer.domElement.getBoundingClientRect();
+  const minX = Math.min(x0,x1), maxX = Math.max(x0,x1), minY = Math.min(y0,y1), maxY = Math.max(y0,y1);
+  inner.updateWorldMatrix(true, false);
+  const v = new THREE.Vector3(), hit = [];
+  for (let i = 0; i < imagesData.length; i++){
+    v.set(imagesData[i].center[0], imagesData[i].center[1], imagesData[i].center[2]);
+    inner.localToWorld(v); v.project(camera);
+    if (v.z > 1) continue;
+    const sx = r.left + (v.x*0.5+0.5)*r.width, sy = r.top + (-v.y*0.5+0.5)*r.height;
+    if (sx >= minX && sx <= maxX && sy >= minY && sy <= maxY) hit.push(i);
+  }
+  return hit;
+}
+
+// Selection gestures (only in 挑選 mode). 框選模式 OFF (default): drag = rotate, a
+// click = single toggle, Shift+drag = box-select. 框選模式 ON: drag = box-select,
+// Shift+drag = rotate. Alt = the box deselects. Capture phase so we can suspend
+// TrackballControls before it starts orbiting when the drag is meant to be a box.
+let pdx = 0, pdy = 0, boxing = false, maybeBox = false, addToSel = true;
+const onCanvas = e => e.target === renderer.domElement;
+renderer.domElement.addEventListener('pointerdown', e => {
+  pdx = e.clientX; pdy = e.clientY; boxing = false; maybeBox = false;
+  if (selectMode && e.button === 0 && onCanvas(e)){
+    const wantBox = boxMode ? !e.shiftKey : e.shiftKey;   // is this drag a box, or a rotate?
+    if (wantBox){ maybeBox = true; addToSel = !e.altKey; controls.enabled = false; }
+  }
+}, true);
+addEventListener('pointermove', e => {
+  if (!maybeBox) return;
+  if (!boxing && Math.hypot(e.clientX-pdx, e.clientY-pdy) > 6){    // crossed threshold -> box
+    boxing = true; rband.style.display = 'block';
+  }
+  if (boxing) Object.assign(rband.style, {left:Math.min(pdx,e.clientX)+'px', top:Math.min(pdy,e.clientY)+'px',
+    width:Math.abs(e.clientX-pdx)+'px', height:Math.abs(e.clientY-pdy)+'px'});
+});
+addEventListener('pointerup', e => {
+  const wasDrag = Math.hypot(e.clientX-pdx, e.clientY-pdy) > 6;
+  if (maybeBox){
+    maybeBox = false; controls.enabled = true;
+    if (boxing){                                                  // 框選 a group
+      boxing = false; rband.style.display = 'none';
+      camsInRect(pdx, pdy, e.clientX, e.clientY).forEach(i => addToSel ? selected.add(i) : selected.delete(i));
+      refreshCams(); updateCullPanel(); return;
+    }
+  }
+  if (selectMode && e.button === 0 && onCanvas(e) && !wasDrag){    // a click -> single toggle
+    const idx = pickCamera(e.clientX, e.clientY);
+    if (idx < 0) return;
+    selected.has(idx) ? selected.delete(idx) : selected.add(idx);
+    refreshCams(); updateCullPanel();
+  }
+});
+
+document.getElementById('cull-clear').onclick = () => { selected.clear(); refreshCams(); updateCullPanel(); };
+cullGo.onclick = async () => {
+  const names = [...selected].map(i => imagesData[i].name);
+  if (!names.length) return;
+  const filter_points = document.getElementById('cull-filter').checked;
+  cullGo.disabled = true;
+  cullMsg.textContent = '處理中…(colmap image_deleter' + (filter_points ? ' + point_filtering' : '') + ',數千張可能要一下子)';
+  try {
+    const r = await fetch(`/api/jobs/${JOB}/cull`, {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({names, filter_points, from: MSUB})});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.detail || r.statusText);
+    const href = `/viz/${JOB}?m=${encodeURIComponent(d.viz_model)}`;
+    const dpts = (d.points_before - d.points_after);
+    const totalNote = (d.removed_total && d.removed_total > d.removed) ? `（累積共 ${d.removed_total} 台）` : '';
+    cullMsg.innerHTML = `✅ 這次移除 ${d.removed} 台${totalNote},保留 ${d.kept} 台。<br>` +
+      `3D 點 ${d.points_before.toLocaleString()} → ${d.points_after.toLocaleString()}（少 ${dpts.toLocaleString()}）<br>` +
+      `<b>清理後資料夾</b><br><code>${d.cleaned_dir}</code><br>` +
+      (d.dataset_dir ? `<b>訓練 source 用這個</b><br><code>${d.dataset_dir}</code><br>` : '') +
+      `<a href="${href}" target="_blank">在檢視器開啟清理後結果 ↗</a>`;
+    selected.clear(); refreshCams(); updateCullPanel();
+  } catch(err){ cullMsg.textContent = '❌ 失敗: ' + err; }
+  cullGo.disabled = selected.size === 0;
+};
+
+// ── WASD fly-nav ────────────────────────────────────────────────────────────
+// W/S=前/後, A/D=左/右, Q/E=下/上;Shift=加速。速度依場景大小(sceneSize,在 fitView
+// 設定)自動縮放,所以不管場景是 1 單位還是 1000 單位都差不多手感。移動時 eye 與 orbit
+// 樞紐(controls.target)一起平移 → TrackballControls 會保留這個平移。
+const keys = new Set();
+const NAV = new Set(['KeyW','KeyA','KeyS','KeyD','KeyQ','KeyE']);
+let shiftHeld = false;
+addEventListener('keydown', e => {
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = true;
+  if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (NAV.has(e.code)) { keys.add(e.code); e.preventDefault(); }
+});
+addEventListener('keyup', e => {
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = false;
+  keys.delete(e.code);
+});
+addEventListener('blur', () => { keys.clear(); shiftHeld = false; });   // stop if tab unfocuses
+function applyMove(dt){
+  if (!keys.size || !points) return;
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+  const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, fwd).normalize();   // orthonormal true-up
+  const mv = new THREE.Vector3();
+  if (keys.has('KeyW')) mv.add(fwd);
+  if (keys.has('KeyS')) mv.sub(fwd);
+  if (keys.has('KeyD')) mv.add(right);
+  if (keys.has('KeyA')) mv.sub(right);
+  if (keys.has('KeyE')) mv.add(up);
+  if (keys.has('KeyQ')) mv.sub(up);
+  if (!mv.lengthSq()) return;
+  mv.normalize().multiplyScalar(sceneSize * 0.7 * (shiftHeld ? 3 : 1) * dt);  // ~0.7 span/s
+  camera.position.add(mv); controls.target.add(mv);
+}
+
 const clock = new THREE.Clock();
 (function loop(){
   requestAnimationFrame(loop);
-  if (viewHelper.animating) viewHelper.update(clock.getDelta()); else clock.getDelta();
+  const dt = clock.getDelta();
+  if (viewHelper.animating) viewHelper.update(dt);
+  applyMove(dt);
   controls.update();
   renderer.clear();
   renderer.render(scene, camera);
