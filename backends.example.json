@@ -57,8 +57,7 @@
     "label": "LichtFeld · MR-NF (無 mesh)",
     "launch": "binary",
     "exec": "/home/will/repo/LichtFeld-Studio/build/LichtFeld-Studio",
-    "config": "configs/lichtfeld/mrnf.json",
-    "train_args": "-d {scene} -o {out} --strategy mrnf --headless --no-splash {config} {args} {extra}",
+    "train_args": "-d {scene} -o {out} --strategy mrnf --headless --no-splash {args} {extra}",
     "params": [
       { "key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數" },
       { "key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "", "label": "步數縮放 (留空=用 config)", "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值(LichtFeld 內部換算,不必自己乘)。留空 = 用 config 預設。" },
@@ -77,8 +76,7 @@
     "label": "LichtFeld · iGS+ (無 mesh)",
     "launch": "binary",
     "exec": "/home/will/repo/LichtFeld-Studio/build/LichtFeld-Studio",
-    "config": "configs/lichtfeld/igsplus.json",
-    "train_args": "-d {scene} -o {out} --strategy igs+ --headless --no-splash {config} {args} {extra}",
+    "train_args": "-d {scene} -o {out} --strategy igs+ --headless --no-splash {args} {extra}",
     "params": [
       { "key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數" },
       { "key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "", "label": "步數縮放 (留空=用 config)", "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值(LichtFeld 內部換算,不必自己乘)。留空 = 用 config 預設。" },
