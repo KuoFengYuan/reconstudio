@@ -1,20 +1,17 @@
 <div>
   <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
     <code style="flex:1;color:var(--mut);word-break:break-all">{{ path }}{% if nvideos %} <span style="color:var(--accent)">· {{ nvideos }} 支影片</span>{% endif %}</code>
-    <button class="ghost"
-            onclick="document.getElementById('{{ target }}').value='{{ path }}';document.getElementById('picker').classList.remove('open')">
-      選此資料夾
-    </button>
+    <button class="ghost" onclick="pickDir('{{ target }}','{{ path }}')">選此資料夾</button>
   </div>
   <div style="display:flex;flex-direction:column;gap:4px">
     {% if parent %}
     <button class="ghost" style="text-align:left"
-            hx-get="/ui/browse?path={{ parent|urlencode }}&target={{ target }}"
+            hx-get="/ui/browse?path={{ parent|urlencode }}&target={{ target }}&root={{ root }}"
             hx-target="#picker-body" hx-swap="innerHTML">⬆ ..</button>
     {% endif %}
     {% for d in dirs %}
     <button class="ghost" style="text-align:left"
-            hx-get="/ui/browse?path={{ (path ~ '/' ~ d)|urlencode }}&target={{ target }}"
+            hx-get="/ui/browse?path={{ (path ~ '/' ~ d)|urlencode }}&target={{ target }}&root={{ root }}"
             hx-target="#picker-body" hx-swap="innerHTML">📁 {{ d }}</button>
     {% else %}
     <span class="hint">（此層沒有子資料夾）</span>

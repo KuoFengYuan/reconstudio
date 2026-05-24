@@ -1,0 +1,25 @@
+<div>
+  {% if error %}
+  <div class="hint" style="color:var(--err);margin-bottom:8px;word-break:break-all">⚠ {{ error }}</div>
+  {% endif %}
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+    <code style="flex:1;color:var(--mut);word-break:break-all">{{ prefix or '所有 bucket' }}{% if nfiles %} <span style="color:var(--accent)">· {{ nfiles }} 個檔案</span>{% endif %}</code>
+    {% if prefix %}
+    <button class="ghost" onclick="gcsPick('{{ prefix }}')">下載此資料夾 ⬇</button>
+    {% endif %}
+  </div>
+  <div style="display:flex;flex-direction:column;gap:4px">
+    {% if parent is not none %}
+    <button class="ghost" style="text-align:left"
+            hx-get="/ui/gcs_browse?prefix={{ parent|urlencode }}"
+            hx-target="#picker-body" hx-swap="innerHTML">⬆ ..</button>
+    {% endif %}
+    {% for d in dirs %}
+    <button class="ghost" style="text-align:left"
+            hx-get="/ui/gcs_browse?prefix={{ d.path|urlencode }}"
+            hx-target="#picker-body" hx-swap="innerHTML">{% if prefix %}📁{% else %}🪣{% endif %} {{ d.name }}</button>
+    {% else %}
+    <span class="hint">{% if error %}（無法列出）{% elif prefix %}（這層沒有子資料夾，可直接「下載此資料夾」）{% else %}（沒有 bucket）{% endif %}</span>
+    {% endfor %}
+  </div>
+</div>

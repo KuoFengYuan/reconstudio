@@ -26,13 +26,20 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from jobs import COLMAP_STAGES, MAX_JOBS, Job, manager, new_id
-from pipeline import (TRAIN_DEFAULTS, available_backends, build_cli,
-                      doctor as run_doctor, get_backend, list_gpus)
+from pipeline import (TRAIN_DEFAULTS, available_backends, build_cli, default_dest,
+                      doctor as run_doctor, gcs_ls, gcs_parent, get_backend,
+                      list_gpus)
 
 BASE = Path(__file__).parent
-# Restrict the directory browser to this root (the data disk by default).
+# Restrict the *input* directory browser to this root (the data disk by default).
 BROWSE_ROOT = Path(os.environ.get("RECON_STUDIO_BROWSE_ROOT", "/")).resolve()
+# Where GCS downloads may land — separate from the input root so you can choose
+# anywhere on the server (default '/'); set to narrow it.
+DEST_ROOT = Path(os.environ.get("RECON_STUDIO_DEST_ROOT", "/")).resolve()
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")   # PATH by default; override via env
+GSUTIL_BIN = os.environ.get("GSUTIL_BIN", "gsutil")   # GCS sync; PATH by default
+# Optional gs:// prefix the GCS browser starts at; empty = list all buckets.
+GCS_ROOT = os.environ.get("RECON_STUDIO_GCS_ROOT", "").strip()
 
 app = FastAPI(title="Recon Studio")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -130,30 +137,85 @@ async def index(request: Request):
                  frames_defaults=FRAMES_DEFAULTS, enums=ENUMS,
                  stages=COLMAP_STAGES, browse_root=str(BROWSE_ROOT),
                  train_defaults=TRAIN_DEFAULTS, backends=available_backends(),
-                 gpus=list_gpus())
+                 gpus=list_gpus(), gcs_root=GCS_ROOT)
 
 
 # --------------------------------------------------------------------------- #
 # Directory picker (htmx fragment)
 # --------------------------------------------------------------------------- #
-def _safe_dir(path: str) -> Path:
-    p = (BROWSE_ROOT if not path else Path(path)).resolve()
-    if p != BROWSE_ROOT and BROWSE_ROOT not in p.parents:
-        raise HTTPException(400, f"path outside browse root ({BROWSE_ROOT})")
+def _safe_dir(path: str, base: Path | None = None) -> Path:
+    base = base or BROWSE_ROOT
+    p = (base if not path else Path(path)).resolve()
+    if p != base and base not in p.parents:
+        raise HTTPException(400, f"path outside browse root ({base})")
     if not p.is_dir():
         raise HTTPException(400, f"not a directory: {p}")
     return p
 
 
 @app.get("/ui/browse", response_class=HTMLResponse)
-async def browse(request: Request, path: str = "", target: str = "image_root"):
-    p = _safe_dir(path)
+async def browse(request: Request, path: str = "", target: str = "image_root",
+                 root: str = "input"):
+    base = DEST_ROOT if root == "dest" else BROWSE_ROOT
+    p = _safe_dir(path, base)
     dirs = sorted((d.name for d in p.iterdir()
                    if d.is_dir() and not d.name.startswith(".")), key=str.lower)
     nvideos = sum(1 for f in p.iterdir() if f.suffix.lower() in VIDEO_EXTS)
     return _page(request, "_browse.html", path=str(p),
-                 parent=(str(p.parent) if p != BROWSE_ROOT else None),
-                 dirs=dirs, target=target, nvideos=nvideos)
+                 parent=(str(p.parent) if p != base else None),
+                 dirs=dirs, target=target, nvideos=nvideos, root=root)
+
+
+# --------------------------------------------------------------------------- #
+# GCS browser + download  (decoupled: only moves gs:// -> local; no pipeline
+# chaining. The downloaded folder is then picked normally via /ui/browse.)
+# --------------------------------------------------------------------------- #
+@app.get("/ui/gcs_browse", response_class=HTMLResponse)
+async def gcs_browse(request: Request, prefix: str = ""):
+    prefix = (prefix or "").strip()
+    if prefix in ("gs://", "gs:/"):
+        prefix = ""
+    try:
+        if prefix and not prefix.startswith("gs://"):
+            raise ValueError("prefix 必須是 gs:// 開頭")
+        data = await asyncio.to_thread(gcs_ls, prefix, gsutil_bin=GSUTIL_BIN)
+    except Exception as exc:  # noqa: BLE001 — show the error inside the picker
+        return _page(request, "_gcs_browse.html", error=str(exc), prefix=prefix,
+                     dirs=[], nfiles=0, parent=gcs_parent(prefix))
+    return _page(request, "_gcs_browse.html", error=None, prefix=data["prefix"],
+                 dirs=data["dirs"], nfiles=data["nfiles"], parent=data["parent"])
+
+
+@app.post("/ui/gcs_sync", response_class=HTMLResponse)
+async def create_gcs_sync(request: Request):
+    form = dict(await request.form())
+    src = (form.get("src") or "").strip()
+    dest = (form.get("dest") or "").strip().rstrip("/")
+    try:
+        if not src.startswith("gs://"):
+            raise ValueError("來源必須是 gs:// 路徑")
+        if not dest:
+            dest = default_dest(src, str(BROWSE_ROOT))   # convenience default only
+        destp = Path(dest).expanduser()
+        if not destp.is_absolute():
+            raise ValueError(f"下載目的需為絕對路徑:{dest}")
+        destp = destp.resolve()
+        if destp.exists() and not destp.is_dir():
+            raise ValueError(f"下載目的已存在且不是資料夾:{destp}")
+        # Free to land anywhere under DEST_ROOT (default '/', i.e. unrestricted).
+        if destp != DEST_ROOT and DEST_ROOT not in destp.parents:
+            raise ValueError(f"下載目的需在 {DEST_ROOT} 底下:{destp}")
+        params = {"src": src, "dest": str(destp), "gsutil_bin": GSUTIL_BIN,
+                  "delete": bool(form.get("delete"))}
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    job = Job(id=new_id(), kind="gcs",
+              title=f"{src.rstrip('/').rsplit('/', 1)[-1]} ⬇",
+              subtitle=f"{src}  →  {destp}",
+              params=params, meta={"src": src, "dest": str(destp)})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
 
 # --------------------------------------------------------------------------- #

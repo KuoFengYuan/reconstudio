@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from pipeline import (COLMAP_STAGES, Cancelled, Runner, run_colmap, run_frames,
-                      run_mesh, run_train)
+                      run_gcs_sync, run_mesh, run_train)
 from pipeline.colmap import COLMAP_DEFAULTS  # noqa: F401  (re-exported for app)
 from pipeline.frames import FRAMES_DEFAULTS  # noqa: F401
 
@@ -33,6 +33,7 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "colmap": run_colmap,
     "train": run_train,
     "mesh": run_mesh,
+    "gcs": run_gcs_sync,
 }
 
 # --- COLMAP stage parsing --------------------------------------------------- #
@@ -77,6 +78,13 @@ _TR_PHASES = [
     (re.compile(r"Saving Gaussians|Saving final model"), "存檔中"),  # +LichtFeld
     (re.compile(r"Saving checkpoint"), "存 checkpoint"),
 ]
+
+# --- gcs parsing ------------------------------------------------------------ #
+# gsutil rsync emits "Building/Starting synchronization", one "Copying gs://…"
+# per transferred file, and a final "Operation completed over N objects/SIZE.".
+_GCS_SYNC = re.compile(r"Building synchronization state|Starting synchronization")
+_GCS_COPY = re.compile(r"^\s*(?:Copying|Downloading)\b")
+_GCS_DONE = re.compile(r"Operation completed over (\d+) objects(?:/([\d.]+\s*\w+))?")
 
 # --- mesh parsing ----------------------------------------------------------- #
 _ME_RESULT = re.compile(r"\[mesh\] result:\s*(\S+)")
@@ -214,11 +222,27 @@ def _parse_mesh(job: Job, line: str) -> None:
         job.meta["phase"] = "已縮放 (mm)"
 
 
+def _parse_gcs(job: Job, line: str) -> None:
+    if _GCS_SYNC.search(line):
+        job.meta.setdefault("phase", "比對差異中")
+    if _GCS_COPY.search(line):
+        job.meta["copied"] = job.meta.get("copied", 0) + 1
+        job.meta["phase"] = "下載中"
+    m = _GCS_DONE.search(line)
+    if m:
+        job.meta["objects"] = int(m.group(1))
+        if m.group(2):
+            job.meta["size"] = m.group(2).strip()
+        job.meta["phase"] = "完成"
+        job.current_stage = "done"
+
+
 PARSERS: dict[str, Callable[[Job, str], None]] = {
     "colmap": _parse_colmap,
     "frames": _parse_frames,
     "train": _parse_train,
     "mesh": _parse_mesh,
+    "gcs": _parse_gcs,
 }
 
 

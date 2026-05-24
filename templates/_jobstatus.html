@@ -64,6 +64,17 @@
     </div>
     {% endif %}
 
+  {% elif job.kind == 'gcs' %}
+    <div class="chips">
+      {% if job.meta.get('phase') %}<span class="chip accent">{{ job.meta.phase }}</span>{% endif %}
+      {% if job.meta.get('copied') %}<span class="chip">已複製 {{ job.meta.copied }} 檔</span>{% endif %}
+      {% if job.meta.get('objects') %}<span class="chip ok">{{ job.meta.objects }} 物件{% if job.meta.get('size') %} · {{ job.meta.size }}{% endif %}</span>{% endif %}
+    </div>
+    {% if job.status == 'done' %}
+    <div class="hint pathline" style="margin-top:12px">✅ 已下載到：<code>{{ job.meta.get('dest','') }}</code></div>
+    <div class="hint">到 COLMAP / 訓練 / Mesh 分頁，用「瀏覽」選這個資料夾即可（不會自動帶入，流程由你決定）。</div>
+    {% endif %}
+
   {% else %}
     <div class="chips">
       {% for s in stages %}

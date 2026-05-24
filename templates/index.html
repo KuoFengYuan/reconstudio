@@ -106,6 +106,7 @@
   <!-- ============================= left: forms ============================= -->
   <div class="col left">
     <div class="tabs">
+      <button class="ghost" id="t-gcs" onclick="showForm('gcs')">☁️ GCS</button>
       <button class="ghost active" id="t-frames" onclick="showForm('frames')">抽幀</button>
       <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
       <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
@@ -119,12 +120,12 @@
         <label>input（影片檔或資料夾；資料夾會遞迴掃描）</label>
         <div class="row">
           <input name="input" id="frames_input" oninput="suggestFromInput()"
-                 placeholder="{{ browse_root }}/FY115/FY115_0518" required>
+                 placeholder="{{ browse_root }} " required>
           <button type="button" class="ghost" onclick="openPicker('frames_input')">瀏覽</button>
         </div>
         <label>out_dir（每支影片 → &lt;out&gt;/&lt;group&gt;/frames_&lt;video&gt;/*.jpg）</label>
         <div class="row">
-          <input name="out_dir" id="frames_out" placeholder="{{ browse_root }}/FY115/0518_colmap" required>
+          <input name="out_dir" id="frames_out" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('frames_out')">瀏覽</button>
         </div>
         <div class="hint">已開啟 <code>-F</code> 攤平:只輸出清晰幀,丟掉模糊/原始幀。</div>
@@ -159,12 +160,12 @@
         <legend>Inputs</legend>
         <label>image_root</label>
         <div class="row">
-          <input name="image_root" id="image_root" placeholder="{{ browse_root }}/FY115/0518_colmap" required>
+          <input name="image_root" id="image_root" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('image_root')">瀏覽</button>
         </div>
         <label>workspace</label>
         <div class="row">
-          <input name="workspace" id="workspace" placeholder="{{ browse_root }}/FY115/0518_colmap_ws" required>
+          <input name="workspace" id="workspace" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('workspace')">瀏覽</button>
         </div>
         <label>影像解析度</label>
@@ -351,12 +352,12 @@
 
         <label>source（COLMAP workspace 或去畸變輸出）</label>
         <div class="row">
-          <input name="source" id="train_source" placeholder="{{ browse_root }}/FY115/0518_colmap_ws" required>
+          <input name="source" id="train_source" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('train_source')">瀏覽</button>
         </div>
         <label>model_path（輸出模型目錄）</label>
         <div class="row">
-          <input name="model_path" id="train_out" placeholder="{{ browse_root }}/FY115/0518_gs2m" required>
+          <input name="model_path" id="train_out" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('train_out')">瀏覽</button>
         </div>
 
@@ -414,7 +415,7 @@
         </select>
         <label>model_path（已訓練的模型輸出目錄）</label>
         <div class="row">
-          <input name="model_path" id="mesh_model" placeholder="{{ browse_root }}/FY115/0518_gs2m" required>
+          <input name="model_path" id="mesh_model" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('mesh_model')">瀏覽</button>
         </div>
         <div class="hint">就是訓練時 model_path 的那個目錄（內含 cfg_args / point_cloud）。</div>
@@ -489,6 +490,31 @@
       <button class="submit" type="submit">▶ 抽取 Mesh</button>
       {% endif %}
     </form>
+
+    <!-- ----- GCS sync form (decoupled downloader) ----- -->
+    <form id="form-gcs" style="display:none" hx-post="/ui/gcs_sync" hx-target="#main" hx-swap="innerHTML"
+          data-dest-root="{{ browse_root }}" data-gcs-root="{{ gcs_root }}">
+      <fieldset>
+        <legend>從 GCS 下載到本機</legend>
+        <div class="hint" style="margin-bottom:8px">把 <code>gs://</code> 雲端資料同步到本機（<code>gsutil rsync</code>,可續傳、只補差異）。下載完成後,到任一分頁用「瀏覽」選它即可 —— <b>不綁定流程、不會自動帶你去下一步</b>。</div>
+        <label>來源（GCS）</label>
+        <div class="row">
+          <input name="src" id="gcs_src" placeholder="gs://bucket/path/to/dataset" required>
+          <button type="button" class="ghost" onclick="openGcsPicker()">☁️ 瀏覽</button>
+        </div>
+        <label>下載到（本機 — 可放 server 上任何位置）</label>
+        <div class="row">
+          <input name="dest" id="gcs_dest" placeholder="留空 = 自動放到 {{ browse_root }}/&lt;bucket&gt;/&lt;路徑&gt;">
+          <button type="button" class="ghost" onclick="openPicker('gcs_dest','dest')">瀏覽</button>
+        </div>
+        <div class="hint">可手動輸入或用「瀏覽」挑 server 上任一資料夾。提醒:放在 <code>{{ browse_root }}</code> 以外的話,之後 COLMAP/訓練 分頁的「瀏覽」看不到它（需手動輸入路徑）。</div>
+        <label style="margin-top:10px;display:flex;align-items:center;gap:6px;font-weight:normal">
+          <input type="checkbox" name="delete" style="width:auto"> 鏡像模式 <code>-d</code>（刪除本機多餘檔案,使本機與雲端完全一致）
+        </label>
+        <div class="hint">⚠ 鏡像模式會<b>刪除</b>目的資料夾中雲端沒有的檔案,請確認 dest 指向專屬下載目錄。</div>
+      </fieldset>
+      <button class="submit" type="submit">⬇ 下載</button>
+    </form>
   </div>
 
   <!-- ============================ right: output ============================ -->
@@ -519,7 +545,7 @@
 
 <script>
   function showForm(which){
-    ['frames','colmap','train','mesh'].forEach(function(k){
+    ['frames','colmap','train','mesh','gcs'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -639,9 +665,56 @@
     document.getElementById('blur-pct').style.display = v==='percentile' ? '' : 'none';
     document.getElementById('blur-thr').style.display = v==='threshold'  ? '' : 'none';
   }
-  function openPicker(target){
+  function openPicker(target, root){
     document.getElementById('picker').classList.add('open');
-    htmx.ajax('GET', '/ui/browse?target=' + target, {target:'#picker-body', swap:'innerHTML'});
+    htmx.ajax('GET', '/ui/browse?target=' + target + (root ? '&root=' + root : ''),
+              {target:'#picker-body', swap:'innerHTML'});
+  }
+  // Apply a local-picker selection. For the GCS dest, append the gs:// source's
+  // leaf to the chosen folder (pick /data/foo -> /data/foo/<dataset>).
+  function pickDir(target, path){
+    var el = document.getElementById(target);
+    if (el){
+      if (target === 'gcs_dest'){
+        var leaf = gcsLeaf();
+        el.value = path.replace(/\/+$/, '') + (leaf ? '/' + leaf : '');
+      } else {
+        el.value = path;
+      }
+    }
+    document.getElementById('picker').classList.remove('open');
+  }
+  function gcsLeaf(){
+    var s = document.getElementById('gcs_src');
+    var body = ((s && s.value) || '').replace(/^gs:\/\//, '').replace(/\/+$/, '');
+    return body ? body.split('/').pop() : '';
+  }
+  // GCS browser: same modal, navigates gs:// and (on pick) fills the GCS form's
+  // source + a DEFAULT dest. It does NOT submit; the user reviews the dest (free
+  // text, or pickable to anywhere on the server) and hits ⬇ 下載 themselves.
+  // Config comes from #form-gcs data-attrs (set by Jinja) so this stays pure JS.
+  (function(){
+    var gf = document.getElementById('form-gcs');
+    window.GCS_DEST_ROOT = gf ? gf.dataset.destRoot : '';
+    window.GCS_ROOT = gf ? (gf.dataset.gcsRoot || '') : '';
+  })();
+  function openGcsPicker(){
+    document.getElementById('picker').classList.add('open');
+    htmx.ajax('GET', '/ui/gcs_browse?prefix=' + encodeURIComponent(window.GCS_ROOT || ''),
+              {target:'#picker-body', swap:'innerHTML'});
+  }
+  function gcsPick(prefix){
+    var s = document.getElementById('gcs_src'); if (s) s.value = prefix;
+    deriveGcsDest();
+    document.getElementById('picker').classList.remove('open');
+  }
+  // Default dest = staging root + the gs:// path (a starting point only); the user
+  // can then edit it freely or pick any folder via the dest 瀏覽 button.
+  function deriveGcsDest(){
+    var s = document.getElementById('gcs_src'), d = document.getElementById('gcs_dest');
+    if (!s || !d) return;
+    var body = (s.value || '').replace(/^gs:\/\//, '').replace(/\/+$/, '');
+    d.value = body ? (window.GCS_DEST_ROOT.replace(/\/+$/, '') + '/' + body) : window.GCS_DEST_ROOT;
   }
   // FY115_0518 -> 0518_colmap (token after last underscore + _colmap), workspace = +_ws
   function suggestFromInput(){
