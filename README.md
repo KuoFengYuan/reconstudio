@@ -1,14 +1,9 @@
 # Recon Studio
 
-A local web panel for the full reconstruction pipeline — **video → 清晰幀 → COLMAP →
-3D Gaussian Splatting 訓練 → Mesh** — implemented as pure-Python modules under
-[`pipeline/`](pipeline/). The panel itself is **torch-free**: heavy tools (`ffmpeg`,
-`colmap`) and trainers (GS-2M, …) are invoked as **subprocesses**, so progress,
-cancellation, live logs, in-browser 3D viewers (point cloud **and** mesh, with a
-mm ruler), and mesh downloads are first-class.
-
-Single-machine local tool, binds to `127.0.0.1` by default. Runs up to **`MAX_JOBS`
-(default 4) jobs concurrently**; GPU is chosen manually per job.
+本機網頁面板,跑完整重建流程 **影片 → 清晰幀 → COLMAP → 3DGS 訓練 → Mesh**。面板本身
+**不含 torch**:`ffmpeg` / `colmap` / 訓練器(GS-2M…)都以**子行程**呼叫,所以進度、取消、
+即時 log、瀏覽器內 3D/Mesh 檢視器(含 mm 量尺)、Mesh 下載都是內建。單機工具,預設綁
+`127.0.0.1`,同時最多跑 `MAX_JOBS`(預設 4)個 job,GPU 每個 job 手動指定。
 
 ```
  ① 抽幀                  ② COLMAP                ③ 訓練                  ④ Mesh
@@ -16,11 +11,38 @@ Single-machine local tool, binds to `127.0.0.1` by default. Runs up to **`MAX_JO
  (NVDEC, 並行)         (+FullHD等比縮放)        (GS-2M, 自家 conda env)            (render.py)   ⬇ 可下載
 ```
 
-Each finished stage offers a one-click button to prefill the next (frames→COLMAP→訓練→Mesh).
-訓練完還可選擇在瀏覽器內用內嵌的 **SuperSplat** 編輯器去背(刪掉背景 splat),一鍵送回後對乾淨
-點雲抽 mesh — **非破壞性**,原模型保留(見 [🧹 去背](#-去背-background-removal-optional--supersplat))。
-The Mesh stage can optionally rescale the output to **real-world millimetres** from a
-ChArUco marker board, and ships an **in-browser mesh viewer with a mm ruler**.
+每個階段完成後有一鍵帶入下一步的按鈕。訓練完可選擇在瀏覽器內用內嵌 **SuperSplat** 去背
+(刪背景 splat)再對乾淨點雲抽 mesh —— **非破壞性**,原模型保留(見 [🧹 去背](#-去背-background-removal-optional--supersplat))。
+Mesh 階段可選用 ChArUco 標定板把輸出縮放成**實際毫米**,並附 mm 量尺的 mesh 檢視器。
+
+---
+
+## 🚀 快速開始(新手 5 步)
+
+> 第一次部署照這 5 步就能跑起來,每步的細節在下方對應章節。面板本身很輕(不含 torch);
+> 重的是 GPU 訓練環境 —— 那是每台機器各自要裝的前置,裝好後 `/doctor` 會幫你檢查。
+
+```bash
+# 1) 抓專案 + 裝面板（輕量）
+git clone https://github.com/KuoFengYuan/reconstudio.git
+cd reconstudio
+conda create -n rec python=3.10 -y
+conda run -n rec pip install -r requirements.txt
+
+# 2) 裝外部工具：colmap 與 ffmpeg（ffmpeg 需含 blurdetect）
+
+# 3) 裝訓練後端（需要 GPU）：GS-2M  ← 見下方「GS-2M — install & wiring」
+#    LichtFeld Studio、瀏覽器去背、從 GCS 下載 都是選用，需要再裝
+
+# 4) 啟動
+./run.sh          # 然後開瀏覽器 http://127.0.0.1:8077
+```
+
+**5) 開 `/doctor` 頁面,把紅燈修成綠燈**(它會檢查 colmap、各後端的 env + CUDA)。全綠後,
+就照 **① 抽幀 → ② COLMAP → ③ 訓練 → ④ Mesh** 的順序操作(見 [Stages](#stages))。
+
+> 需要時再看:[per-machine 設定 (local.env)](#run) · [GS-2M 安裝](#gs-2m--install--wiring) ·
+> 從雲端拉資料見下方「☁️ 從 GCS 下載資料」 · [部署到另一台機器(完整 checklist)](#deploy-to-another-machine)
 
 ---
 
@@ -47,14 +69,11 @@ nested  ROOT/<group>/<vid>/*.jpg -> staged, 1 camera per group   (① feeds this
 ```
 
 **影像解析度 (預設 FullHD)** — 把每張輸入**實體**等比縮成長邊 ≤1920 的副本(存
-`workspace/images_fullhd/`,保比例、不放大),整條 COLMAP 跑這些縮圖。Lanczos + 最高品質
-編碼(JPEG `q=1` 4:4:4、PNG/TIFF 無損)使 4K→FullHD 仍銳利;多 `ffmpeg` 並行
-(`COLMAP_PANEL_RESIZE_WORKERS` 可調);idempotent、可續跑、可取消。選「保持原樣」則不縮。
+`workspace/images_fullhd/`),整條 COLMAP 跑這些縮圖;Lanczos + 高品質編碼使 4K→FullHD 仍銳利,
+可續跑/可取消。選「保持原樣」則不縮。
 
-**GPS / 大場景** — 逐張檢查輸入的 EXIF GPS(純 stdlib;影片轉幀無 per-frame GPS)。GPS 流程
-需要**每張**都有 GPS(否則該幀無法被空間比對/錨定),所以勾了任一 GPS 選項時會先確認 100%
-覆蓋。FullHD 縮圖**照常等比縮放**,只是把原圖的 EXIF GPS **接回每張縮圖**(ffmpeg 重編原會
-洗掉),讓 COLMAP 仍讀得到 GPS 寫進 DB pose prior。可解鎖:
+**GPS / 大場景** — 讀輸入的 EXIF GPS(影片幀無 GPS)。勾任一 GPS 選項需**每張**都有 GPS,
+開跑前會檢查 100% 覆蓋;FullHD 縮圖會把原圖 GPS 接回(否則 ffmpeg 重編會洗掉)。可解鎖:
 
 | 選項 | COLMAP 指令 | 作用 | 主要參數 |
 |------|------------|------|---------|
@@ -62,91 +81,49 @@ nested  ROOT/<group>/<vid>/*.jpg -> staged, 1 camera per group   (① feeds this
 | `MAPPER=pose_prior` | `pose_prior_mapper` | GPS 先驗進 BA,抗漂移、輸出**直接公制+地理對齊** | `PRIOR_STD_X/Y/Z`(GPS 精度 m;消費級 3~5、RTK ~0.02) |
 | `GPS_ALIGN`(選填) | `model_aligner` | 事後把稀疏模型對齊到 ENU 公尺 | `GPS_ALIGN_MAX_ERROR`(m) |
 
-> `GPS_ALIGN` 與 Mesh 的 ChArUco mm 校正擇一;用 `pose_prior` 已對齊則免。勾了任一 GPS 選項
-> 但**並非每張都有 GPS(< 100%)→ 開跑前直接中斷**,不白跑整條。
+> `GPS_ALIGN` 與 Mesh 的 ChArUco mm 校正擇一;用 `pose_prior` 已對齊則免。
 
-**Output** (workspace):`database.db`、`image_list.txt`、`images_fullhd/`(縮圖時)、
-`sparse/0/{cameras,images,points3D}.bin`、`<dataset>_<mapper>_mapper/`(去畸變 **PINHOLE**
-dense,訓練吃這個)、`pipeline.log`、sentinels、`sparse/points.ply`(viewer 快取)。
+**Output** (workspace):`database.db`、`sparse/0/{cameras,images,points3D}.bin`、
+`<dataset>_<mapper>_mapper/`(去畸變 **PINHOLE** dense,訓練吃這個)、`sparse/points.ply`(viewer 快取)。
 
 ### ③ 訓練 (training) — reconstruction → 3DGS model
 Runs a Gaussian-splatting trainer in **its own conda env** as a subprocess. Backends
-are **data, not code** (see [Backends](#backends)); built-in default is **GS-2M**.
+are **data, not code** (see [Backends](#backends)); built-in default is **GS-2M**。
 
 > **其他後端 (選用):LichtFeld Studio（MR-NF / iGS+）** — 編譯型 C++ trainer,以
-> `"launch": "binary"` 後端宣告(直接跑 binary,不經 conda;見 [Backends](#backends)）。
-> 策略預設來自 `--config`（`configs/lichtfeld/*.json`，可調),GUI 露出精選常調項
-> （`--headless`/`--no-splash` 由後端自動帶入;MR-NF 另有 `--use-error-map`/`--use-edge-map`，預設開、可關）。
-> **這兩個 backend 不支援 mesh**(不宣告 `mesh_args` → 無 Mesh 按鈕),但訓練完一樣能
-> **🧹 在 SuperSplat 去背景**（送回後改為「下載乾淨點雲」,不抽 mesh）。
+> `"launch": "binary"` 後端宣告(直接跑 binary,不經 conda)。**不支援 mesh**,但訓練完一樣能
+> **🧹 在 SuperSplat 去背景**(送回後改為「下載乾淨點雲」)。見 [Backends](#backends)。
 
-- **Scene adaptation**: a COLMAP workspace is exposed to the trainer non-destructively
-  as `<model>_scene/` (symlinks: `sparse/0/{cameras,images,points3D}.bin` + `images/`).
-  The undistorted **PINHOLE** model is used; a distorted (OPENCV) model is rejected up
-  front with a clear error (the #1 way this integration goes wrong).
-- **Tunable params** are rendered from the backend schema (no hard-coding): `--iterations`,
-  `-r` (1 = full res), `--data_device` (cpu for big sets), `--sh_degree`, `--material`
-  (PBR; auto-starts at iter 5000 — open it for reflective objects / relighting / texture
-  export), `--metallic`/`--gamma`/`--lambda_smooth` (材質群組), `--lambda_normal` (補洞),
-  `--reflection_threshold`, `--masks`/`--mask_gt` (前景去背), `--eval`, plus a free `extra` field.
-- **GPU**: chosen manually per job → `CUDA_VISIBLE_DEVICES` (no auto GPU selection).
+- **Scene adaptation**:COLMAP workspace 以非破壞性的 `<model>_scene/`(symlink)給訓練器;
+  只用去畸變的 **PINHOLE** 模型,遇到 OPENCV(distorted)會在開跑前直接報錯(最常見的接錯點)。
+- **可調參數**由 backend schema 動態產生(非寫死):迭代數、解析度、`--material`(PBR 材質)、
+  法線正則、前景遮罩…各欄位附 hint;另有自由 `extra` 欄位塞未列出的旗標。
+- **GPU**:每個 job 手動選 → `CUDA_VISIBLE_DEVICES`(**無自動分配**,重任務請自己分散到不同卡)。
 
 ### 🧹 去背 (background removal, optional) — SuperSplat
-訓練完成面板的 **🧹 在 SuperSplat 去背景** 會在右側內嵌一個自架的
-[SuperSplat](https://github.com/playcanvas/supersplat) 編輯器（`static/supersplat/`，MIT），
-載入訓練好的雲（GS-2M `point_cloud/iteration_*/point_cloud.ply`、LichtFeld `splat_*.ply`）。
-常用流程：框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景（誤刪 **Ctrl+Z** 還原）→ **✅ 送回去背點雲**。
+訓練完按 **🧹 在 SuperSplat 去背景**,右側內嵌 [SuperSplat](https://github.com/playcanvas/supersplat)
+編輯器(`static/supersplat/`,MIT)載入訓練雲。框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景
+(**Ctrl+Z** 還原)→ **✅ 送回去背點雲**。**原模型完全不動**,依後端分流輸出:
 
-送回時瀏覽器把去背後的雲序列化成 PLY，POST 到 `/api/jobs/<id>/edited_ply`。**原模型完全不動**；
-依後端分流(`/api/doctor` 看得到哪個有 mesh)，輸出落點如下：
+| 後端 | 送回後 | 去背雲輸出 |
+|------|-------|-----------|
+| **GS-2M**(有 mesh) | 衍生兄弟目錄 + 自動帶入 Mesh 表單 | `<model>_edited_<時間>/…/point_cloud.ply`(可用乾淨雲重抽 mesh) |
+| **LichtFeld**(無 mesh) | 存檔 + 瀏覽器下載 | `<model>/edited/cleaned_<時間>.ply` |
 
-| 後端 | 送回後動作 | 去背雲輸出路徑 |
-|------|-----------|---------------|
-| **GS-2M**（有 mesh） | 衍生非破壞性兄弟目錄 + 自動帶入 Mesh 表單 | `<model>_edited_<時間>/point_cloud/iteration_<N>/point_cloud.ply`（symlink 原 `cfg_args`）;重抽的 mesh → `<model>_edited_<時間>/train/ours_<N>/mesh/tsdf_post.ply` |
-| **LichtFeld**（無 mesh） | 存檔 + 瀏覽器下載 `cleaned.ply` | `<model>/edited/cleaned_<時間>.ply` |
-
-GS-2M 因此可用乾淨的雲重抽 mesh：`render.py -m <兄弟目錄>` 從原 `source_path`（記在 `cfg_args`）
-讀相機、把結果寫進兄弟目錄;去背搞砸就重來，或把 Mesh 的去背欄位留空用原始點雲。
-
-- **去背 ≠ 即時更新 mesh**：編輯只改點雲，要重跑 Mesh 階段才會產出乾淨 mesh（僅 GS-2M）。
-- **GS-2M / 後端皆不需改動**：靠兄弟目錄 + symlink，trainer 零修改就能吃去背後的雲。
-- **build**：`static/supersplat/` 是建置產物（已 gitignore）。第一次或更新版本時跑
-  `./tools/build_supersplat.sh`（需要 node ≥18 + npm + git；會 clone 釘版 SuperSplat、套
-  `tools/supersplat-reconstudio.patch`〔滾輪縮放修正 + 送回 API〕、用 `BASE_HREF=/static/supersplat/`
-  build、部署並去掉 sourcemap）。
+> 去背只改點雲,要乾淨 mesh 需重跑 Mesh 階段(僅 GS-2M);靠兄弟目錄 + symlink,trainer 零修改。
+> `static/supersplat/` 是建置產物(已 gitignore),第一次先跑 `./tools/build_supersplat.sh`(node ≥18 + npm + git)。
 
 ### ④ Mesh — model → triangle mesh
-Backend-specific (only backends that declare `mesh_args`, e.g. GS-2M's
-`render.py --extract_mesh --skip_test`). Tunable: `--mesh_only` (加速), `--auto_voxel`
-(推薦), `voxel_size` (預設 `0.006`，勾自動時停用) / `sdf_trunc` (留空 = 4×voxel) /
-`max_depth` / `num_clusters` / `filter_depth`. Output
-`…/train/ours_<iter>/mesh/tsdf_post.ply`.
+Backend-specific(只有宣告 `mesh_args` 的後端,如 GS-2M 的 `render.py --extract_mesh`)。可調:
+`--mesh_only`(加速)、`--auto_voxel`(推薦)、`voxel_size`(預設 `0.006`)/ `sdf_trunc` / `max_depth` /
+`num_clusters` / `filter_depth`。輸出 `…/train/ours_<iter>/mesh/tsdf_post.ply`。
 
-**實際尺寸 (mm) — 選用 ChArUco marker**：拍攝時在場景放一塊標定板，Mesh 表單勾
-**提供 marker** 即可。抽完 mesh 後會自動偵測標定板、估算 recon→mm 尺度
-(`tools/estimate_marker_scale.py`)，再把 mesh 縮放成實際毫米
-(`tools/scale_mesh.py` → `tsdf_post_scaled_mm.ply`)。板子規格寫在後端的
-`marker_defaults`（預設 9×6 格、方格 28.806mm、marker 21.12mm、`DICT_5X5_100`），
-可在 `backends.json` 覆寫，**不需在介面手填**。
+**實際尺寸 (mm) — 選用 ChArUco marker**:拍攝時在場景放標定板,Mesh 表單勾 **提供 marker** 即可。
+抽完 mesh 後自動偵測標定板、估 recon→mm 尺度,再縮放成毫米(`tsdf_post_scaled_mm.ply`)。板子規格寫在
+後端的 `marker_defaults`(可在 `backends.json` 覆寫),**不需在介面手填**。
 
-完成後：**🧊 檢視 Mesh**（內嵌 3D 檢視器）、**⬇ 非實際尺寸 mesh**（recon 單位）、
-**⬇ 實際尺寸 mesh (mm)**（有 marker 時）。
-
-**🧊 線上 Mesh 檢視器** (`/viz/mesh/<id>`)：打光的實體 mesh，360° 旋轉/縮放/平移；
-切換 **實際尺寸 (mm) / 原始 (recon)**（各顯示原生單位）；**📏 量尺**（單擊兩點量
-距離，單位隨版本 mm 或 units）；亮度滑桿、白底、線框、頂點色開關、旋轉對齊。
-
----
-
-## Concurrency
-
-`MAX_JOBS` asyncio workers pull from one queue; extra jobs queue and backfill. The
-history view shows `同時執行 X/N`. GPU jobs (訓練 / Mesh) pick the GPU in their form
-field — **no auto-assignment**, so spread heavy jobs across cards yourself (#0 / #1).
-
-```bash
-COLMAP_PANEL_MAX_JOBS=4   # how many jobs run at once (default 4)
-```
+完成後:**🧊 檢視 Mesh**(內嵌 3D 檢視器,可切 mm / recon、**📏 量尺** 量距離、亮度/白底/線框/頂點色)、
+**⬇ 非實際尺寸 mesh**、**⬇ 實際尺寸 mesh (mm)**(有 marker 時)。
 
 ---
 
@@ -157,26 +134,68 @@ COLMAP_PANEL_MAX_JOBS=4   # how many jobs run at once (default 4)
 ```
 
 `run.sh` auto-detects sensible defaults; override via the environment or a **`local.env`**
-file (copy `local.env.example` → `local.env`; gitignored). **Backend changes (`app.py` /
-`pipeline/` / `jobs.py`) need a restart; template (`templates/`) changes just need a refresh.**
-**去背編輯器**：`static/supersplat/` 是建置產物，第一次要先 `./tools/build_supersplat.sh`
-（node + npm；見 [🧹 去背](#-去背-background-removal-optional--supersplat)）。
+file (copy `local.env.example` → `local.env`; gitignored). **改 `app.py` / `pipeline/` / `jobs.py`
+需重啟;改 `templates/` 只需重整頁面。**
 
-| env | default | why |
-|-----|---------|-----|
-| `COLMAP_BIN` | `colmap` (PATH) | colmap binary; set for non-standard installs |
-| `FFMPEG_BIN` | NVDEC build if present, else PATH `ffmpeg` | needs `blurdetect`; NVDEC = GPU decode; also used for FullHD resize |
-| `FFMPEG_HWACCEL` | `cuda` | set `none` to force CPU decode |
-| `RECON_STUDIO_DATA` | `/mnt/ssd1/recon_studio/data` else `~/.recon_studio` | job state + logs (keep off a small root fs) |
-| `TMPDIR` | `$RECON_STUDIO_DATA/tmp` | keep ffmpeg/colmap scratch off root `/tmp` |
-| `RECON_STUDIO_BROWSE_ROOT` | `/mnt/ssd1` if present, else `/` | directory-picker root |
-| `COLMAP_PANEL_MAX_JOBS` | `4` | concurrent jobs (shared across all stages) |
-| `COLMAP_PANEL_RESIZE_WORKERS` | CPU count (≤32) | parallel ffmpeg workers for FullHD resize |
-| `COLMAP_PANEL_BACKENDS` | `./backends.json` | per-machine training backends file |
-| `CONDA_ROOT` / `CONDA_ENV` | `conda info --base` / `rec` | which conda env to launch the panel in |
-| `HOST` / `PORT` | `127.0.0.1` / `8077` | bind address |
+> **絕大多數變數都會自動偵測或有可用預設,留空即可。** 真正**必須手動設定**(沒有可用預設)的
+> 只有一個:用到 **GCS bucket 瀏覽**時的 `CLOUDSDK_CORE_PROJECT`(不設,`gsutil ls` 會報
+> 「requires a project id」)。其餘只在**非標準安裝**或想**調效能 / 換落地磁碟**時才需要動。
+
+| env | default | 手動? | why |
+|-----|---------|------|-----|
+| `CLOUDSDK_CORE_PROJECT` | — (無預設) | **用 GCS 時必填** | GCS 瀏覽器 `gsutil ls` 的預設 GCP project;被 gsutil 子行程繼承(`gcloud config set project …` 亦可) |
+| `COLMAP_BIN` | `colmap` (PATH) | 不在 PATH 才設 | colmap binary |
+| `FFMPEG_BIN` | NVDEC build if present, else PATH `ffmpeg` | 不在 PATH / 缺 `blurdetect` 才設 | needs `blurdetect`; NVDEC = GPU decode; also FullHD resize |
+| `CONDA_ROOT` / `CONDA_ENV` | `conda info --base` / `rec` | 偵測不到才設 | which conda env to launch the panel in |
+| `RECON_STUDIO_DATA` | `/mnt/ssd1/recon_studio/data` else `~/.recon_studio` | 建議設 | job state + logs (keep off a small root fs) |
+| `RECON_STUDIO_DEST_ROOT` | `/` | 建議設 | local root that GCS downloads land under |
+| `GSUTIL_BIN` | `gsutil` (PATH) | 不在 PATH 才設 | gsutil binary (GCS browse / download) |
+| `RECON_STUDIO_GCS_ROOT` | (空 = 列全部 bucket) | 選填 | GCS 瀏覽器起始 `gs://` 前綴 |
+| `RECON_STUDIO_BROWSE_ROOT` | `/mnt/ssd1` if present, else `/` | 選填 | directory-picker root (local file browser) |
+| `FFMPEG_HWACCEL` | `cuda` | 選填 | set `none` to force CPU decode |
+| `TMPDIR` | `$RECON_STUDIO_DATA/tmp` | 自動 | keep ffmpeg/colmap scratch off root `/tmp` |
+| `COLMAP_PANEL_MAX_JOBS` | `4` | 選填(調效能) | concurrent jobs (shared across all stages) |
+| `COLMAP_PANEL_RESIZE_WORKERS` | CPU count (≤32) | 選填(調效能) | parallel ffmpeg workers for FullHD resize |
+| `COLMAP_PANEL_BACKENDS` | `./backends.json` | 選填 | per-machine training backends file |
+| `HOST` / `PORT` | `127.0.0.1` / `8077` | 選填 | bind address |
+
+> `run.sh` 用 `set -a` 載入 `local.env`,所以每個變數都會匯出到面板、並被它呼叫的外部工具
+> (`ffmpeg` / `colmap` / `gsutil`)繼承 —— 這就是為何 `CLOUDSDK_CORE_PROJECT` 寫在 `local.env` 就能讓 `gsutil` 吃到。
 
 Remote access (binds to localhost): `ssh -L 8077:127.0.0.1:8077 user@host`, or `HOST=0.0.0.0 ./run.sh`.
+
+---
+
+## ☁️ 從 GCS 下載資料 (optional)
+
+面板內建 **☁️ GCS** 分頁(「從 GCS 下載到本機」),把 Google Cloud Storage 的資料同步到本機後
+再進流程。它**與重建流程解耦** —— 只把 bytes 從 `gs://` 搬到本機;下載完到任一分頁用「瀏覽」
+選那個資料夾即可,**不會自動帶你去下一步**。
+
+- **來源**:填 `gs://bucket/path`,或按 **☁️ 瀏覽** 點選 bucket / 資料夾(起點可用 `RECON_STUDIO_GCS_ROOT` 設定)。
+- **下載到**:本機路徑;留空 = 自動放到 `RECON_STUDIO_DEST_ROOT` 底下的 `<bucket>/<路徑>`。
+- 底層 `gsutil -m rsync -r`:**可續傳、只補差異**。勾 **鏡像模式 `-d`** 會**刪除**本機多餘檔(有風險)。
+
+### 設定 GCS 帳號(一次性)
+
+需要本機裝好 **Google Cloud SDK**(提供 `gcloud` + `gsutil`)並登入:
+
+```bash
+# 1) 安裝 Google Cloud SDK：https://cloud.google.com/sdk/docs/install
+
+# 2) 登入 Google 帳號（會開瀏覽器；遠端無頭機改用 --no-launch-browser）
+gcloud auth login
+#    無人值守 server 也可用 service account：gcloud auth activate-service-account --key-file=KEY.json
+
+# 3) 設定預設 GCP project（⚠ 列 bucket 必需）—— 二選一：
+gcloud config set project <YOUR_PROJECT_ID>     # 全域預設
+#    或只給面板用，寫進 local.env：CLOUDSDK_CORE_PROJECT=<YOUR_PROJECT_ID>
+
+# 4) 驗證（應列出 buckets）
+gsutil ls
+```
+
+> 找 `PROJECT_ID`:`gcloud projects list`。相關環境變數見上面 [Run](#run) 的表(只有 `CLOUDSDK_CORE_PROJECT` 必填)。
 
 ---
 
@@ -184,195 +203,91 @@ Remote access (binds to localhost): `ssh -L 8077:127.0.0.1:8077 user@host`, or `
 
 Trainers/mesh tools are declared as data, merged from the built-in defaults
 (`pipeline/backends.py`) and a per-machine **`backends.json`** (gitignored; copy from
-[`backends.example.json`](backends.example.json)). Adding a trainer on a new machine is
-a config entry, not a code change. Each backend specifies its conda env, repo, command
-templates (`train_args` / `mesh_args`), and the form param schema.
+[`backends.example.json`](backends.example.json)). 在新機器加一個訓練器是改設定、不是改程式。
+每個 backend 指定它的 conda env、repo、指令樣板(`train_args` / `mesh_args`)、表單參數 schema。
 
 Interpreter resolution (most portable first): explicit `python` path → `$CONDA_ROOT/envs/<env>/bin/python`
-→ derived from the panel's own `sys.prefix` → `conda info --base`. So if the trainer env
-names match (e.g. `gs2m`), it works zero-config.
+→ derived from the panel's own `sys.prefix` → `conda info --base`. 名字對得上(如 `gs2m`)就 zero-config。
 
-**Compiled (non-Python) trainers** — set `"launch": "binary"` + `"exec"` (path to the built
-executable) instead of `conda_env`/`repo`. The panel runs the binary directly (no conda/torch);
-readiness just checks it's executable. A `"config"` (path, resolved relative to the panel)
-is passed as `--config` for defaults, and the `params` schema overrides via CLI flags. Example:
-**LichtFeld Studio** (`lichtfeld-mrnf` / `lichtfeld-igs+` in `backends.example.json`) — declares
-no `mesh_args`, so it's training-only; 去背 still works (送回 → 下載乾淨點雲). Build it per-machine
-([wiki](https://github.com/MrNeRF/LichtFeld-Studio/wiki/)) and point `"exec"` at `build/LichtFeld-Studio`.
-The panel auto-adds `--headless --no-splash`; if the binary can't find its shared libs when
-launched from the panel, set `LD_LIBRARY_PATH` in `local.env` (see `local.env.example`).
+**Compiled (non-Python) trainers** — 設 `"launch": "binary"` + `"exec"`(built executable 路徑)取代
+`conda_env`/`repo`。面板直接跑 binary(無 conda/torch),readiness 只檢查可執行,`params` schema 變成 CLI 旗標。
+例:**LichtFeld Studio**(`backends.example.json` 的 `lichtfeld-mrnf` / `lichtfeld-igs+`)—— 不宣告 `mesh_args`,
+training-only;去背仍可用。面板自動帶 `--headless --no-splash`;binary 找不到 shared libs 時在 `local.env` 設 `LD_LIBRARY_PATH`。
 
-**`/doctor`** — preflight page (also `/api/doctor`). Per backend it checks: env python,
-repo/script present, and (deep) imports `torch` + the compiled CUDA submodule (e.g.
-`diff_gaussian_rasterization`) inside that env — catching the most common
-move-to-new-machine failure (extension built for another GPU arch). For `"launch": "binary"`
-backends it instead reports whether the `exec` exists and is executable. Also reports COLMAP
-version and GPUs.
+**`/doctor`** — preflight 頁(亦 `/api/doctor`)。每個 backend 檢查:env python、repo/script 在不在、
+(deep)在該 env 內 import `torch` + 編譯的 CUDA submodule(如 `diff_gaussian_rasterization`)—— 抓最常見的
+換機失敗(extension 為別的 GPU arch 編的)。`"launch": "binary"` 後端則報 `exec` 是否可執行。也報 COLMAP 版本與 GPU。
 
 ### GS-2M — install & wiring
 
-GS-2M ([github.com/ndming/GS-2M](https://github.com/ndming/GS-2M)) is the built-in
-training + mesh backend. Recon Studio expects it as a **sibling of this repo** (`../GS-2M`)
-in a conda env named **`gs2m`**.
+GS-2M ([github.com/ndming/GS-2M](https://github.com/ndming/GS-2M)) 是內建的訓練 + mesh 後端,
+預期放在本 repo 的**兄弟目錄** `../GS-2M`、conda env 名為 **`gs2m`**。
 
-**1) Get the code** (as a sibling of the panel repo):
 ```bash
-cd /home/will/repo            # the dir that holds the panel repo; GS-2M sits alongside it
-git clone https://github.com/ndming/GS-2M.git
-```
+# 1) 抓 code（與面板 repo 同層）
+cd /home/will/repo && git clone https://github.com/ndming/GS-2M.git
 
-**2) Create the env + build the CUDA submodules** (needs a C++ compiler; CUDA 12.8 is
-fetched into the env). This step is GPU/arch-specific and must be redone per machine:
-```bash
+# 2) 建 env + 編 CUDA submodules（需 C++ compiler；GPU/arch-specific，每台機器要重做）
 cd GS-2M
 conda env create --file environment.yml   # -> env "gs2m": python 3.10, pytorch 2.7, cuda-toolkit 12.8
 conda activate gs2m
-pip install -r requirements.txt           # python deps + builds the 5 submodules:
-                                          # diff-gaussian-rasterization, simple-knn,
-                                          # fused-ssim, nvdiffrast, render-utils
+pip install -r requirements.txt           # python deps + 編 5 個 submodule（diff-gaussian-rasterization 等）
 ```
 
-> **實際尺寸 (mm) 量測（選用）** 用 panel 的 `tools/` 腳本，但在這個 trainer env 內執行，
-> 需要 `opencv-contrib-python`（`cv2.aruco`）、`open3d`、`plyfile`、`scipy`
-> （`open3d`/`scipy` 已是 GS-2M 依賴）。缺的話補裝：
-> ```bash
-> conda run -n gs2m pip install opencv-contrib-python plyfile
-> ```
+> **3) Wiring — 通常不用動。** env 名與兄弟路徑對得上就 zero-config(內建 backend 已映射 `conda_env=gs2m`、
+> `repo=../GS-2M`、train=`train.py`、mesh=`render.py --extract_mesh`)。env 名或路徑不同才在 `backends.json`
+> 覆寫(`conda_env` / `repo` / `python`,shallow-merge)。
+>
+> **實際尺寸 (mm) 量測(選用)** 的 `tools/` 腳本在此 env 執行,需 `opencv-contrib-python`、`plyfile`
+> (`open3d`/`scipy` 已是 GS-2M 依賴):`conda run -n gs2m pip install opencv-contrib-python plyfile`。
 
-**3) Wiring — usually nothing to do.** The built-in backend in `pipeline/backends.py`
-already maps it; if the env name and sibling path match, it works zero-config:
-
-| backend `gs2m` | value |
-|---|---|
-| `conda_env` | `gs2m` → env python = `<conda envs>/gs2m/bin/python` |
-| `repo` | `../GS-2M` (relative to the panel dir) |
-| train | `python train.py -s <scene> -m <model> <params>` |
-| mesh | `python render.py -m <model> --extract_mesh --skip_test <params>` |
-
-The `<scene>` is built automatically from your COLMAP workspace (`<model>_scene/` with
-`sparse/0` + `images` symlinks; PINHOLE only). The envs dir is found via `$CONDA_ROOT`
-or the panel's own `sys.prefix`.
-
-**Override** only if the env name or repo location differs — add to `backends.json`
-(copy from `backends.example.json`); keys shallow-merge over the built-in:
-```json
-{
-  "gs2m": {
-    "conda_env": "gs2m",
-    "repo": "/abs/path/to/GS-2M",
-    "python": "/opt/conda/envs/gs2m/bin/python"
-  }
-}
-```
-
-**4) Verify** at `/doctor` — the `gs2m` row should be all green: env python ✓, repo/`train.py` ✓,
-`torch` + CUDA ✓, `diff_gaussian_rasterization` import ✓. Then it appears (un-greyed) in the
-訓練 / Mesh backend selectors.
+**4) Verify** at `/doctor` — `gs2m` 一列全綠(env python ✓、`train.py` ✓、`torch`+CUDA ✓、
+`diff_gaussian_rasterization` ✓),就會在 訓練 / Mesh 選單中出現。
 
 ### LichtFeld Studio — install & wiring (選用;MR-NF / iGS+,訓練 only)
 
 LichtFeld Studio ([github.com/MrNeRF/LichtFeld-Studio](https://github.com/MrNeRF/LichtFeld-Studio),
-**GPL-3.0**) is a compiled C++/CUDA trainer. Unlike GS-2M it runs as a **built binary**
-(no conda env), exposing two strategies — **MR-NF** and **iGS+**. It declares no `mesh_args`,
-so it's **training-only**; 去背 still works (送回 → 下載乾淨點雲). Recon Studio expects it as a
-**sibling of this repo** (`../LichtFeld-Studio`).
+**GPL-3.0**) 是編譯型 C++/CUDA trainer,以**已編譯 binary** 執行(無 conda env),提供 MR-NF / iGS+ 兩種策略。
+不宣告 `mesh_args` → **training-only**(去背仍可用)。預期放在兄弟目錄 `../LichtFeld-Studio`。
 
-**1) Get the code** (as a sibling of the panel repo):
 ```bash
-cd /home/will/repo            # the dir that holds the panel repo
-git clone https://github.com/MrNeRF/LichtFeld-Studio.git
-```
+# 1) 抓 code（與面板 repo 同層）
+cd /home/will/repo && git clone https://github.com/MrNeRF/LichtFeld-Studio.git
 
-**2) Build from source** (GPU/arch-specific; per-machine). Needs **CUDA Toolkit 12.8+**, a recent
-NVIDIA driver, and **vcpkg** (`VCPKG_ROOT` set). Authoritative steps:
-[Wiki](https://github.com/MrNeRF/LichtFeld-Studio/wiki/) + `LichtFeld-Studio/docs/building_and_distribution.md`.
-Gist on Ubuntu:
-```bash
+# 2) 從原始碼 build（GPU/arch-specific，每台機器；需 CUDA Toolkit 12.8+、新 NVIDIA 驅動、vcpkg）
+#    權威步驟見 Wiki + docs/building_and_distribution.md。Ubuntu gist：
 sudo apt install git curl unzip cmake gcc-14 g++-14 ccache ninja-build zip tar pkg-config python3 python3-dev
 cd LichtFeld-Studio
-cmake -B build                 # configures (vcpkg pulls deps; first run is slow)
+cmake -B build                  # vcpkg 拉依賴，第一次很慢
 cmake --build build -j"$(nproc)"
-./build/LichtFeld-Studio --help # sanity check -> the binary lives at build/LichtFeld-Studio
+./build/LichtFeld-Studio --help # binary 在 build/LichtFeld-Studio
 ```
-> The default build's binary needs CUDA + vcpkg present at runtime. A self-contained `dist/`
-> (`-DBUILD_PORTABLE=ON` + `cmake --install`) is also possible — see the build doc.
 
-**3) Wiring** — the two backends are pre-declared in [`backends.example.json`](backends.example.json)
-(copy to `backends.json`); per machine you only set the binary path:
+**3) Wiring** — 兩個 backend 已在 [`backends.example.json`](backends.example.json) 預宣告(複製成
+`backends.json`),每台機器只需把 `"exec"` 指到 `…/LichtFeld-Studio/build/LichtFeld-Studio`。`<colmap>`
+(去畸變 PINHOLE 的 `sparse/` + `images/`)自動帶入,`--headless --no-splash` 自動加;找不到 shared libs
+就在 `local.env` 設 `LD_LIBRARY_PATH`。
 
-| backend `lichtfeld-mrnf` / `lichtfeld-igs+` | value |
-|---|---|
-| `launch` | `binary` (run the executable directly, no conda/torch) |
-| `exec` | abs path to `…/LichtFeld-Studio/build/LichtFeld-Studio` |
-| `config` | `configs/lichtfeld/{mrnf,igsplus}.json` (策略預設,shipped + 可調) |
-| train | `LichtFeld-Studio -d <colmap> -o <model> --strategy {mrnf\|igs+} --headless --no-splash --config … <params>` |
-| mesh | — (不支援) |
-
-`<colmap>` is your COLMAP workspace's undistorted PINHOLE dir (`sparse/` + `images/`), resolved
-automatically. `--headless --no-splash` are auto-added. If the binary can't find its shared libs
-when launched from the panel, set `LD_LIBRARY_PATH` in `local.env` (see `local.env.example`).
-
-**4) Verify** at `/doctor` — each `lichtfeld-*` row should show `launch: binary`, `exec_ok ✓`,
-`ready ✓`. Then they appear (un-greyed) in the **訓練** selector (not Mesh).
+**4) Verify** at `/doctor` — 每個 `lichtfeld-*` 顯示 `exec_ok ✓` / `ready ✓`,就會在 **訓練** 選單出現(不在 Mesh)。
 
 ### Deploy to another machine
-The panel is torch-free, so deploying it is trivial; the heavy CUDA env is a per-machine
-prerequisite that backends merely locate and `/doctor` verifies:
+面板 torch-free,部署很簡單;重的 CUDA env 是每台機器的前置,backend 只負責定位、`/doctor` 驗證:
 
 ```bash
-# 0) get Recon Studio
-git clone https://github.com/KuoFengYuan/reconstudio.git
-cd reconstudio
-# 1) panel (lightweight; conda env name is configurable via CONDA_ENV, default rec)
+git clone https://github.com/KuoFengYuan/reconstudio.git && cd reconstudio
+# 1) 面板（輕量；env 名可用 CONDA_ENV 改，預設 rec）
 conda create -n rec python=3.10 -y
 conda run -n rec pip install -r requirements.txt
-# 2) prerequisites: install colmap (+ ffmpeg with blurdetect), and set up the trainer
-#    env(s) — for GS-2M follow "GS-2M — install & wiring" above (env create + pip build);
-#    for LichtFeld (optional) follow "LichtFeld Studio — install & wiring" (cmake build)
-# 2b) (optional) build the in-browser 去背 editor into static/ (needs node>=18 + npm + git)
+# 2) 前置：裝 colmap (+ 含 blurdetect 的 ffmpeg)，並依上面章節裝訓練後端
+#    GS-2M（env create + pip build）/ LichtFeld（cmake build，選用）
+# 2b) （選用）build 瀏覽器去背編輯器到 static/（需 node>=18 + npm + git）
 ./tools/build_supersplat.sh
-# 3) per-machine config (optional if names/paths match)
-cp local.env.example local.env          # paths/ports
-cp backends.example.json backends.json  # trainer envs/repos
-# 4) verify, then run
-./run.sh   # open /doctor, fix anything red, then use the panel
+# 3) （選用，名字/路徑都對就免）per-machine 設定
+cp local.env.example local.env          # 路徑 / ports
+cp backends.example.json backends.json  # 訓練器 env / repo
+# 4) 驗證後啟動
+./run.sh   # 開 /doctor 把紅的修掉，再開始用
 ```
-
----
-
-## 操作教學 (workflow)
-
-**啟動**：`./run.sh` → 瀏覽器開 `http://127.0.0.1:8077`（遠端用上面的 SSH tunnel）。
-
-**① 抽幀**：選影片資料夾 → `out_dir` 自動帶出 → 設 `fps` 與去模糊（百分位 / 閾值）→
-**▶ 抽幀 + 去模糊** → 完成後 **▶ 接著跑 COLMAP**（自動帶入路徑、layout 自動偵測）。
-
-**② COLMAP**：設 `image_root` / `workspace`；**影像解析度預設 FullHD**（4K 會先等比例縮成
-FullHD 實體檔再進 COLMAP）；進階區可調 Camera / Matching / Mapping。**▶ 啟動 COLMAP** →
-log 顯示 layout、各階段 banner、stage stepper。完成後可 **🧊 檢視 3D 結果** 或 **🧠 接著訓練**。
-
-**③ 訓練**：選 backend（環境未就緒會灰掉，旁邊有 `/doctor` 連結）、`source`（COLMAP workspace）、
-`model_path`（輸出）、**GPU**（手動選 #0 / #1）。參數依 backend schema 顯示，材質/遮罩收在摺疊區。
-**▶ 啟動訓練** → 右側狀態列顯示階段（載入相機 / 訓練中 / 存檔…）與 `iter N/total`、loss；
-log 的進度條原地更新不洗版。完成後 **🧩 接著抽 Mesh**（或先 **🧹 在 SuperSplat 去背景**）。
-
-**🧹 去背（選用）**：訓練完成面板按 **🧹 在 SuperSplat 去背景** → 右側內嵌編輯器載入訓練雲。
-**滾輪=縮放、左鍵拖=旋轉、右鍵=平移**；框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景
-（**Ctrl+Z** 還原）→ **✅ 送回去背點雲 → 抽 Mesh**（自動帶入 `_edited_` 路徑到 Mesh 表單，原模型不動）。
-
-**④ Mesh**：選 backend（僅支援者出現）、`model_path`、GPU、TSDF 參數（`voxel_size` 預設 0.006，
-勾「自動體素大小」會自動估）。要實際尺寸就勾 **提供 marker**（板子規格已在 `backends.json`，免手填）→
-**▶ 抽取 Mesh** → 完成後 **🧊 檢視 Mesh**、**⬇ 非實際尺寸 mesh**、**⬇ 實際尺寸 mesh (mm)**。
-
-**檢視 3D 結果**（COLMAP 完成後內嵌右側，**← 回 log** 返回）：拖曳=360°旋轉、滾輪=縮放、
-右鍵=平移；**雙擊相機**看影像名/分數/縮圖並高亮；座標 gizmo、旋轉物體對齊、點/相機大小滑桿；
-品質指標 `reproj err`（<1 綠 / <2 黃）、`track len`。
-
-**檢視 Mesh**（Mesh 完成後 **🧊 檢視 Mesh** 內嵌右側）：打光的實體 mesh，可切
-**實際尺寸 (mm) / 原始 (recon)**、用 **📏 量尺** 點兩點量距離（單位 mm/units）、
-調亮度與白底、切線框 / 頂點色（關＝純色看幾何）。
-
-**歷史**：狀態每 3 秒自動更新（保留勾選與捲動），勾選 → **🗑 刪除選取**（進行中先取消）。
 
 ---
 
@@ -383,9 +298,6 @@ form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX
                                              │  run_{frames,colmap,train,mesh} in a thread
                                              ▼  (Runner shells out; train/mesh into the backend's conda env)
                                          console.log ─SSE─► browser <pre>  (tqdm bar updates in-place)
-                                               │
-        frames: "[j/N] …" / "K kept / D dropped"   colmap: "=== feature_extractor …" / "skip <stage>"
-        train:  "[ITER n]" / "Training:" / phase    mesh: "TSDF config" / "Num vertices post"  ─► progress / stepper
 ```
 
 - **Job state** persists under `RECON_STUDIO_DATA/jobs/<id>/` (`job.json` + `console.log`);
@@ -398,18 +310,18 @@ form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX
 
 | file | role |
 |------|------|
-| `app.py` | FastAPI routes: page, htmx `/ui/*`, JSON `/api/*`, SSE logs, `/viz/<id>` + `/viz/mesh/<id>` (mesh viewer), `/doctor`, `mesh.ply` / `mesh_scaled.ply` downloads |
+| `app.py` | FastAPI routes: page, htmx `/ui/*`, JSON `/api/*`, SSE logs, `/viz/<id>` + `/viz/mesh/<id>`, `/doctor`, mesh downloads |
 | `jobs.py` | `JobManager` (queue, N workers, cancel/delete) + per-kind log parsers + `MAX_JOBS` |
 | `pipeline/runner.py` | log emitter + subprocess streaming + cancel (multi-child) |
 | `pipeline/frames.py` | `run_frames`: fps extraction (NVDEC + CPU fallback), blur cutoff, parallel, flatten |
-| `pipeline/colmap.py` | `run_colmap`: layout detect, stages, sentinels, NESTED staging, **parallel Lanczos FullHD resize** |
-| `pipeline/train.py` | `run_train` (COLMAP→trainer scene + PINHOLE guard) and `run_mesh` (mesh extraction + optional ChArUco marker → mm scaling) |
+| `pipeline/colmap.py` | `run_colmap`: layout detect, stages, sentinels, NESTED staging, parallel Lanczos FullHD resize |
+| `pipeline/train.py` | `run_train` (COLMAP→trainer scene + PINHOLE guard) and `run_mesh` (mesh + optional ChArUco mm scaling) |
 | `pipeline/backends.py` | backend registry, env/GPU resolution, CLI builder, `doctor` preflight |
+| `pipeline/gcs.py` | GCS browse (`gsutil ls`) + download (`gsutil -m rsync -r`) |
 | `pipeline/model.py` | parse sparse model (poses/cameras/points/per-image score) + PLY export |
-| `templates/` | `index.html` (4 forms) + htmx partials + `viz.html` / `mesh_viz.html` (three.js viewers) + `doctor.html` |
-| `tools/` | panel-owned scripts run in the trainer env: `estimate_marker_scale.py` (ChArUco → recon→mm scale), `scale_mesh.py` (scale mesh to mm), vendored `colmap_read_write_model.py` |
-| `backends.example.json` | template for per-machine `backends.json` (gitignored) |
-| `run.sh` + `local.env.example` | launcher with auto-detected defaults; per-machine overrides |
+| `templates/` | `index.html` (forms) + htmx partials + three.js viewers + `doctor.html` |
+| `tools/` | trainer-env scripts: `estimate_marker_scale.py`、`scale_mesh.py`、vendored `colmap_read_write_model.py` |
+| `backends.example.json` / `local.env.example` | per-machine 設定範本(實檔 gitignored) |
 
 ## License
 
