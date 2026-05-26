@@ -26,9 +26,11 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
+from .config import settings
+
 BASE = Path(__file__).resolve().parent.parent          # reconstudio/
-COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
-BACKENDS_FILE = Path(os.environ.get("COLMAP_PANEL_BACKENDS", BASE / "backends.json"))
+COLMAP_BIN = settings.colmap_bin
+BACKENDS_FILE = settings.backends_file
 
 # Built-in specs. Zero-config when the conda env name + sibling repo match;
 # override/extend via backends.json. Repos are relative to BASE unless absolute.
@@ -168,7 +170,7 @@ def build_cli(params: list, values: dict) -> str:
 @lru_cache(maxsize=1)
 def conda_envs_dir() -> Path | None:
     """Directory that holds conda environments (.../envs), or None if unknown."""
-    root = os.environ.get("CONDA_ROOT")
+    root = settings.conda_root
     if root and (Path(root) / "envs").is_dir():
         return Path(root) / "envs"
     # We run inside <root>/envs/<panel-env>, so our sys.prefix's parent is envs/.
@@ -303,7 +305,7 @@ def _probe_env(py: Path, imports: list[str]) -> dict:
     """Run a tiny script in the trainer env: torch+CUDA + import the compiled
     submodules. Importing e.g. diff_gaussian_rasterization here catches the most
     common move-to-new-machine failure (extension built for another GPU arch)."""
-    code = (
+    code = (  # noqa: UP031  (字串內含 {dict};用 % 格式化才不會撞到 .format 的大括號)
         "import json, sys\n"
         "r = {'python': sys.version.split()[0]}\n"
         "try:\n"

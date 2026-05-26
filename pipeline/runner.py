@@ -8,8 +8,8 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Callable, Optional, Sequence
 
 
 class Cancelled(Exception):
@@ -21,8 +21,8 @@ class PipelineError(RuntimeError):
 
 
 class Runner:
-    def __init__(self, console: "Path | str", on_line: Optional[Callable[[str], None]] = None,
-                 mirror: Optional["Path | str"] = None):
+    def __init__(self, console: Path | str, on_line: Callable[[str], None] | None = None,
+                 mirror: Path | str | None = None):
         self._fh = open(console, "w", buffering=1)
         self._mirror = open(mirror, "w", buffering=1) if mirror else None
         self._on_line = on_line
@@ -79,9 +79,9 @@ class Runner:
         self._write(f"\n=== [{time.strftime('%H:%M:%S')}] {msg} ===\n")
 
     # -- subprocess --------------------------------------------------------- #
-    def run(self, argv: Sequence[str], *, cwd: Optional[str] = None,
-            env: Optional[dict] = None, check: bool = True,
-            stderr_to: Optional["Path | str"] = None) -> int:
+    def run(self, argv: Sequence[str], *, cwd: str | None = None,
+            env: dict | None = None, check: bool = True,
+            stderr_to: Path | str | None = None) -> int:
         """Run a child process.
 
         Default: merge stdout+stderr and stream every line into the log.

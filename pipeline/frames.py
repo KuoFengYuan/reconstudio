@@ -18,6 +18,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .config import settings
 from .runner import Cancelled, PipelineError, Runner
 
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}
@@ -29,7 +30,7 @@ FRAMES_DEFAULTS = {"fps": "1", "keep_pct": "90", "threshold": "", "flatten": Tru
 def _ffmpeg_bin(explicit: str | None) -> str:
     # PATH ffmpeg by default; FFMPEG_BIN (e.g. an NVDEC build) overrides. A bare name
     # like "ffmpeg" isn't a file -> fall through to PATH resolution.
-    cand = explicit or os.environ.get("FFMPEG_BIN") or "ffmpeg"
+    cand = explicit or settings.ffmpeg_bin
     if os.path.sep in cand and not (os.path.isfile(cand) and os.access(cand, os.X_OK)):
         return "ffmpeg"
     return cand
@@ -37,7 +38,7 @@ def _ffmpeg_bin(explicit: str | None) -> str:
 
 @functools.lru_cache(maxsize=8)
 def _supports_cuda(ffmpeg: str) -> bool:
-    if os.environ.get("FFMPEG_HWACCEL", "cuda").lower() in ("none", "0", "cpu"):
+    if settings.ffmpeg_hwaccel.lower() in ("none", "0", "cpu"):
         return False
     try:
         out = subprocess.run([ffmpeg, "-hide_banner", "-hwaccels"],

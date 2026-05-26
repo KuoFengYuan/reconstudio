@@ -14,18 +14,17 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 from .runner import Runner
 
 GSUTIL_BIN = "gsutil"
 
 
-def _gsutil(bin_: Optional[str]) -> str:
+def _gsutil(bin_: str | None) -> str:
     return (bin_ or GSUTIL_BIN).strip() or GSUTIL_BIN
 
 
-def gcs_parent(prefix: str) -> Optional[str]:
+def gcs_parent(prefix: str) -> str | None:
     """One level up from a gs:// prefix. '' = the bucket list; None = already
     at the bucket list (nothing above it)."""
     p = (prefix or "").strip().rstrip("/")
@@ -49,7 +48,7 @@ def default_dest(src: str, dest_root: str) -> str:
     return str(Path(dest_root) / body) if body else str(Path(dest_root))
 
 
-def gcs_ls(prefix: str = "", *, gsutil_bin: Optional[str] = None,
+def gcs_ls(prefix: str = "", *, gsutil_bin: str | None = None,
            timeout: float = 30.0) -> dict:
     """List one level under a gs:// prefix (or every bucket when prefix is "").
 

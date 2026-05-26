@@ -20,26 +20,31 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               StreamingResponse)
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from jobs import COLMAP_STAGES, MAX_JOBS, Job, manager, new_id
-from pipeline import (TRAIN_DEFAULTS, available_backends, build_cli, default_dest,
-                      doctor as run_doctor, gcs_ls, gcs_parent, get_backend,
-                      list_gpus)
+from pipeline import (
+    TRAIN_DEFAULTS,
+    available_backends,
+    build_cli,
+    default_dest,
+    gcs_ls,
+    gcs_parent,
+    get_backend,
+    list_gpus,
+)
+from pipeline import doctor as run_doctor
+from pipeline.config import settings
 
 BASE = Path(__file__).parent
-# Restrict the *input* directory browser to this root (the data disk by default).
-BROWSE_ROOT = Path(os.environ.get("RECON_STUDIO_BROWSE_ROOT", "/")).resolve()
-# Where GCS downloads may land — separate from the input root so you can choose
-# anywhere on the server (default '/'); set to narrow it.
-DEST_ROOT = Path(os.environ.get("RECON_STUDIO_DEST_ROOT", "/")).resolve()
-FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")   # PATH by default; override via env
-GSUTIL_BIN = os.environ.get("GSUTIL_BIN", "gsutil")   # GCS sync; PATH by default
-# Optional gs:// prefix the GCS browser starts at; empty = list all buckets.
-GCS_ROOT = os.environ.get("RECON_STUDIO_GCS_ROOT", "").strip()
+# All runtime config now comes from one typed object — see pipeline/config.py.
+BROWSE_ROOT = settings.browse_root   # input directory-browser root
+DEST_ROOT = settings.dest_root       # where GCS downloads may land
+FFMPEG_BIN = settings.ffmpeg_bin
+GSUTIL_BIN = settings.gsutil_bin
+GCS_ROOT = settings.gcs_root         # GCS browser start prefix ('' = list all buckets)
 
 app = FastAPI(title="Recon Studio")
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -121,7 +126,7 @@ def _parse_marker(form: dict, spec: dict) -> dict | None:
         sx, sy = int(pick("squares_x")), int(pick("squares_y"))
         sq, mk = float(pick("square_mm")), float(pick("marker_mm"))
     except (TypeError, ValueError):
-        raise ValueError("marker 覆寫值需為數字 (方格數為整數、邊長 mm 為數值),或留空用預設規格。")
+        raise ValueError("marker 覆寫值需為數字 (方格數為整數、邊長 mm 為數值),或留空用預設規格。") from None
     if min(sx, sy) < 2 or min(sq, mk) <= 0:
         raise ValueError("marker 參數不合理:方格數需 ≥ 2,邊長 (mm) 需 > 0。")
     if mk >= sq:
@@ -238,7 +243,7 @@ async def create_frames(request: Request):
         try:
             float(fps)
         except ValueError:
-            raise ValueError("fps must be a number")
+            raise ValueError("fps must be a number") from None
         params = {"inputs": [inp], "out_dir": out, "fps": fps,
                   "flatten": True, "ffmpeg_bin": FFMPEG_BIN}
         if mode == "threshold":
@@ -317,7 +322,7 @@ def _build_colmap_params(image_root: str, workspace: str, folders: list[str],
         try:
             float(params[key])
         except ValueError:
-            raise ValueError(f"{key} must be a number")
+            raise ValueError(f"{key} must be a number") from None
     return params
 
 
@@ -794,7 +799,7 @@ async def cull_ep(job_id: str, request: Request):
     ts = time.strftime("%Y%m%d_%H%M%S")
     clean_root = ws / "cleaned" / ts
     img_target = (dense / "images") if dense else None  # symlink always -> ORIGINAL images
-    from pipeline.model import cull_cameras, read_images, count_points
+    from pipeline.model import count_points, cull_cameras, read_images
 
     def _build() -> dict:
         s0 = clean_root / "sparse" / "0"

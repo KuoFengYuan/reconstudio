@@ -9,24 +9,32 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shutil
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
 
-from pipeline import (COLMAP_STAGES, Cancelled, Runner, run_colmap, run_frames,
-                      run_gcs_sync, run_mesh, run_train)
+from pipeline import (
+    COLMAP_STAGES,
+    Cancelled,
+    Runner,
+    run_colmap,
+    run_frames,
+    run_gcs_sync,
+    run_mesh,
+    run_train,
+)
 from pipeline.colmap import COLMAP_DEFAULTS  # noqa: F401  (re-exported for app)
+from pipeline.config import settings
 from pipeline.frames import FRAMES_DEFAULTS  # noqa: F401
 
-DATA_DIR = Path(os.environ.get("RECON_STUDIO_DATA", str(Path.home() / ".recon_studio")))
-JOBS_DIR = DATA_DIR / "jobs"
-# How many jobs may run concurrently. Tune per machine via the env var.
-MAX_JOBS = max(1, int(os.environ.get("COLMAP_PANEL_MAX_JOBS", "4")))
+DATA_DIR = settings.data_dir
+JOBS_DIR = settings.jobs_dir
+# How many jobs may run concurrently. Tune per machine via COLMAP_PANEL_MAX_JOBS.
+MAX_JOBS = settings.max_jobs
 
 RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "frames": run_frames,
@@ -108,13 +116,13 @@ class Job:
     subtitle: str
     params: dict = field(default_factory=dict)   # default lets old-schema job.json load
     meta: dict = field(default_factory=dict)
-    mirror: Optional[str] = None    # extra log file (e.g. workspace/pipeline.log)
+    mirror: str | None = None    # extra log file (e.g. workspace/pipeline.log)
     status: str = "queued"          # queued | running | done | failed | cancelled
     created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
-    error: Optional[str] = None
-    current_stage: Optional[str] = None
+    started_at: float | None = None
+    finished_at: float | None = None
+    error: str | None = None
+    current_stage: str | None = None
     stage_status: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -288,7 +296,7 @@ class JobManager:
         return [j.to_dict() for j in sorted(self.jobs.values(),
                                             key=lambda j: j.created_at, reverse=True)]
 
-    def get(self, job_id: str) -> Optional[Job]:
+    def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
 
     async def cancel(self, job_id: str) -> bool:
@@ -335,7 +343,7 @@ class JobManager:
         job.started_at = time.time()
         job.save()
 
-        parser = PARSERS.get(job.kind, lambda j, l: None)
+        parser = PARSERS.get(job.kind, lambda j, ln: None)
         if job.mirror:
             Path(job.mirror).parent.mkdir(parents=True, exist_ok=True)
         job.dir.mkdir(parents=True, exist_ok=True)
