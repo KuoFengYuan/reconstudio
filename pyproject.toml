@@ -20,7 +20,7 @@ dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.8"]
 
 [tool.setuptools]
 py-modules = ["app", "jobs"]
-packages = ["pipeline"]
+packages = ["pipeline", "web", "web.routers", "web.services"]
 
 # --- lint / format --------------------------------------------------------- #
 [tool.ruff]
