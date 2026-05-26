@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconstudio"
+version = "0.1.0"
+description = "Local web panel for the video → frames → COLMAP → 3DGS → Mesh reconstruction pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.8"]
+
+[tool.setuptools]
+py-modules = ["app", "jobs"]
+packages = ["pipeline", "web", "web.routers", "web.services"]
+
+# --- lint / format --------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["static", "tools/colmap_read_write_model.py"]  # vendored
+
+[tool.ruff.lint]
+# E/F = pyflakes+pycodestyle, I = import sort, UP = pyupgrade, B = bugbear, SIM = simplify.
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# E501: line length is the formatter's job. SIM105/115: the codebase has deliberate
+# defensive try/except-pass and long-lived log file handles (Runner) where the
+# "simpler" rewrite is not actually clearer.
+ignore = ["E501", "SIM105", "SIM115"]
+
+# --- type checking (lenient to start; tighten module-by-module later) ------ #
+[tool.mypy]
+python_version = "3.10"
+plugins = ["pydantic.mypy"]      # teach mypy about BaseSettings env defaults/validation
+follow_imports = "silent"        # type-check deps but only report errors in the target module
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+# The existing code is largely untyped; don't fail CI on that yet. config.py is
+# the one module we hold to a higher bar (see override below).
+check_untyped_defs = false
+exclude = ["tools/", "static/"]
+
+[[tool.mypy.overrides]]
+module = "pipeline.config"
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+# --- tests ----------------------------------------------------------------- #
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

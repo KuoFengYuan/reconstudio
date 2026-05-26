@@ -27,9 +27,9 @@ from cv2 import aruco
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from colmap_read_write_model import (  # noqa: E402
+    qvec2rotmat,
     read_cameras_binary,
     read_images_binary,
-    qvec2rotmat,
 )
 
 
@@ -81,7 +81,7 @@ def detect_charuco_all(
         if charuco_ids is None or len(charuco_ids) < 4:
             continue
         entry: dict[int, tuple[float, float]] = {}
-        for cid, pt in zip(charuco_ids.flatten(), charuco_corners.reshape(-1, 2)):
+        for cid, pt in zip(charuco_ids.flatten(), charuco_corners.reshape(-1, 2), strict=False):
             entry[int(cid)] = (float(pt[0]), float(pt[1]))
         detections[name] = entry
         if debug_dir is not None:

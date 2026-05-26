@@ -11,7 +11,9 @@ import struct
 import subprocess
 from pathlib import Path
 
-COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")   # PATH by default; override via env
+from .config import settings
+
+COLMAP_BIN = settings.colmap_bin   # PATH by default; override via COLMAP_BIN
 
 # COLMAP camera model -> (name, num params)
 _CAMERA_MODELS = {

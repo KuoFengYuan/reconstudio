@@ -1,0 +1,66 @@
+"""Shared web-layer pieces: the Jinja templates handle, the `_page` render
+helper, and the UI/form constants the routers seed forms with.
+
+Kept dependency-light (only `pipeline.config`, no jobs/pipeline-function imports)
+so any router or service can import it without an import cycle.
+"""
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from fastapi import Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+from pipeline.config import settings
+
+BASE = Path(__file__).resolve().parent.parent          # reconstudio/
+
+# settings-derived shortcuts used across routers
+BROWSE_ROOT = settings.browse_root   # input directory-browser root
+DEST_ROOT = settings.dest_root       # where GCS downloads may land
+FFMPEG_BIN = settings.ffmpeg_bin
+GSUTIL_BIN = settings.gsutil_bin
+GCS_ROOT = settings.gcs_root         # GCS browser start prefix ('' = list all buckets)
+
+templates = Jinja2Templates(directory=str(BASE / "templates"))
+
+
+def _fmt_dt(epoch, fmt="%Y-%m-%d %H:%M:%S"):
+    """Jinja filter: epoch seconds -> local 'YYYY-MM-DD HH:MM:SS' (blank if unset)."""
+    try:
+        return time.strftime(fmt, time.localtime(float(epoch))) if epoch else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+templates.env.filters["dt"] = _fmt_dt
+
+
+def _page(request: Request, name: str, **ctx) -> HTMLResponse:
+    return templates.TemplateResponse(request=request, name=name, context=ctx)
+
+
+# --- form pre-fill defaults / enums (mirror the pipeline module defaults) --- #
+COLMAP_DEFAULTS = {
+    "CAMERA_MODEL": "OPENCV", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
+    "MATCHER": "both", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
+    "GUIDED_MATCHING": "1", "MAPPER": "global", "DATASET_NAME": "training_dataset",
+    "FORCE": "0", "NESTED_LAYOUT": "1", "VOCAB_TREE": "", "VOCAB_TREE_URL": "",
+    # spatial_matcher (MATCHER=spatial)
+    "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
+    # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
+    "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
+    # GPU bundle adjustment (incremental / pose_prior) — on by default
+    "MAPPER_BA_GPU": "1",
+    # GPS metric alignment (model_aligner) — off by default, needs GPS in the inputs
+    "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
+}
+FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOLD": ""}
+ENUMS = {
+    "CAMERA_MODE": ["per_folder", "single"],
+    "MATCHER": ["sequential", "vocab", "both", "spatial"],
+    "MAPPER": ["global", "incremental", "pose_prior"],
+}
+VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}

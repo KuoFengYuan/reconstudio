@@ -33,8 +33,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from plyfile import PlyData, PlyElement
-
+from plyfile import PlyData
 
 UNIT_TO_MM = {"meters": 1000.0, "mm": 1.0, "cm": 10.0}
 

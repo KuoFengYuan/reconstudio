@@ -15,14 +15,14 @@ import time
 import urllib.request
 from pathlib import Path
 
+from .config import settings
 from .runner import Cancelled, Runner
 
 COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "align", "undistort"]
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-# colmap binary: PATH by default, override with COLMAP_BIN for non-standard installs.
-COLMAP_BIN = os.environ.get("COLMAP_BIN", "colmap")
-# ffmpeg: used for the FullHD resize step (PATH by default; override via FFMPEG_BIN).
-FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
+# colmap / ffmpeg binaries (PATH by default; override via COLMAP_BIN / FFMPEG_BIN).
+COLMAP_BIN = settings.colmap_bin
+FFMPEG_BIN = settings.ffmpeg_bin
 
 COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
@@ -48,7 +48,7 @@ def _download(url: str, dest: Path, r: Runner) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     last: Exception | None = None
-    for attempt in range(3):
+    for _ in range(3):
         try:
             with urllib.request.urlopen(url) as resp, tmp.open("wb") as fh:
                 shutil.copyfileobj(resp, fh)
@@ -62,10 +62,7 @@ def _download(url: str, dest: Path, r: Runner) -> None:
 
 
 def _resize_workers() -> int:
-    env = os.environ.get("COLMAP_PANEL_RESIZE_WORKERS")
-    if env and env.isdigit() and int(env) > 0:
-        return int(env)
-    return max(1, min((os.cpu_count() or 8), 32))   # CPU-bound encode; cap to be polite
+    return settings.resolved_resize_workers()
 
 
 def _resize_enc_args(rel: str) -> list[str]:
@@ -189,7 +186,7 @@ def _resolve_layout(img_root: str, folders: list[str], layout: str,
     # Explicit single, or auto when the root itself holds images (subdirs are then
     # likely junk such as the workspace) -> single flat folder.
     if layout == "single" or (layout == "auto" and _has_images(root)):
-        return ([""] if not folders else folders), False, "single"
+        return (folders if folders else [""]), False, "single"
 
     chosen = folders or subdirs
     if not chosen:
@@ -310,7 +307,7 @@ def _gps_coverage(img_root: str, lines: list[str], r: Runner) -> tuple[int, int]
     can carry EXIF GPS, so non-JPEG inputs count toward n_total but never toward
     n_with_gps — any PNG/TIFF therefore makes coverage incomplete."""
     n_total = len(lines)
-    cand = [l for l in lines if Path(l).suffix.lower() in (".jpg", ".jpeg")]
+    cand = [ln for ln in lines if Path(ln).suffix.lower() in (".jpg", ".jpeg")]
     if not cand:
         return 0, n_total
     n_gps = 0
@@ -362,7 +359,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     def stage_on(s: str) -> bool:
         return s in stages
 
-    def need(path: "Path | str") -> bool:
+    def need(path: Path | str) -> bool:
         return force or not Path(path).exists()
 
     if not vocab_tree.exists():
