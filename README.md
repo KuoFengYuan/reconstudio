@@ -134,7 +134,8 @@ Backend-specific(只有宣告 `mesh_args` 的後端,如 GS-2M 的 `render.py --e
 ```
 
 `run.sh` auto-detects sensible defaults; override via the environment or a **`local.env`**
-file (copy `local.env.example` → `local.env`; gitignored). **改 `app.py` / `pipeline/` / `jobs.py`
+file (copy `local.env.example` → `local.env`; gitignored)。設定集中在 `pipeline/config.py`
+(一個 typed `Settings`,讀下表的環境變數)。**改任何 `.py`(`app` / `jobs` / `web/` / `pipeline/`)
 需重啟;改 `templates/` 只需重整頁面。**
 
 > **絕大多數變數都會自動偵測或有可用預設,留空即可。** 真正**必須手動設定**(沒有可用預設)的
@@ -291,8 +292,24 @@ cp backends.example.json backends.json  # 訓練器 env / repo
 
 ---
 
-## How it works
+## 架構 (how it works)
 
+三層,依賴單向(`app → web/ → pipeline/`,無循環):
+
+```
+app.py        app factory:建 FastAPI、mount static、include routers（~30 行)
+└─ web/       HTTP 層
+   ├─ routers/  pages · browse · create · jobs · viz · doctor（APIRouter）
+   ├─ services/ models（job→路徑解析）· forms（表單→參數驗證）
+   └─ shared.py templates / _page / UI 常數
+jobs.py       JobManager:asyncio 佇列、N=MAX_JOBS workers、狀態存檔 + log 解析
+pipeline/     領域層（torch-free,shell out 到外部工具）
+   config.py    Settings:所有設定的單一來源
+   runner.py    子行程執行 + 取消        backends.py  後端登錄 + /doctor preflight
+   frames / colmap / train / gcs        model.py     解析 COLMAP 稀疏模型
+```
+
+請求流程:
 ```
 form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX_JOBS workers)
                                              │  run_{frames,colmap,train,mesh} in a thread
@@ -308,20 +325,37 @@ form ─POST /ui/{frames,jobs,train,mesh}─► JobManager (asyncio queue, N=MAX
 
 ## Files
 
-| file | role |
+| path | role |
 |------|------|
-| `app.py` | FastAPI routes: page, htmx `/ui/*`, JSON `/api/*`, SSE logs, `/viz/<id>` + `/viz/mesh/<id>`, `/doctor`, mesh downloads |
-| `jobs.py` | `JobManager` (queue, N workers, cancel/delete) + per-kind log parsers + `MAX_JOBS` |
-| `pipeline/runner.py` | log emitter + subprocess streaming + cancel (multi-child) |
-| `pipeline/frames.py` | `run_frames`: fps extraction (NVDEC + CPU fallback), blur cutoff, parallel, flatten |
-| `pipeline/colmap.py` | `run_colmap`: layout detect, stages, sentinels, NESTED staging, parallel Lanczos FullHD resize |
-| `pipeline/train.py` | `run_train` (COLMAP→trainer scene + PINHOLE guard) and `run_mesh` (mesh + optional ChArUco mm scaling) |
-| `pipeline/backends.py` | backend registry, env/GPU resolution, CLI builder, `doctor` preflight |
-| `pipeline/gcs.py` | GCS browse (`gsutil ls`) + download (`gsutil -m rsync -r`) |
-| `pipeline/model.py` | parse sparse model (poses/cameras/points/per-image score) + PLY export |
-| `templates/` | `index.html` (forms) + htmx partials + three.js viewers + `doctor.html` |
-| `tools/` | trainer-env scripts: `estimate_marker_scale.py`、`scale_mesh.py`、vendored `colmap_read_write_model.py` |
-| `backends.example.json` / `local.env.example` | per-machine 設定範本(實檔 gitignored) |
+| `app.py` | app factory:建 FastAPI、mount static、include routers、啟動 job manager |
+| `web/routers/` | APIRouter:`pages` · `browse` · `create`(建 job 表單)· `jobs`(查詢/取消/SSE log)· `viz`(3D/mesh 檢視 + PLY 下載 + cull + 去背)· `doctor` |
+| `web/services/` | `models.py`(job→路徑解析、去背模型衍生)· `forms.py`(表單→參數驗證) |
+| `web/shared.py` | Jinja templates、`_page` render helper、UI 表單常數 |
+| `jobs.py` | `JobManager`(佇列、N workers、cancel/delete)+ 各類 log 解析 + `MAX_JOBS` |
+| `pipeline/config.py` | `Settings`:所有設定的單一來源(pydantic-settings) |
+| `pipeline/runner.py` | log emitter + 子行程串流 + 取消(multi-child) |
+| `pipeline/frames.py` | `run_frames`:抽幀(NVDEC + CPU fallback)、去模糊、並行、flatten |
+| `pipeline/colmap.py` | `run_colmap`:layout 偵測、stages、sentinels、NESTED staging、並行 Lanczos FullHD resize |
+| `pipeline/train.py` | `run_train`(COLMAP→trainer scene + PINHOLE guard)、`run_mesh`(mesh + 選用 ChArUco mm 縮放) |
+| `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor` preflight |
+| `pipeline/gcs.py` | GCS 瀏覽(`gsutil ls`)+ 下載(`gsutil -m rsync -r`) |
+| `pipeline/model.py` | 解析 COLMAP 稀疏模型(poses/cameras/points/分數)+ PLY 匯出 |
+| `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器 + `doctor.html` |
+| `tools/` | trainer-env 腳本:`estimate_marker_scale.py`、`scale_mesh.py`、vendored `colmap_read_write_model.py` |
+| `tests/` · `pyproject.toml` · `.github/` | pipeline 純函式測試 · 工具設定(ruff/mypy/pytest)· CI |
+| `backends.example.json` · `local.env.example` | per-machine 設定範本(實檔 gitignored) |
+
+## 開發 (development)
+
+```bash
+pip install -e ".[dev]"   # 面板 + ruff / mypy / pytest
+pytest                    # pipeline 純函式測試
+ruff check .              # lint
+mypy pipeline/config.py   # 型別檢查（目前嚴格守住 config.py）
+```
+
+CI(`.github/workflows/ci.yml`)在每次 push / PR 跑 ruff + mypy + pytest。擴充慣例:加 endpoint →
+在 `web/routers/` 加 handler;加訓練後端 → 改 `backends.json`(不必動 code);加設定 → `pipeline/config.py` 加一個欄位。
 
 ## License
 
