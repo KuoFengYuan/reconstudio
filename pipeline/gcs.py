@@ -233,14 +233,14 @@ def gcs_multi_plan(srcs: list[str], dest_root: str) -> list[tuple[str, str]]:
     parts = [s[len("gs://"):].split("/") for s in srcs]   # [bucket, .., leaf]
     parents = [p[:-1] for p in parts]                     # each folder's parent path
     common: list[str] = []                                # deepest shared parent
-    for tup in zip(*parents):
+    for tup in zip(*parents, strict=False):               # stop at the shortest parent
         if len(set(tup)) == 1:
             common.append(tup[0])
         else:
             break
     container = common[-1] if common else ""              # the "last folder entered"
     base = Path(dest_root) / container if container else Path(dest_root)
-    return [(s, str(base.joinpath(*p[len(common):]))) for s, p in zip(srcs, parts)]
+    return [(s, str(base.joinpath(*p[len(common):]))) for s, p in zip(srcs, parts, strict=True)]
 
 
 def _run_gcs_cp_multi(params: dict, runner: Runner) -> None:
