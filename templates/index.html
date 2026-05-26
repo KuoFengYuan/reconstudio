@@ -540,6 +540,13 @@
       <button class="ghost" onclick="document.getElementById('picker').classList.remove('open')">關閉</button>
     </div>
     <div id="picker-body"></div>
+    <!-- GCS multi-select tray: persists across folder navigation (lives outside
+         #picker-body so htmx swaps don't wipe it). Hidden until ≥1 folder picked. -->
+    <div id="gcs-tray" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);align-items:center;gap:8px">
+      <span class="hint" style="flex:1">已勾選 <b id="gcs-count">0</b> 個資料夾,一個任務平行下載（保留最後進入的資料夾）</span>
+      <button class="ghost" type="button" onclick="clearGcsSel()">清除</button>
+      <button class="submit" type="button" style="width:auto;padding:6px 14px" onclick="gcsDownloadSelected()">⬇ 下載勾選</button>
+    </div>
   </div>
 </div>
 
@@ -666,6 +673,8 @@
     document.getElementById('blur-thr').style.display = v==='threshold'  ? '' : 'none';
   }
   function openPicker(target, root){
+    var tray = document.getElementById('gcs-tray');   // local picker: no multi-select
+    if (tray) tray.style.display = 'none';
     document.getElementById('picker').classList.add('open');
     htmx.ajax('GET', '/ui/browse?target=' + target + (root ? '&root=' + root : ''),
               {target:'#picker-body', swap:'innerHTML'});
@@ -699,6 +708,7 @@
     window.GCS_ROOT = gf ? (gf.dataset.gcsRoot || '') : '';
   })();
   function openGcsPicker(){
+    gcsSel.clear(); gcsUpdateTray();   // fresh selection each time the cloud picker opens
     document.getElementById('picker').classList.add('open');
     htmx.ajax('GET', '/ui/gcs_browse?prefix=' + encodeURIComponent(window.GCS_ROOT || ''),
               {target:'#picker-body', swap:'innerHTML'});
@@ -707,6 +717,43 @@
     var s = document.getElementById('gcs_src'); if (s) s.value = prefix;
     deriveGcsDest();
     document.getElementById('picker').classList.remove('open');
+  }
+  // --- GCS multi-select cart: tick folders across levels, download all at once.
+  // Selection lives here (not in the swapped #picker-body) so navigating folders
+  // doesn't lose it; gcsApplyChecks() re-ticks boxes after each list re-render.
+  window.gcsSel = new Set();
+  function gcsToggle(cb){
+    if (cb.checked) gcsSel.add(cb.dataset.path); else gcsSel.delete(cb.dataset.path);
+    gcsUpdateTray();
+  }
+  function gcsUpdateTray(){
+    var tray = document.getElementById('gcs-tray');
+    var c = document.getElementById('gcs-count');
+    if (c) c.textContent = gcsSel.size;
+    if (tray) tray.style.display = gcsSel.size ? 'flex' : 'none';
+  }
+  function gcsApplyChecks(){
+    document.querySelectorAll('#picker-body .gcs-pick').forEach(function(cb){
+      cb.checked = gcsSel.has(cb.dataset.path);
+    });
+  }
+  function clearGcsSel(){
+    gcsSel.clear();
+    document.querySelectorAll('#picker-body .gcs-pick').forEach(function(cb){ cb.checked = false; });
+    gcsUpdateTray();
+  }
+  // re-apply tick state each time the cloud picker list re-renders
+  document.body.addEventListener('htmx:afterSwap', function(e){
+    if (e.target && e.target.id === 'picker-body') gcsApplyChecks();
+  });
+  function gcsDownloadSelected(){
+    if (!gcsSel.size) return;
+    var srcs = Array.from(gcsSel).join('\n');   // one job; htmx swap into #main starts the log stream
+    document.getElementById('picker').classList.remove('open');
+    showTab('run', document.querySelector('.col:last-child > .tabs button'));
+    htmx.ajax('POST', '/ui/gcs_sync_multi',
+              {target:'#main', swap:'innerHTML', values:{srcs: srcs}});
+    clearGcsSel();
   }
   // Default dest = staging root + the gs:// path (a starting point only); the user
   // can then edit it freely or pick any folder via the dest 瀏覽 button.
@@ -829,11 +876,14 @@
     // finished job's multi-MB log froze the tab ("Page Unresponsive").
     var lines = [];
     var lastProg = false;
+    var MAX_LINES = 5000;     // keep only the recent tail in the DOM; a 4–5k-image
+                              // run emits tens of thousands of lines and froze the tab
     var es = new EventSource('/api/jobs/' + jobId + '/logs');
     window._es = es;
     es.onmessage = function(ev){
       var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
       ev.data.split('\n').forEach(function(ln){ lastProg = pushLogLine(lines, ln, lastProg); });
+      if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
       pre.textContent = lines.length ? lines.join('\n') + '\n' : '';
       if (atBottom) pre.scrollTop = pre.scrollHeight;
     };

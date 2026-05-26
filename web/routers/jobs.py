@@ -70,24 +70,39 @@ async def stream_logs(job_id: str):
     if not job:
         raise HTTPException(404, "no such job")
 
+    # Replay only the last TAIL_BYTES on connect, then tail live. A 4–5k-image
+    # COLMAP log is many MB; dumping the whole thing froze the browser. The recent
+    # tail is what matters live, and the full log stays on disk for forensics.
+    TAIL_BYTES = 256 * 1024
+
     async def gen():
         path = job.log_path
-        pos = 0
+        pos = None            # byte offset we've streamed up to; None = not started
+        trim_partial = False  # drop the half line at the tail's start
         while True:
             if path.exists():
-                with path.open("r", errors="replace") as fh:
-                    fh.seek(pos)
-                    chunk = fh.read()
-                    pos = fh.tell()
-                if chunk:
-                    # one SSE event per chunk (multi-line data) so the browser does a
-                    # single DOM write — the initial history replay appears instantly
-                    # instead of trickling in line-by-line.
-                    payload = "".join(f"data: {ln}\n" for ln in chunk.splitlines())
-                    yield payload + "\n"
+                size = path.stat().st_size
+                if pos is None:
+                    pos = max(0, size - TAIL_BYTES)
+                    trim_partial = pos > 0
+                if size > pos:
+                    with path.open("rb") as fh:
+                        fh.seek(pos)
+                        data = fh.read()
+                        pos = fh.tell()
+                    text = data.decode("utf-8", "replace")
+                    if trim_partial:                 # we started mid-line: drop it
+                        nl = text.find("\n")
+                        text = text[nl + 1:] if nl >= 0 else ""
+                        trim_partial = False
+                    if text:
+                        # one SSE event per chunk (multi-line data) so the browser does
+                        # a single DOM write instead of trickling in line-by-line.
+                        payload = "".join(f"data: {ln}\n" for ln in text.splitlines())
+                        yield payload + "\n"
             cur = manager.get(job_id)
             ended = cur and cur.status in ("done", "failed", "cancelled")
-            no_more = not (path.exists() and path.stat().st_size > pos)
+            no_more = not (path.exists() and path.stat().st_size > (pos or 0))
             if ended and no_more:
                 yield f"event: end\ndata: {cur.status}\n\n"
                 return

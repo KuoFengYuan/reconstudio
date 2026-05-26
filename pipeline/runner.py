@@ -4,12 +4,19 @@ the current child's process group and is checked between steps."""
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+
+# Pure-noise subprocess lines that bloat the log without informing anyone:
+# COLMAP's EXIF reader prints ~3 of these per image, so a 4–5k-photo dataset
+# adds ~14k useless lines that help freeze the browser log pane. Dropped before
+# they ever reach the console log / parser.
+_LOG_NOISE = re.compile(r"^add_exif_item_to_spec: didn't know how to process")
 
 
 class Cancelled(Exception):
@@ -111,6 +118,8 @@ class Runner:
                 self._procs.add(proc)
             assert proc.stdout is not None
             for line in proc.stdout:
+                if _LOG_NOISE.search(line):
+                    continue
                 self._write(line)
             proc.wait()
             with self._lock:

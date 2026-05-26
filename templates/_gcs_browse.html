@@ -8,6 +8,9 @@
     <button class="ghost" onclick="gcsPick('{{ prefix }}')">下載此資料夾 ⬇</button>
     {% endif %}
   </div>
+  {% if prefix and dirs %}
+  <div class="hint" style="margin-bottom:6px">勾選多個資料夾可一次下載；點名稱進入下一層（勾選會在切換層級時保留）。</div>
+  {% endif %}
   <div style="display:flex;flex-direction:column;gap:4px">
     {% if parent is not none %}
     <button class="ghost" style="text-align:left"
@@ -15,9 +18,20 @@
             hx-target="#picker-body" hx-swap="innerHTML">⬆ ..</button>
     {% endif %}
     {% for d in dirs %}
-    <button class="ghost" style="text-align:left"
-            hx-get="/ui/gcs_browse?prefix={{ d.path|urlencode }}"
-            hx-target="#picker-body" hx-swap="innerHTML">{% if prefix %}📁{% else %}🪣{% endif %} {{ d.name }}</button>
+      {% if prefix %}
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="checkbox" class="gcs-pick" data-path="{{ d.path }}"
+               style="width:auto;flex:none" onchange="gcsToggle(this)"
+               title="勾選以多選下載">
+        <button class="ghost" style="flex:1;text-align:left"
+                hx-get="/ui/gcs_browse?prefix={{ d.path|urlencode }}"
+                hx-target="#picker-body" hx-swap="innerHTML">📁 {{ d.name }}</button>
+      </div>
+      {% else %}
+      <button class="ghost" style="text-align:left"
+              hx-get="/ui/gcs_browse?prefix={{ d.path|urlencode }}"
+              hx-target="#picker-body" hx-swap="innerHTML">🪣 {{ d.name }}</button>
+      {% endif %}
     {% else %}
     <span class="hint">{% if error %}（無法列出）{% elif prefix %}（這層沒有子資料夾，可直接「下載此資料夾」）{% else %}（沒有 bucket）{% endif %}</span>
     {% endfor %}

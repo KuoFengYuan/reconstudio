@@ -9,6 +9,6 @@ from .backends import available_backends, build_cli, doctor, get_backend, list_g
 from .colmap import COLMAP_DEFAULTS, COLMAP_STAGES, run_colmap  # noqa: F401
 from .config import settings  # noqa: F401
 from .frames import FRAMES_DEFAULTS, run_frames  # noqa: F401
-from .gcs import default_dest, gcs_ls, gcs_parent, run_gcs_sync  # noqa: F401
+from .gcs import default_dest, gcs_ls, gcs_multi_plan, gcs_parent, run_gcs_sync  # noqa: F401
 from .runner import Cancelled, Runner  # noqa: F401
 from .train import TRAIN_DEFAULTS, run_mesh, run_train  # noqa: F401
