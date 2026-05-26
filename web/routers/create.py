@@ -13,7 +13,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from jobs import COLMAP_STAGES, Job, manager, new_id
-from pipeline import build_cli, default_dest, get_backend
+from pipeline import build_cli, default_dest, gcs_multi_plan, get_backend
 from web.services.forms import build_colmap_params, parse_marker, scene_label
 from web.services.models import prepare_edited_model
 from web.shared import BROWSE_ROOT, DEST_ROOT, FFMPEG_BIN, GSUTIL_BIN, _page
@@ -49,6 +49,45 @@ async def create_gcs_sync(request: Request):
               title=f"{src.rstrip('/').rsplit('/', 1)[-1]} ⬇",
               subtitle=f"{src}  →  {destp}",
               params=params, meta={"src": src, "dest": str(destp)})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/gcs_sync_multi", response_class=HTMLResponse)
+async def create_gcs_sync_multi(request: Request):
+    """Multi-select download: ONE job pulls all checked gs:// folders in a single
+    `gsutil -m cp -r` (parallel), each kept under the last folder navigated into
+    (not the whole gs:// path). The picker sends a newline-joined `srcs` field."""
+    raw = await request.form()
+    srcs = [s.strip() for s in raw.getlist("src") if s and s.strip()]
+    srcs += [s.strip() for s in (raw.get("srcs") or "").replace(",", "\n").splitlines()
+             if s.strip()]
+    seen: set[str] = set()
+    srcs = [s for s in srcs if not (s in seen or seen.add(s))]   # dedupe, keep order
+    dest_root = str(BROWSE_ROOT)
+    try:
+        if not srcs:
+            raise ValueError("沒有勾選任何資料夾")
+        bad = next((s for s in srcs if not s.startswith("gs://")), None)
+        if bad:
+            raise ValueError(f"來源必須是 gs:// 路徑:{bad}")
+        plan = gcs_multi_plan(srcs, dest_root)
+        for _, dest in plan:                       # same staging-root guard as single mode
+            destp = Path(dest).expanduser().resolve()
+            if destp.exists() and not destp.is_dir():
+                raise ValueError(f"下載目的已存在且不是資料夾:{destp}")
+            if destp != DEST_ROOT and DEST_ROOT not in destp.parents:
+                raise ValueError(f"下載目的需在 {DEST_ROOT} 底下:{destp}")
+        params = {"srcs": srcs, "dest_root": dest_root, "gsutil_bin": GSUTIL_BIN}
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    container = Path(plan[0][1]).parent.name or dest_root
+    job = Job(id=new_id(), kind="gcs",
+              title=f"{len(srcs)} 個資料夾 ⬇",
+              subtitle=f"{len(srcs)} 個資料夾  →  {Path(dest_root) / container}",
+              params=params, meta={"srcs": srcs, "dest_root": dest_root,
+                                   "count": len(srcs)})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
