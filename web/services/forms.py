@@ -86,6 +86,22 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "gps_align": bool(form.get("GPS_ALIGN")),
         "gps_align_type": g("GPS_ALIGN_TYPE", "enu"),
         "gps_align_max_error": g("GPS_ALIGN_MAX_ERROR", "3.0"),
+        # --- h3dgs large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
+        "cm_n_seq": g("CM_N_SEQ", "0"), "cm_n_quad": g("CM_N_QUAD", "10"),
+        "cm_n_loop": g("CM_N_LOOP", "5"), "cm_n_gps": g("CM_N_GPS", "25"),
+        "cm_loop_matches": (form.get("CM_LOOP_MATCHES") or "").strip(),
+        "focal_factor": (form.get("FOCAL_FACTOR") or "").strip(),
+        "max_image_size": (form.get("MAX_IMAGE_SIZE") or "").strip(),
+        "masks_dir": (form.get("MASKS_DIR") or "").strip().rstrip("/"),
+        "simplify": bool(form.get("SIMPLIFY")),
+        "simplify_mult_min_dist": g("SIMPLIFY_MULT_MIN_DIST", "10"),
+        "reorient": bool(form.get("REORIENT")),
+        "reorient_target_med_dist": g("REORIENT_TARGET_MED_DIST", "20"),
+        "reorient_upscale": g("REORIENT_UPSCALE", "0"),
+        # hierarchical_mapper partition knobs (blank = COLMAP default)
+        "hm_leaf_max_num_images": (form.get("HM_LEAF_MAX_NUM_IMAGES") or "").strip(),
+        "hm_image_overlap": (form.get("HM_IMAGE_OVERLAP") or "").strip(),
+        "hm_num_workers": (form.get("HM_NUM_WORKERS") or "").strip(),
     }
     for key, allowed in (("camera_mode", ENUMS["CAMERA_MODE"]),
                          ("matcher", ENUMS["MATCHER"]), ("mapper", ENUMS["MAPPER"]),
@@ -94,13 +110,38 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
                          ("gps_align_type", ["enu", "ecef", "enu-plane", "plane"])):
         if params[key] not in allowed:
             raise ValueError(f"{key} must be one of {allowed}")
-    for key in ("max_features", "seq_overlap", "num_matches", "spatial_max_neighbors"):
+    for key in ("max_features", "seq_overlap", "num_matches", "spatial_max_neighbors",
+                "cm_n_seq", "cm_n_quad", "cm_n_loop", "cm_n_gps"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
     for key in ("spatial_max_distance", "prior_std_x", "prior_std_y", "prior_std_z",
-                "gps_align_max_error"):
+                "gps_align_max_error", "simplify_mult_min_dist",
+                "reorient_target_med_dist", "reorient_upscale"):
         try:
             float(params[key])
         except ValueError:
             raise ValueError(f"{key} must be a number") from None
+    # optional numerics: validated only when provided (blank = "use COLMAP default")
+    for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
+                       ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),
+                       ("hm_image_overlap", "HM_IMAGE_OVERLAP")):
+        if params[key] and not params[key].isdigit():
+            raise ValueError(f"{label} must be a positive integer (or blank)")
+    if params["hm_num_workers"]:  # -1 = auto, so allow a leading minus
+        try:
+            int(params["hm_num_workers"])
+        except ValueError:
+            raise ValueError("HM_NUM_WORKERS must be an integer (-1 = auto, or blank)") from None
+    if params["focal_factor"]:
+        try:
+            float(params["focal_factor"])
+        except ValueError:
+            raise ValueError("FOCAL_FACTOR must be a number (or blank)") from None
+    # loop closure anchors: space/comma-separated integers, in (a b) pairs
+    try:
+        loop_ints = [int(x) for x in params["cm_loop_matches"].replace(",", " ").split()]
+    except ValueError:
+        raise ValueError("CM_LOOP_MATCHES must be space/comma-separated integers") from None
+    if len(loop_ints) % 2 != 0:
+        raise ValueError("CM_LOOP_MATCHES needs an even count of integers (a b pairs)")
     return params

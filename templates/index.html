@@ -202,6 +202,9 @@
           </select>
           <label>MAX_FEATURES</label>
           <input name="MAX_FEATURES" value="{{ colmap_defaults.MAX_FEATURES }}">
+          <label>FOCAL_FACTOR（default_focal_length_factor;留空=COLMAP 預設）</label>
+          <input name="FOCAL_FACTOR" value="{{ colmap_defaults.FOCAL_FACTOR }}" placeholder="大場景未標定建議 0.5">
+          <div class="hint">未知內參的大場景:給焦距一個初始猜測(影像寬 × 此係數)。h3dgs 用 0.5。已有可靠 EXIF 焦距時留空。</div>
         </div>
       </details>
 
@@ -217,6 +220,7 @@
           <div class="hint mhint" data-m="vocab">vocab = 用 vocab tree 找外觀相近的影像比對,適合無序 / 大量照片。</div>
           <div class="hint mhint" data-m="both">both = sequential + vocab(預設):連續性 + 外觀迴圈閉合,最穩。</div>
           <div class="hint mhint" data-m="spatial">spatial = 用 GPS 鄰近度限制比對候選,適合大場景空拍 / 掃街(需每張帶 EXIF GPS)。</div>
+          <div class="hint mhint" data-m="custom">custom = hierarchical-3D-Gaussians 的自訂配對:連續 + 二次方步距 + loop closure + GPS 鄰近,產生明確配對表後用 matches_importer 匯入。適合「有序、超大量、多相機 rig」的大場景(比對數遠少於 exhaustive)。建議搭配 MAPPER=hierarchical。</div>
           <!-- 參數:只顯示所選 matcher 用得到的 -->
           <div class="mgrp" data-m="seq_overlap">
             <label>SEQ_OVERLAP</label>
@@ -236,6 +240,19 @@
               SPATIAL_IGNORE_Z（忽略高度,GPS 高程雜訊大時建議開）
             </label>
           </div>
+          <div class="mgrp" data-m="custom_matcher">
+            <label>CM_N_QUAD（二次方步距配對數/張;主力,預設 10）</label>
+            <input name="CM_N_QUAD" value="{{ colmap_defaults.CM_N_QUAD }}">
+            <label>CM_N_SEQ（連續鄰幀配對數/張;預設 0）</label>
+            <input name="CM_N_SEQ" value="{{ colmap_defaults.CM_N_SEQ }}">
+            <label>CM_N_GPS（每張的 GPS 最近鄰數;0=不用 GPS,需 EXIF + exif 套件)</label>
+            <input name="CM_N_GPS" value="{{ colmap_defaults.CM_N_GPS }}">
+            <label>CM_N_LOOP（loop closure 視窗的 ±2^k 階數;預設 5）</label>
+            <input name="CM_N_LOOP" value="{{ colmap_defaults.CM_N_LOOP }}">
+            <label>CM_LOOP_MATCHES（手動 loop 錨點,成對整數 a b;每對代表第 a 幀≈第 b 幀。留空=不指定）</label>
+            <input name="CM_LOOP_MATCHES" value="{{ colmap_defaults.CM_LOOP_MATCHES }}" placeholder="例: 30 980, 120 1500">
+            <div class="hint">配對名稱沿用 feature_extractor 的 image_list（每個 group 內依檔名排序),所以和資料庫一致。多相機 rig 請用「子資料夾 = 各相機」的 multi/nested layout。</div>
+          </div>
           <label class="checks" style="margin-top:10px;">
             <input type="checkbox" name="GUIDED_MATCHING" value="1" {{ 'checked' if colmap_defaults.GUIDED_MATCHING=='1' }}>
             GUIDED_MATCHING（較慢,低紋理多撿匹配;所有 matcher 通用）
@@ -254,6 +271,7 @@
           <div class="hint phint" data-p="global">global = 全域式 mapper(預設):先 view_graph_calibrator,再一次解整張圖。</div>
           <div class="hint phint" data-p="incremental">incremental = COLMAP 經典增量式 mapper,逐張加入重建。</div>
           <div class="hint phint" data-p="pose_prior">pose_prior = 把 GPS 位置先驗放進 BA,大場景抗漂移、輸出直接是公制+地理對齊(需每張帶 GPS;此時不必再開下方 GPS 對齊)。</div>
+          <div class="hint phint" data-p="hierarchical">hierarchical = h3dgs 的 hierarchical_mapper:把場景切成重疊子模型,平行重建後合併,適合 global/incremental 撐不住的超大場景。輸出一樣落在 sparse/0,下游 train/undistort 不變。建議搭配 MATCHER=custom + 下方「大場景」的 simplify / 重力對齊。</div>
           <label>DATASET_NAME</label>
           <input name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}">
           <!-- 參數:僅 pose_prior 用得到 -->
@@ -266,7 +284,17 @@
               <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
             </div>
           </div>
-          <!-- GPU BA:incremental / pose_prior 適用(global_mapper 不支援) -->
+          <!-- 參數:僅 hierarchical 用得到（留空=COLMAP 預設） -->
+          <div class="pgrp" data-p="hierarchical">
+            <div class="hint" style="margin-top:10px;">分區參數(留空用 COLMAP 4.0.4 預設)。</div>
+            <label>HM_LEAF_MAX_NUM_IMAGES（每個子模型最多影像數;預設 500)</label>
+            <input name="HM_LEAF_MAX_NUM_IMAGES" value="{{ colmap_defaults.HM_LEAF_MAX_NUM_IMAGES }}" placeholder="500">
+            <label>HM_IMAGE_OVERLAP（相鄰子模型重疊影像數;預設 50)</label>
+            <input name="HM_IMAGE_OVERLAP" value="{{ colmap_defaults.HM_IMAGE_OVERLAP }}" placeholder="50">
+            <label>HM_NUM_WORKERS（平行重建子模型的 worker 數;-1=自動)</label>
+            <input name="HM_NUM_WORKERS" value="{{ colmap_defaults.HM_NUM_WORKERS }}" placeholder="-1">
+          </div>
+          <!-- GPU BA:incremental / pose_prior 適用(global_mapper / hierarchical_mapper 不掛) -->
           <label class="checks pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
             <input type="checkbox" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}>
             GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）
@@ -285,6 +313,32 @@
           <div class="hint">只有偵測到 GPS 才會跑;會把稀疏模型改寫成真實公尺座標。與 Mesh 的 ChArUco mm 校正擇一使用,別同時開。MAPPER=pose_prior 已經對齊過,可不必再勾。</div>
           <label>GPS_ALIGN_MAX_ERROR（RANSAC 內點門檻,公尺）</label>
           <input name="GPS_ALIGN_MAX_ERROR" value="{{ colmap_defaults.GPS_ALIGN_MAX_ERROR }}">
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>大場景後處理 (h3dgs)</summary>
+        <div class="gbody">
+          <div class="hint">移植自 hierarchical-3D-Gaussians 的後處理步驟。對應 STAGES 裡的 <b>simplify</b> / <b>reorient</b> 階段:沒勾下面的開關時,該階段會自動跳過(顯示 skipped)。輸出沿用既有 workspace,下游 train/mesh/viz 照常可接。</div>
+          <label>MAX_IMAGE_SIZE（image_undistorter 長邊上限;留空=不限。h3dgs 用 2048)</label>
+          <input name="MAX_IMAGE_SIZE" value="{{ colmap_defaults.MAX_IMAGE_SIZE }}" placeholder="2048">
+          <label class="checks" style="margin-top:10px;">
+            <input type="checkbox" name="SIMPLIFY" value="1" {{ 'checked' if colmap_defaults.SIMPLIFY=='1' }}>
+            simplify_images（清掉位姿離群相機 + 砍掉沒配上 3D 點的觀測;原始備份成 images_heavy.bin)
+          </label>
+          <label>SIMPLIFY_MULT_MIN_DIST（相機間距 > 此倍×中位數 → 視為離群剔除;預設 10)</label>
+          <input name="SIMPLIFY_MULT_MIN_DIST" value="{{ colmap_defaults.SIMPLIFY_MULT_MIN_DIST }}">
+          <label class="checks" style="margin-top:10px;">
+            <input type="checkbox" name="REORIENT" value="1" {{ 'checked' if colmap_defaults.REORIENT=='1' }}>
+            auto_reorient（用相機分布 PCA 把場景轉正「up 朝上」並等比縮放;就地改寫去畸變模型,影像不動)
+          </label>
+          <label>REORIENT_TARGET_MED_DIST（縮放到「相機→點」中位距=此值;預設 20)</label>
+          <input name="REORIENT_TARGET_MED_DIST" value="{{ colmap_defaults.REORIENT_TARGET_MED_DIST }}">
+          <label>REORIENT_UPSCALE（手動指定縮放倍率;0=用上面的目標距離自動算)</label>
+          <input name="REORIENT_UPSCALE" value="{{ colmap_defaults.REORIENT_UPSCALE }}">
+          <div class="hint" style="margin-top:6px;">reorient 與 GPS 對齊擇一即可(都會改寫座標)。reorient 可重跑:首次會把未對齊模型快照成 sparse_unaligned/,重跑不會二次旋轉。</div>
+          <label>MASKS_DIR（前景遮罩資料夾;留空=不處理。會用和影像相同的相機去畸變,輸出 uint8 遮罩到 <out>_*_mapper/masks)</label>
+          <input name="MASKS_DIR" value="{{ colmap_defaults.MASKS_DIR }}" placeholder="留空 = 不用遮罩">
         </div>
       </details>
 
@@ -629,7 +683,8 @@
     var m = sel.value;
     document.querySelectorAll('.mhint').forEach(function(e){ e.style.display = (e.dataset.m === m) ? '' : 'none'; });
     var show = {sequential:['seq_overlap','num_matches'], vocab:['num_matches'],
-                both:['seq_overlap','num_matches'], spatial:['spatial']}[m] || [];
+                both:['seq_overlap','num_matches'], spatial:['spatial'],
+                custom:['custom_matcher']}[m] || [];
     document.querySelectorAll('.mgrp').forEach(function(e){ e.style.display = (show.indexOf(e.dataset.m) >= 0) ? '' : 'none'; });
   }
   function syncMapper(){
