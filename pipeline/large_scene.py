@@ -60,7 +60,7 @@ def _image_gps(path: Path):
             img = ExifImage(src)
         if not img.has_exif:
             return None
-        img.gps_longitude  # raises AttributeError when absent
+        _ = img.gps_longitude  # access raises AttributeError when GPS is absent
         return [
             _decimal_coords(img.gps_latitude, img.gps_latitude_ref),
             _decimal_coords(img.gps_longitude, img.gps_longitude_ref),
@@ -125,12 +125,12 @@ def make_custom_matcher(groups, image_root, output_path, *, n_seq=0, n_quad=10,
 
         all_names = [full(i, f) for i in range(len(groups)) for f in names[i]]
         coords = [_image_gps(Path(image_root) / n) for n in all_names]
-        gps_names = [n for n, c in zip(all_names, coords) if c is not None]
+        gps_names = [n for n, c in zip(all_names, coords, strict=True) if c is not None]
         gps_coords = np.array([c for c in coords if c is not None])
         if gps_coords.shape[0] > 1:
             k = min(n_gps, gps_coords.shape[0])
             nbrs = NearestNeighbors(n_neighbors=k).fit(gps_coords)
-            for name, center in zip(gps_names, gps_coords):
+            for name, center in zip(gps_names, gps_coords, strict=True):
                 _, idx = nbrs.kneighbors(center[None])
                 for j in idx[0, 1:]:
                     matches.append(f"{name} {gps_names[j]}\n")
@@ -174,7 +174,7 @@ def simplify_images(model_dir, mult_min_dist: float = 10.0, ext: str = "bin"):
     med = np.median(second_min)
 
     kept: dict = {}
-    for (key, meta), smd in zip(images_metas.items(), second_min):
+    for (key, meta), smd in zip(images_metas.items(), second_min, strict=True):
         if len(meta.point3D_ids) > 0 and smd <= mult_min_dist * med:
             valid = meta.point3D_ids >= 0
             if valid.sum() > 0:
@@ -273,7 +273,7 @@ def auto_reorient(input_path, output_path, upscale: float = 0.0,
     points_out = {
         k: Point3D(id=p.id, xyz=rot, rgb=p.rgb, error=p.error,
                    image_ids=p.image_ids, point2D_idxs=p.point2D_idxs)
-        for (k, p), rot in zip(points_in.items(), rotated)
+        for (k, p), rot in zip(points_in.items(), rotated, strict=True)
     }
 
     images_out = {}
