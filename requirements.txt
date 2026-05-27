@@ -12,3 +12,14 @@ uvicorn[standard]>=0.27
 jinja2>=3.1
 python-multipart>=0.0.9
 pydantic-settings>=2.0   # typed config (pipeline/config.py); pydantic itself comes via fastapi
+
+# --- hierarchical-3D-Gaussians large-scene COLMAP method (MATCHER=custom,
+# MAPPER=hierarchical, simplify / reorient stages, masks). Only imported lazily by
+# pipeline/large_scene.py when those options are actually used — the panel still
+# starts without them. numpy/scipy/scikit-learn are always needed by that path;
+# `exif` only for the custom matcher's GPS neighbours; `opencv-python` only for masks.
+numpy>=1.24
+scipy>=1.10           # auto_reorient: ConvexHull + distance_matrix
+scikit-learn>=1.3     # simplify_images + custom matcher GPS NearestNeighbors
+exif>=1.6             # custom matcher GPS-neighbour pairs (skip with CM_N_GPS=0)
+opencv-python>=4.8    # mask cleanup (skip by leaving MASKS_DIR blank)

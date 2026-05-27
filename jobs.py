@@ -48,11 +48,14 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
 _RUN_MARKERS = [
     (re.compile(r"stage nested layout"), "stage"),
     (re.compile(r"feature_extractor"), "extract"),
-    (re.compile(r"sequential_matcher|vocab_tree_matcher|spatial_matcher"), "match"),
+    (re.compile(r"sequential_matcher|vocab_tree_matcher|spatial_matcher|matches_importer"), "match"),
     (re.compile(r"view_graph_calibrator"), "calibrate"),
-    (re.compile(r"colmap global_mapper|colmap mapper |colmap pose_prior_mapper"), "mapper"),
+    (re.compile(r"colmap global_mapper|colmap mapper |colmap pose_prior_mapper|"
+                r"colmap hierarchical_mapper"), "mapper"),
+    (re.compile(r"simplify_images"), "simplify"),
     (re.compile(r"model_aligner"), "align"),
     (re.compile(r"image_undistorter"), "undistort"),
+    (re.compile(r"auto_reorient"), "reorient"),
 ]
 _SKIP_RE = re.compile(r"^\s*skip (\w+)")
 _BANNER_RE = re.compile(r"^=== \[\d\d:\d\d:\d\d\]")

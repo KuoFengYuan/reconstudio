@@ -18,7 +18,8 @@ from pathlib import Path
 from .config import settings
 from .runner import Cancelled, Runner
 
-COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "align", "undistort"]
+COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "simplify",
+                 "align", "undistort", "reorient"]
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 # colmap / ffmpeg binaries (PATH by default; override via COLMAP_BIN / FFMPEG_BIN).
 COLMAP_BIN = settings.colmap_bin
@@ -40,6 +41,23 @@ COLMAP_DEFAULTS = {
     "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
+    # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
+    # custom matcher (make_colmap_custom_matcher): per-view match counts + loop anchors.
+    "cm_n_seq": "0", "cm_n_quad": "10", "cm_n_loop": "5", "cm_n_gps": "25",
+    "cm_loop_matches": "",
+    # feature_extractor focal seed for uncalibrated large scenes (h3dgs uses 0.5); "" = COLMAP default.
+    "focal_factor": "",
+    # image_undistorter longest-side cap (h3dgs uses 2048); "" = no cap.
+    "max_image_size": "",
+    # optional foreground masks: undistort them through the same cameras as the images.
+    "masks_dir": "",
+    # simplify_images (drop pose-outlier cameras + trim observations) and auto_reorient
+    # (PCA gravity-align + scale). Both off unless ticked; h3dgs runs both.
+    "simplify": False, "simplify_mult_min_dist": "10",
+    "reorient": False, "reorient_target_med_dist": "20", "reorient_upscale": "0",
+    # hierarchical_mapper partition knobs (COLMAP 4.0.4); "" = COLMAP default
+    # (leaf_max_num_images 500, image_overlap 50, num_workers -1 = auto).
+    "hm_leaf_max_num_images": "", "hm_image_overlap": "", "hm_num_workers": "",
 }
 FULLHD_MAX = "1920"   # longest side cap for the "fullhd" resize option
 
@@ -159,6 +177,18 @@ def _list_images(folder: Path, prefix: str) -> list[str]:
         for entry in folder.iterdir():
             if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
                 out.append(f"{prefix}/{entry.name}" if prefix else entry.name)
+    return sorted(out)
+
+
+def _list_image_names(folder: Path) -> list[str]:
+    """Bare image filenames directly in `folder`, sorted. The h3dgs custom matcher
+    pairs images by per-folder frame order, so it needs the names without the group
+    prefix (the prefix is re-attached when emitting "prefix/name" match pairs)."""
+    out: list[str] = []
+    if folder.is_dir():
+        for entry in folder.iterdir():
+            if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
+                out.append(entry.name)
     return sorted(out)
 
 
@@ -337,13 +367,27 @@ def run_colmap(p: dict, r: Runner) -> None:
     gps_align_type = str(d["gps_align_type"])
     gps_align_max_error = str(d["gps_align_max_error"])
     ba_gpu = bool(d["ba_gpu"])   # GPU bundle adjustment (incremental / pose_prior only)
+    # h3dgs large-scene method options
+    focal_factor = str(d["focal_factor"]).strip()
+    max_image_size = str(d["max_image_size"]).strip()
+    masks_dir = str(d["masks_dir"]).strip()
+    simplify = bool(d["simplify"])
+    reorient = bool(d["reorient"])
+    cm_n_seq, cm_n_quad, cm_n_loop = str(d["cm_n_seq"]), str(d["cm_n_quad"]), str(d["cm_n_loop"])
+    cm_n_gps = int(str(d["cm_n_gps"]) or 0)
+    cm_loop_ints = [int(x) for x in str(d["cm_loop_matches"]).replace(",", " ").split()]
+    hm_leaf = str(d["hm_leaf_max_num_images"]).strip()
+    hm_overlap = str(d["hm_image_overlap"]).strip()
+    hm_workers = str(d["hm_num_workers"]).strip()
 
-    if mapper not in ("global", "incremental", "pose_prior"):
-        raise ValueError(f"MAPPER must be 'global', 'incremental', or 'pose_prior' (got: {mapper})")
+    if mapper not in ("global", "incremental", "pose_prior", "hierarchical"):
+        raise ValueError(f"MAPPER must be 'global', 'incremental', 'pose_prior', or "
+                         f"'hierarchical' (got: {mapper})")
     if camera_mode not in ("per_folder", "single"):
         raise ValueError(f"CAMERA_MODE must be 'per_folder' or 'single' (got: {camera_mode})")
-    if matcher not in ("sequential", "vocab", "both", "spatial"):
-        raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', or 'spatial' (got: {matcher})")
+    if matcher not in ("sequential", "vocab", "both", "spatial", "custom"):
+        raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', 'spatial', or "
+                         f"'custom' (got: {matcher})")
 
     if not Path(img_root).is_dir():
         raise FileNotFoundError(f"image_root not found: {img_root}")
@@ -449,8 +493,11 @@ def run_colmap(p: dict, r: Runner) -> None:
     # pipeline on those (image_list paths stay relative, so they remain valid). When the
     # GPS flow is on, the resize grafts each original's EXIF back so GPS survives.
     if fullhd:
-        img_root = _resize_to_fullhd(img_root, lines, ws, force, r,
-                                     preserve_exif=bool(gps_opts))
+        # keep EXIF GPS through the re-encode when any GPS flow needs it — including
+        # the custom matcher's optional GPS-neighbour pairs (not a hard-fail option,
+        # so it's not in gps_opts, but it still reads GPS off the resized images).
+        preserve = bool(gps_opts) or (matcher == "custom" and cm_n_gps > 0)
+        img_root = _resize_to_fullhd(img_root, lines, ws, force, r, preserve_exif=preserve)
 
     # 1. feature_extractor
     if stage_on("extract"):
@@ -462,6 +509,10 @@ def run_colmap(p: dict, r: Runner) -> None:
                 cam = ["--ImageReader.single_camera_per_folder", "1"]
             else:
                 cam = ["--ImageReader.single_camera", "1"]
+            # h3dgs seeds the focal length for uncalibrated large scenes (factor 0.5);
+            # only passed when set, so normal runs keep COLMAP's default behavior.
+            if focal_factor:
+                cam += ["--ImageReader.default_focal_length_factor", focal_factor]
             r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(db),
                    "--image_path", img_root, "--image_list_path", str(lst), *cam,
                    "--ImageReader.camera_model", str(d["camera_model"]),
@@ -500,6 +551,24 @@ def run_colmap(p: dict, r: Runner) -> None:
                        "--SpatialMatching.max_num_neighbors", str(d["spatial_max_neighbors"]),
                        "--SpatialMatching.max_distance", str(d["spatial_max_distance"]),
                        "--SpatialMatching.ignore_z", str(d["spatial_ignore_z"])])
+            if matcher == "custom":
+                # h3dgs custom matcher: build an explicit match list (sequential +
+                # quadratic frame-steps + loop closure + GPS neighbours) then import it
+                # via matches_importer — far fewer pairs than exhaustive for large,
+                # ordered multi-camera captures. Names come from the same folder→sorted
+                # grouping used for extraction, so they match the DB exactly.
+                from . import large_scene
+                groups = [(f, _list_image_names(Path(img_root) / f)) for f in folders]
+                matching_txt = ws / "matching.txt"
+                r.banner(f"matches_importer (custom matcher: seq={cm_n_seq} quad={cm_n_quad} "
+                         f"loop={cm_n_loop} gps={cm_n_gps}) -> {matching_txt}")
+                npairs = large_scene.make_custom_matcher(
+                    groups, img_root, str(matching_txt),
+                    n_seq=int(cm_n_seq), n_quad=int(cm_n_quad), n_loop=int(cm_n_loop),
+                    loop_matches=cm_loop_ints, n_gps=cm_n_gps)
+                r.log(f"  custom match list: {npairs} pairs")
+                r.run([COLMAP_BIN, "matches_importer", "--database_path", str(db),
+                       "--match_list_path", str(matching_txt)])
             sentinel.touch()
         else:
             r.log("skip match (sentinel exists; set FORCE=1 to redo)")
@@ -533,12 +602,27 @@ def run_colmap(p: dict, r: Runner) -> None:
                          "--prior_position_std_x", str(d["prior_std_x"]),
                          "--prior_position_std_y", str(d["prior_std_y"]),
                          "--prior_position_std_z", str(d["prior_std_z"])]
+            elif mapper == "hierarchical":
+                # h3dgs large-scene mapper: partition into overlapping sub-models,
+                # reconstruct in parallel, then merge — scales where global/incremental
+                # choke. Tight global-BA tolerance matches the h3dgs recipe. Partition
+                # knobs (leaf_max_num_images / image_overlap / num_workers) are passed
+                # only when set, else COLMAP's defaults (500 / 50 / auto) apply.
+                sub, label = "hierarchical_mapper", "colmap hierarchical_mapper"
+                extra = ["--Mapper.ba_global_function_tolerance", "0.000001"]
+                if hm_leaf:
+                    extra += ["--leaf_max_num_images", hm_leaf]
+                if hm_overlap:
+                    extra += ["--image_overlap", hm_overlap]
+                if hm_workers:
+                    extra += ["--num_workers", hm_workers]
             else:
                 sub, label = "mapper", "colmap mapper (incremental)"
             # GPU bundle adjustment: BA dominates incremental/pose_prior runtime, so
-            # offloading it to CUDA is a big speedup (global_mapper has no such flag —
-            # it'd reject the option — so only the two incremental-based mappers get it).
-            if ba_gpu and mapper != "global":
+            # offloading it to CUDA is a big speedup (global_mapper / hierarchical_mapper
+            # don't take this flag — they'd reject it — so only the two incremental
+            # mappers get it).
+            if ba_gpu and mapper in ("incremental", "pose_prior"):
                 extra += ["--Mapper.ba_use_gpu", "1"]
                 label += " [GPU BA]"
             r.banner(f"{label} -> {ws / 'sparse'}")
@@ -546,6 +630,31 @@ def run_colmap(p: dict, r: Runner) -> None:
                    "--image_path", img_root, "--output_path", str(ws / "sparse"), *extra])
         else:
             r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
+
+    # 4a. simplify_images (h3dgs): drop pose-outlier cameras + trim the unmatched 2D
+    # observations from sparse/0/images.bin — makes the model far cheaper to read and
+    # removes stray mis-localized cameras. The original is kept as images_heavy.bin.
+    # Only runs when SIMPLIFY is on.
+    if stage_on("simplify"):
+        sentinel = ws / ".simplify.done"
+        model0 = ws / "sparse" / "0"
+        if not simplify:
+            r.log("skip simplify (SIMPLIFY off)")
+        elif need(sentinel):
+            if not (model0 / "cameras.bin").is_file():
+                raise RuntimeError("sparse model missing, cannot simplify")
+            from . import large_scene
+            heavy = model0 / "images_heavy.bin"
+            if force and heavy.is_file():          # restore the full model before a redo
+                (model0 / "images.bin").unlink(missing_ok=True)
+                heavy.rename(model0 / "images.bin")
+            r.banner(f"simplify_images (mult_min_dist={d['simplify_mult_min_dist']}) -> {model0}")
+            before, after = large_scene.simplify_images(
+                str(model0), mult_min_dist=float(d["simplify_mult_min_dist"]))
+            r.log(f"  images: {before} -> {after} (full model backed up as images_heavy.bin)")
+            sentinel.touch()
+        else:
+            r.log("skip simplify (sentinel exists; set FORCE=1 to redo)")
 
     # 4b. model_aligner (optional GPS metric alignment): rewrite sparse/0 in place
     # into a local ENU frame in real-world metres, using the DB's GPS pose priors.
@@ -575,14 +684,75 @@ def run_colmap(p: dict, r: Runner) -> None:
 
     # 5. image_undistorter -> dense_dir
     if stage_on("undistort"):
+        uextra = ["--max_image_size", max_image_size] if max_image_size else []
         if need(dense_dir / "sparse" / "cameras.bin"):
             if not (ws / "sparse" / "0" / "cameras.bin").is_file():
                 raise RuntimeError("sparse model missing, cannot undistort")
-            r.banner(f"image_undistorter -> {dense_dir}")
+            r.banner(f"image_undistorter -> {dense_dir}"
+                     + (f" (max_image_size={max_image_size})" if max_image_size else ""))
             r.run([COLMAP_BIN, "image_undistorter", "--image_path", img_root,
                    "--input_path", str(ws / "sparse" / "0"),
-                   "--output_path", str(dense_dir), "--output_type", "COLMAP"])
+                   "--output_path", str(dense_dir), "--output_type", "COLMAP", *uextra])
         else:
             r.log(f"skip undistort ({dense_dir}/sparse/cameras.bin exists; set FORCE=1 to redo)")
+
+        # 5b. masks (h3dgs, optional): undistort the foreground masks through the SAME
+        # cameras as the images (a model copy with .png image names), then clean them
+        # to uint8 0/255 under dense_dir/masks. Only when MASKS_DIR is set.
+        if masks_dir:
+            if not Path(masks_dir).is_dir():
+                raise FileNotFoundError(f"masks_dir not found: {masks_dir}")
+            mask_done = ws / ".masks.done"
+            if need(mask_done):
+                from . import large_scene
+                src0 = ws / "sparse" / "0"
+                mask_model = src0 / "masks"
+                mask_model.mkdir(parents=True, exist_ok=True)
+                shutil.copy(src0 / "cameras.bin", mask_model / "cameras.bin")
+                shutil.copy(src0 / "points3D.bin", mask_model / "points3D.bin")
+                large_scene.replace_images_by_masks(src0 / "images.bin",
+                                                    mask_model / "images.bin")
+                tmp_masks = ws / "tmp_masks"
+                shutil.rmtree(tmp_masks, ignore_errors=True)
+                r.banner(f"image_undistorter (masks) -> {dense_dir / 'masks'}")
+                r.run([COLMAP_BIN, "image_undistorter", "--image_path", masks_dir,
+                       "--input_path", str(mask_model), "--output_path", str(tmp_masks),
+                       "--output_type", "COLMAP", *uextra])
+                n = large_scene.make_mask_uint8(str(tmp_masks / "images"),
+                                                str(dense_dir / "masks"))
+                r.log(f"  wrote {n} uint8 masks -> {dense_dir / 'masks'}")
+                shutil.rmtree(tmp_masks, ignore_errors=True)
+                mask_done.touch()
+            else:
+                r.log("skip masks (sentinel exists; set FORCE=1 to redo)")
+
+    # 6. auto_reorient (h3dgs): PCA gravity-align + uniformly scale the undistorted
+    # model in place (poses + points rotate/scale; the images on disk are untouched,
+    # so they stay valid). Force-safe: the pre-reorient model is snapshotted to
+    # sparse_unaligned/ and always used as the input, so a redo never double-rotates.
+    # Only runs when REORIENT is on.
+    if stage_on("reorient"):
+        sentinel = ws / ".reorient.done"
+        dense_sparse = dense_dir / "sparse"
+        backup = dense_dir / "sparse_unaligned"
+        if not reorient:
+            r.log("skip reorient (REORIENT off)")
+        elif need(sentinel):
+            if not (dense_sparse / "cameras.bin").is_file():
+                raise RuntimeError("undistorted model missing, cannot reorient")
+            from . import large_scene
+            if not backup.exists():            # snapshot the un-reoriented model once
+                shutil.copytree(dense_sparse, backup)
+            r.banner(f"auto_reorient (gravity align + scale, target_med_dist="
+                     f"{d['reorient_target_med_dist']}, upscale={d['reorient_upscale']}) "
+                     f"-> {dense_sparse}")
+            scale, ni, npts = large_scene.auto_reorient(
+                str(backup), str(dense_sparse),
+                upscale=float(d["reorient_upscale"]),
+                target_med_dist=float(d["reorient_target_med_dist"]))
+            r.log(f"  reoriented {ni} cams / {npts} points, scale={scale:.5g}")
+            sentinel.touch()
+        else:
+            r.log("skip reorient (sentinel exists; set FORCE=1 to redo)")
 
     r.banner(f"done. workspace={ws}")

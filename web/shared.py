@@ -56,11 +56,17 @@ COLMAP_DEFAULTS = {
     "MAPPER_BA_GPU": "1",
     # GPS metric alignment (model_aligner) — off by default, needs GPS in the inputs
     "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
+    # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
+    "CM_N_SEQ": "0", "CM_N_QUAD": "10", "CM_N_LOOP": "5", "CM_N_GPS": "25",
+    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "MAX_IMAGE_SIZE": "", "MASKS_DIR": "",
+    "SIMPLIFY": "0", "SIMPLIFY_MULT_MIN_DIST": "10",
+    "REORIENT": "0", "REORIENT_TARGET_MED_DIST": "20", "REORIENT_UPSCALE": "0",
+    "HM_LEAF_MAX_NUM_IMAGES": "", "HM_IMAGE_OVERLAP": "", "HM_NUM_WORKERS": "",
 }
 FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOLD": ""}
 ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
-    "MATCHER": ["sequential", "vocab", "both", "spatial"],
-    "MAPPER": ["global", "incremental", "pose_prior"],
+    "MATCHER": ["sequential", "vocab", "both", "spatial", "custom"],
+    "MAPPER": ["global", "incremental", "pose_prior", "hierarchical"],
 }
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}
