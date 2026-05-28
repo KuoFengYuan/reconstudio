@@ -336,7 +336,7 @@
           <input name="REORIENT_TARGET_MED_DIST" value="{{ colmap_defaults.REORIENT_TARGET_MED_DIST }}">
           <label>REORIENT_UPSCALE（手動指定縮放倍率;0=用上面的目標距離自動算)</label>
           <input name="REORIENT_UPSCALE" value="{{ colmap_defaults.REORIENT_UPSCALE }}">
-          <div class="hint" style="margin-top:6px;">reorient 與 GPS 對齊擇一即可(都會改寫座標)。reorient 可重跑:首次會把未對齊模型快照成 sparse_unaligned/,重跑不會二次旋轉。</div>
+          <div class="hint" style="margin-top:6px;">reorient 兩種模式(看上方有沒有開 GPS 對齊):<b>沒開 GPS</b> = 用 PCA 猜重力轉正 + 等比縮放(上面兩個參數生效);<b>有開 GPS</b> = 模型已是公制+重力正確的 ENU(Z-up),reorient 改為只做固定 Z-up→Y-up 軸轉(不猜重力、不縮放、<b>保留 GPS 公尺尺度</b>),讓重力在本站 viewer(Y-up)正立。想要「真實公尺 + viewer 正立」就 GPS 對齊 + reorient 兩個都勾。reorient 可重跑:首次把未對齊模型快照成 sparse_unaligned/,重跑不會二次旋轉。</div>
           <label>MASKS_DIR（前景遮罩資料夾;留空=不處理。會用和影像相同的相機去畸變,輸出 uint8 遮罩到 <out>_*_mapper/masks)</label>
           <input name="MASKS_DIR" value="{{ colmap_defaults.MASKS_DIR }}" placeholder="留空 = 不用遮罩">
         </div>
