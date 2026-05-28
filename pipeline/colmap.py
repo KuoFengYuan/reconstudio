@@ -628,30 +628,54 @@ def run_colmap(p: dict, r: Runner) -> None:
             r.banner(f"{label} -> {ws / 'sparse'}")
             r.run([COLMAP_BIN, sub, "--database_path", str(db),
                    "--image_path", img_root, "--output_path", str(ws / "sparse"), *extra])
+            # the mapper just rebuilt sparse/0 from scratch — any simplify backup from a
+            # previous run describes a *different* model. If kept, the simplify stage would
+            # delete this run's outliers out of that stale backup (different image_ids), so
+            # drop it (and any legacy *_heavy.bin files) and let simplify re-back-up *this*
+            # model.
+            shutil.rmtree(ws / "sparse" / "0_heavy", ignore_errors=True)
+            for stale in ("images_heavy.bin", "points3D_heavy.bin"):
+                (ws / "sparse" / "0" / stale).unlink(missing_ok=True)
         else:
             r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
 
-    # 4a. simplify_images (h3dgs): drop pose-outlier cameras + trim the unmatched 2D
-    # observations from sparse/0/images.bin — makes the model far cheaper to read and
-    # removes stray mis-localized cameras. The original is kept as images_heavy.bin.
-    # Only runs when SIMPLIFY is on.
+    # 4a. simplify_images (h3dgs): drop stray mis-localized (pose-outlier) cameras so the
+    # model is cheaper to read and free of bad views. The full pre-simplify model is kept
+    # in sparse/0_heavy/. COLMAP's image_deleter does the actual removal — editing the
+    # model by hand strands frames.bin's data_ids (COLMAP 4.x rig/frame) and breaks the
+    # point2D/point3D track invariants, aborting image_undistorter. Only runs when SIMPLIFY
+    # is on.
     if stage_on("simplify"):
         sentinel = ws / ".simplify.done"
         model0 = ws / "sparse" / "0"
+        heavy_dir = ws / "sparse" / "0_heavy"
         if not simplify:
             r.log("skip simplify (SIMPLIFY off)")
         elif need(sentinel):
             if not (model0 / "cameras.bin").is_file():
                 raise RuntimeError("sparse model missing, cannot simplify")
             from . import large_scene
-            heavy = model0 / "images_heavy.bin"
-            if force and heavy.is_file():          # restore the full model before a redo
-                (model0 / "images.bin").unlink(missing_ok=True)
-                heavy.rename(model0 / "images.bin")
-            r.banner(f"simplify_images (mult_min_dist={d['simplify_mult_min_dist']}) -> {model0}")
-            before, after = large_scene.simplify_images(
-                str(model0), mult_min_dist=float(d["simplify_mult_min_dist"]))
-            r.log(f"  images: {before} -> {after} (full model backed up as images_heavy.bin)")
+            # Back the full model up once, then always delete *from that backup* so the
+            # stage is idempotent: image_deleter errors on already-missing ids, and a
+            # second run must not re-measure outliers on an already-trimmed model.
+            if not (heavy_dir / "cameras.bin").is_file():
+                shutil.rmtree(heavy_dir, ignore_errors=True)
+                shutil.copytree(model0, heavy_dir)
+            ids, n_total = large_scene.outlier_image_ids(
+                str(heavy_dir), mult_min_dist=float(d["simplify_mult_min_dist"]))
+            r.banner(f"simplify_images (mult_min_dist={d['simplify_mult_min_dist']}): "
+                     f"drop {len(ids)}/{n_total} pose-outlier cameras -> {model0}")
+            if ids:
+                lst = ws / "simplify_delete_ids.txt"
+                lst.write_text("\n".join(map(str, ids)) + "\n")
+                r.run([COLMAP_BIN, "image_deleter", "--input_path", str(heavy_dir),
+                       "--output_path", str(model0), "--image_ids_path", str(lst)])
+            else:  # nothing to drop — refresh model0 from the backup so it's pristine
+                for f in heavy_dir.iterdir():
+                    if f.is_file():
+                        shutil.copy2(f, model0 / f.name)
+            r.log(f"  images: {n_total} -> {n_total - len(ids)} "
+                  f"(full model backed up in {heavy_dir.name}/)")
             sentinel.touch()
         else:
             r.log("skip simplify (sentinel exists; set FORCE=1 to redo)")
@@ -726,11 +750,14 @@ def run_colmap(p: dict, r: Runner) -> None:
             else:
                 r.log("skip masks (sentinel exists; set FORCE=1 to redo)")
 
-    # 6. auto_reorient (h3dgs): PCA gravity-align + uniformly scale the undistorted
-    # model in place (poses + points rotate/scale; the images on disk are untouched,
-    # so they stay valid). Force-safe: the pre-reorient model is snapshotted to
-    # sparse_unaligned/ and always used as the input, so a redo never double-rotates.
-    # Only runs when REORIENT is on.
+    # 6. reorient (h3dgs): make "up" usable in the viewer. Two modes, picked by whether
+    # GPS already metric-aligned the model:
+    #   * GPS on  -> model_aligner already gave a metric, gravity-correct ENU frame (up=+Z);
+    #     just rotate Z-up -> Y-up (fixed +90° about X), preserving GPS's metric scale.
+    #   * GPS off -> heuristic PCA gravity-align + rescale (auto_reorient).
+    # Either way poses+points rotate (images on disk untouched, so they stay valid).
+    # Force-safe: the pre-reorient model is snapshotted to sparse_unaligned/ and always
+    # used as the input, so a redo never double-rotates. Only runs when REORIENT is on.
     if stage_on("reorient"):
         sentinel = ws / ".reorient.done"
         dense_sparse = dense_dir / "sparse"
@@ -743,14 +770,20 @@ def run_colmap(p: dict, r: Runner) -> None:
             from . import large_scene
             if not backup.exists():            # snapshot the un-reoriented model once
                 shutil.copytree(dense_sparse, backup)
-            r.banner(f"auto_reorient (gravity align + scale, target_med_dist="
-                     f"{d['reorient_target_med_dist']}, upscale={d['reorient_upscale']}) "
-                     f"-> {dense_sparse}")
-            scale, ni, npts = large_scene.auto_reorient(
-                str(backup), str(dense_sparse),
-                upscale=float(d["reorient_upscale"]),
-                target_med_dist=float(d["reorient_target_med_dist"]))
-            r.log(f"  reoriented {ni} cams / {npts} points, scale={scale:.5g}")
+            if gps_align and gps_present:
+                r.banner(f"reorient (GPS-metric: fixed Z-up -> Y-up, scale preserved) "
+                         f"-> {dense_sparse}")
+                ni, npts = large_scene.zup_to_yup(str(backup), str(dense_sparse))
+                r.log(f"  rotated {ni} cams / {npts} points to Y-up (GPS metric scale kept)")
+            else:
+                r.banner(f"auto_reorient (gravity align + scale, target_med_dist="
+                         f"{d['reorient_target_med_dist']}, upscale={d['reorient_upscale']}) "
+                         f"-> {dense_sparse}")
+                scale, ni, npts = large_scene.auto_reorient(
+                    str(backup), str(dense_sparse),
+                    upscale=float(d["reorient_upscale"]),
+                    target_med_dist=float(d["reorient_target_med_dist"]))
+                r.log(f"  reoriented {ni} cams / {npts} points, scale={scale:.5g}")
             sentinel.touch()
         else:
             r.log("skip reorient (sentinel exists; set FORCE=1 to redo)")

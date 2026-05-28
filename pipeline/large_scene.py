@@ -146,49 +146,39 @@ def make_custom_matcher(groups, image_root, output_path, *, n_seq=0, n_quad=10,
 
 
 # --------------------------------------------------------------------------- #
-# 2. simplify_images.py  — drop pose-outlier cameras + trim unmatched features
+# 2. simplify_images.py  — identify pose-outlier cameras to drop
 # --------------------------------------------------------------------------- #
-def simplify_images(model_dir, mult_min_dist: float = 10.0, ext: str = "bin"):
-    """Shrink model_dir/images.<ext>: keep only cameras whose nearest-neighbour
-    spacing is <= mult_min_dist × median spacing AND that see >=1 registered 3D
-    point, and for those, drop the unmatched (point3D_id<0) 2D observations.
+def outlier_image_ids(model_dir, mult_min_dist: float = 10.0, ext: str = "bin"):
+    """Return (sorted list of image_ids to drop, n_total) for model_dir.
 
-    The original images.<ext> is backed up to images_heavy.<ext> (overwritten if
-    present). Returns (n_before, n_after). Port of simplify_images.py — the
-    NearestNeighbors import is lazy."""
+    An image is a pose outlier when its nearest-neighbour camera spacing exceeds
+    mult_min_dist × the median spacing, or it sees no registered 3D point. This
+    is the h3dgs simplify_images.py keep-rule, inverted to a drop-list.
+
+    Pure analysis — the actual deletion is delegated to COLMAP's image_deleter so
+    images / point tracks / rigs / frames stay mutually consistent. Hand-editing
+    images.bin (as the original port did) strands frames.bin's data_ids under the
+    COLMAP 4.x rig/frame model and breaks the point2D/point3D invariants, which
+    aborts every downstream loader (e.g. image_undistorter). NearestNeighbors is
+    imported lazily."""
     from sklearn.neighbors import NearestNeighbors
 
-    md = Path(model_dir)
-    images_file = md / f"images.{ext}"
-    images_metas = read_images_binary(str(images_file))
-
+    images_metas = read_images_binary(str(Path(model_dir) / f"images.{ext}"))
+    keys = list(images_metas)
     cam_centers = np.array([
-        -qvec2rotmat(images_metas[k].qvec).T @ images_metas[k].tvec
-        for k in images_metas
+        -qvec2rotmat(images_metas[k].qvec).T @ images_metas[k].tvec for k in keys
     ])
     nbrs = NearestNeighbors(n_neighbors=2).fit(cam_centers)
-    second_min = []
-    for center in cam_centers:
-        dist, _ = nbrs.kneighbors(center[None])
-        second_min.append(dist[0, -1])
+    second_min = np.array([nbrs.kneighbors(c[None])[0][0, -1] for c in cam_centers])
     med = np.median(second_min)
 
-    kept: dict = {}
-    for (key, meta), smd in zip(images_metas.items(), second_min, strict=True):
-        if len(meta.point3D_ids) > 0 and smd <= mult_min_dist * med:
-            valid = meta.point3D_ids >= 0
-            if valid.sum() > 0:
-                kept[key] = Image(
-                    id=meta.id, qvec=meta.qvec, tvec=meta.tvec,
-                    camera_id=meta.camera_id, name=meta.name,
-                    xys=meta.xys[valid], point3D_ids=meta.point3D_ids[valid],
-                )
-
-    backup = md / f"images_heavy.{ext}"
-    backup.unlink(missing_ok=True)
-    images_file.rename(backup)
-    write_images_binary(kept, str(images_file))
-    return len(images_metas), len(kept)
+    drop: list[int] = []
+    for key, smd in zip(keys, second_min, strict=True):
+        meta = images_metas[key]
+        sees_point = len(meta.point3D_ids) > 0 and int((meta.point3D_ids >= 0).sum()) > 0
+        if not (sees_point and smd <= mult_min_dist * med):
+            drop.append(int(key))
+    return sorted(drop), len(keys)
 
 
 # --------------------------------------------------------------------------- #
@@ -283,9 +273,59 @@ def auto_reorient(input_path, output_path, upscale: float = 0.0,
                               camera_id=m.camera_id, name=m.name,
                               xys=m.xys, point3D_ids=m.point3D_ids)
 
-    Path(output_path).mkdir(parents=True, exist_ok=True)
-    write_model(cameras, images_out, points_out, str(output_path), f".{ext}")
+    out = Path(output_path)
+    out.mkdir(parents=True, exist_ok=True)
+    write_model(cameras, images_out, points_out, str(out), f".{ext}")
+    # COLMAP 4.x treats frames.bin/rigs.bin as the authoritative pose source and ignores
+    # the (rotated) pose we just wrote into images.bin, so the reorient would silently no-
+    # op. write_model doesn't emit those files; drop any left over from the undistort step
+    # in the output dir so COLMAP falls back to images.bin's rotated/scaled poses (the
+    # plain COLMAP-3.x layout h3dgs training consumes anyway).
+    for f in ("frames", "rigs"):
+        (out / f"{f}.{ext}").unlink(missing_ok=True)
     return scale, len(images_out), len(points_out)
+
+
+def zup_to_yup(input_path, output_path, ext: str = "bin"):
+    """Rigidly rotate a COLMAP model Z-up -> Y-up, with NO scaling and NO gravity
+    guessing — a fixed +90° about X: (x,y,z) -> (x,-z,y).
+
+    Use this instead of auto_reorient when the model is already metric and
+    gravity-aligned by GPS (model_aligner's ENU frame, up=+Z): it only fixes the
+    up-axis convention for reconstudio's viewer (which flips COLMAP Y-down -> three
+    Y-up), so ENU up (+Z) lands on -Y and the viewer shows it upright, while GPS's
+    metric scale is preserved exactly. Reads input_path, writes output_path; drops
+    frames.bin/rigs.bin so the rotated images.bin poses are authoritative — both
+    COLMAP's own loaders and LichtFeld (which reads pose straight from images.bin)
+    then consume the rotated poses. Returns (n_cams, n_points)."""
+    cameras, images_in, points_in = read_model(str(input_path), ext=f".{ext}")
+
+    # row-vector convention (p' = p @ R), matching auto_reorient / _rotate_camera:
+    # column j = image of basis axis j, so (x,y,z) -> (x, -z, y); +Z (ENU up) -> -Y.
+    R = np.array([[1.0, 0.0, 0.0],
+                  [0.0, 0.0, 1.0],
+                  [0.0, -1.0, 0.0]])
+
+    positions = np.array([points_in[k].xyz for k in points_in])
+    rotated = positions @ R
+    points_out = {
+        k: Point3D(id=p.id, xyz=rot, rgb=p.rgb, error=p.error,
+                   image_ids=p.image_ids, point2D_idxs=p.point2D_idxs)
+        for (k, p), rot in zip(points_in.items(), rotated, strict=True)
+    }
+    images_out = {}
+    for k, m in images_in.items():
+        new_pos, new_rot = _rotate_camera(m.qvec, m.tvec, R, 1.0)   # upscale=1 -> no rescale
+        images_out[k] = Image(id=m.id, qvec=new_rot, tvec=new_pos,
+                              camera_id=m.camera_id, name=m.name,
+                              xys=m.xys, point3D_ids=m.point3D_ids)
+
+    out = Path(output_path)
+    out.mkdir(parents=True, exist_ok=True)
+    write_model(cameras, images_out, points_out, str(out), f".{ext}")
+    for f in ("frames", "rigs"):   # see auto_reorient: keep images.bin poses authoritative
+        (out / f"{f}.{ext}").unlink(missing_ok=True)
+    return len(images_out), len(points_out)
 
 
 # --------------------------------------------------------------------------- #

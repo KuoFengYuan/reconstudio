@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -163,6 +164,31 @@ async def model_ply(job_id: str, m: str | None = None):
     return FileResponse(out, media_type="application/octet-stream", filename="points.ply")
 
 
+# --- cull progress (in-memory; one in-flight cull per job) ----------------- #
+# The cull POST is synchronous (no JobManager / SSE log), so the viewer would just
+# stare at a "處理中…" string for minutes. We expose each phase + elapsed seconds
+# via a tiny polled endpoint so the UI can show what's actually happening.
+_CULL: dict[str, dict] = {}
+_CULL_LOCK = threading.Lock()
+
+
+def _cull_set_phase(job_id: str, phase: str) -> None:
+    with _CULL_LOCK:
+        st = _CULL.setdefault(job_id, {"started_at": time.time()})
+        st["phase"] = phase
+
+
+@router.get("/api/jobs/{job_id}/cull_progress")
+async def cull_progress(job_id: str):
+    """Polled by the viewer while a cull is in flight. {running:false} once cleared."""
+    with _CULL_LOCK:
+        st = dict(_CULL.get(job_id) or {})
+    if not st:
+        return {"running": False}
+    return {"running": True, "phase": st.get("phase", "…"),
+            "elapsed": time.time() - st["started_at"]}
+
+
 @router.post("/api/jobs/{job_id}/cull")
 async def cull_ep(job_id: str, request: Request):
     """Remove the named (bad) cameras and write a NON-DESTRUCTIVE cleaned copy under
@@ -215,11 +241,14 @@ async def cull_ep(job_id: str, request: Request):
 
     def _build() -> dict:
         s0 = clean_root / "sparse" / "0"
+        _cull_set_phase(job_id, "剪 sparse 模型 (image_deleter)")
         cull_cameras(src_model, s0, names, filter_points=filter_points)   # for the viewer
+        _cull_set_phase(job_id, "讀統計（保留數 / 點數）")
         kept = len(read_images(s0 / "images.bin"))
         pts = count_points(s0 / "points3D.bin")
         dataset = None
         if src_dataset is not None:                                      # for training/mesh
+            _cull_set_phase(job_id, "剪 dataset 模型 (image_deleter)")
             ds = clean_root / "dataset"
             cull_cameras(src_dataset, ds / "sparse", names, filter_points=filter_points)
             link = ds / "images"
@@ -228,22 +257,28 @@ async def cull_ep(job_id: str, request: Request):
             dataset = str(ds)
         return {"kept": kept, "points": pts, "dataset": dataset}
 
-    pts_before = await asyncio.to_thread(count_points, src_model / "points3D.bin")
-    info = await asyncio.to_thread(_build)
-    removed_total = sorted(set(prev_removed) | set(names))
-    audit = {"removed": names, "removed_count": len(names),
-             "removed_total": removed_total, "removed_total_count": len(removed_total),
-             "from": from_ or None, "kept_images": info["kept"],
-             "filter_points": filter_points, "points_before": pts_before,
-             "points_after": info["points"], "source_job": job_id,
-             "source_model": str(src_model), "created": ts}
-    (clean_root / "removed.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2))
-    rel = clean_root.relative_to(ws).as_posix()                    # e.g. cleaned/20260522_103000
-    return JSONResponse({"ok": True, "cleaned_dir": str(clean_root),
-                         "dataset_dir": info["dataset"], "viz_model": f"{rel}/sparse/0",
-                         "removed": len(names), "removed_total": len(removed_total),
-                         "kept": info["kept"], "points_before": pts_before,
-                         "points_after": info["points"]})
+    _cull_set_phase(job_id, "計算原始點數")
+    try:
+        pts_before = await asyncio.to_thread(count_points, src_model / "points3D.bin")
+        info = await asyncio.to_thread(_build)
+        _cull_set_phase(job_id, "寫 audit")
+        removed_total = sorted(set(prev_removed) | set(names))
+        audit = {"removed": names, "removed_count": len(names),
+                 "removed_total": removed_total, "removed_total_count": len(removed_total),
+                 "from": from_ or None, "kept_images": info["kept"],
+                 "filter_points": filter_points, "points_before": pts_before,
+                 "points_after": info["points"], "source_job": job_id,
+                 "source_model": str(src_model), "created": ts}
+        (clean_root / "removed.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2))
+        rel = clean_root.relative_to(ws).as_posix()                # e.g. cleaned/20260522_103000
+        return JSONResponse({"ok": True, "cleaned_dir": str(clean_root),
+                             "dataset_dir": info["dataset"], "viz_model": f"{rel}/sparse/0",
+                             "removed": len(names), "removed_total": len(removed_total),
+                             "kept": info["kept"], "points_before": pts_before,
+                             "points_after": info["points"]})
+    finally:
+        with _CULL_LOCK:
+            _CULL.pop(job_id, None)
 
 
 @router.get("/api/jobs/{job_id}/gaussians.ply")

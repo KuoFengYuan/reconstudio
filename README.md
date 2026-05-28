@@ -136,6 +136,11 @@ nested  ROOT/<group>/<vid>/*.jpg -> 先 stage 再每群 1 台相機(① 的輸�
 | `MAPPER=pose_prior` | GPS 先驗進 BA,抗漂移、輸出**直接公制 + 地理對齊** | `PRIOR_STD_X/Y/Z`(GPS 精度 m;消費級 3~5、RTK ~0.02) |
 | `GPS_ALIGN`(選填) | 事後把稀疏模型對齊到 ENU 公尺 | `GPS_ALIGN_MAX_ERROR`(m) |
 
+> **reorient × GPS**:`REORIENT` 沒開 GPS 時走 PCA 猜重力 + 等比縮放(`REORIENT_TARGET_MED_DIST` /
+> `REORIENT_UPSCALE` 生效);開 GPS 時自動切換成固定 Z-up→Y-up 軸轉,**不猜重力、不縮放、保留 GPS
+> 公尺尺度**,讓 ENU 上(+Z)落到 viewer 的 -Y、整個場景正立。想要「真實公尺 + viewer 正立」就把
+> `GPS_ALIGN` 跟 `REORIENT` 兩個都勾。
+
 ## ③ 訓練(重建 → 3DGS 模型)
 
 選 backend(環境未就緒會灰掉,旁邊有 `/doctor` 連結)、`source`(COLMAP workspace)、
