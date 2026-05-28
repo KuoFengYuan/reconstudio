@@ -332,12 +332,16 @@ class JobManager:
     async def _run_worker(self, wid: int) -> None:
         while True:
             job_id = await self.queue.get()
+            job = None
             try:
                 job = self.jobs.get(job_id)
                 if job and job.status == "queued":
                     await self._run_job(job)
-            except Exception:          # never let an unexpected error kill a slot
-                pass
+            except Exception as exc:    # never let an error kill the slot — but don't hide it:
+                if job and job.status not in ("done", "failed", "cancelled"):
+                    job.status = "failed"
+                    job.error = str(exc)
+                    job.save()
             finally:
                 self.queue.task_done()
 
@@ -347,10 +351,28 @@ class JobManager:
         job.save()
 
         parser = PARSERS.get(job.kind, lambda j, ln: None)
-        if job.mirror:
-            Path(job.mirror).parent.mkdir(parents=True, exist_ok=True)
-        job.dir.mkdir(parents=True, exist_ok=True)
-        runner = Runner(job.log_path, on_line=lambda ln: parser(job, ln), mirror=job.mirror)
+        # Setup (make the workspace/mirror dir, open the log files) runs before any runner
+        # exists and can fail on its own — most often an unwritable workspace path. Guard
+        # it so the failure surfaces as a FAILED job with a logged reason, instead of the
+        # job silently stalling in "running" with no console output.
+        try:
+            if job.mirror:
+                Path(job.mirror).parent.mkdir(parents=True, exist_ok=True)
+            job.dir.mkdir(parents=True, exist_ok=True)
+            runner = Runner(job.log_path, on_line=lambda ln: parser(job, ln), mirror=job.mirror)
+        except Exception as exc:  # noqa: BLE001
+            job.status = "failed"
+            job.error = f"setup failed: {exc}"
+            try:                          # console.log dir (job.dir) was made by save() above
+                with open(job.log_path, "a") as fh:
+                    fh.write(f"[panel] FAILED before start: {exc}\n"
+                             f"[panel] workspace not writable? check the path/permissions: "
+                             f"{job.mirror}\n")
+            except Exception:
+                pass
+            job.finished_at = time.time()
+            job.save()
+            return
         self.runners[job.id] = runner
         runner.log(f"[panel] {job.kind} job {job.id}")
         runner.log(f"[panel] params: {json.dumps(job.params, ensure_ascii=False)}")
