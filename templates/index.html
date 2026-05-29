@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Recon Studio</title>
 <script src="/static/htmx.min.js"></script>
+<script src="/static/js/joblist.js" defer></script>
 <style>
   :root { --bg:#0e1014; --panel:#161922; --panel2:#1b1f29; --line:#2a3038; --line2:#363d49;
           --fg:#e6e9ef; --mut:#8b93a3; --accent:#c9d1d9; --accent-d:#aeb6c0;
@@ -581,7 +582,12 @@
       <div id="main"><div class="empty">填左側設定後啟動,這裡會顯示進度、即時 log 與 3D 結果。</div></div>
     </div>
     <div id="tab-hist" style="display:none">
-      <div id="joblist" hx-get="/ui/joblist" hx-trigger="load, every 3s" hx-swap="innerHTML"></div>
+      <!-- SSE (joblist.js) drives instant refresh on state change; the 30s poll
+           is a defensive fallback when SSE is blocked. The `[!document.hidden]`
+           filter pauses the poll when the tab is in the background. (Single
+           line + simple filter expression — htmx's trigger parser drops the
+           whole attribute, load included, on multi-line or `===` expressions.) -->
+      <div id="joblist" hx-get="/ui/joblist" hx-trigger="load, every 30s [!document.hidden]" hx-swap="innerHTML"></div>
     </div>
   </div>
 </div>
@@ -731,6 +737,9 @@
     var tray = document.getElementById('gcs-tray');   // local picker: no multi-select
     if (tray) tray.style.display = 'none';
     document.getElementById('picker').classList.add('open');
+    // Paint a placeholder synchronously so the modal isn't briefly empty between
+    // .open and the htmx swap (server is <30ms locally; perceived gap was just paint).
+    document.getElementById('picker-body').innerHTML = '<p class="hint">載入中…</p>';
     htmx.ajax('GET', '/ui/browse?target=' + target + (root ? '&root=' + root : ''),
               {target:'#picker-body', swap:'innerHTML'});
   }
@@ -765,6 +774,7 @@
   function openGcsPicker(){
     gcsSel.clear(); gcsUpdateTray();   // fresh selection each time the cloud picker opens
     document.getElementById('picker').classList.add('open');
+    document.getElementById('picker-body').innerHTML = '<p class="hint">載入中… (GCS 第一次可能要幾秒)</p>';
     htmx.ajax('GET', '/ui/gcs_browse?prefix=' + encodeURIComponent(window.GCS_ROOT || ''),
               {target:'#picker-body', swap:'innerHTML'});
   }
@@ -954,50 +964,15 @@
     else lines.push(line);
     return isProg;
   }
-  function refreshJoblist(){ htmx.ajax('GET', '/ui/joblist', {target:'#joblist', swap:'innerHTML'}); }
-  // History filter by kind (frames/colmap/train/mesh). Persisted across the 3s
-  // auto-refresh and re-applied in htmx:afterSwap below.
-  window._jobFilter = window._jobFilter || 'all';
-  function filterJobs(kind){ window._jobFilter = kind; applyJobFilter(); }
-  function applyJobFilter(){
-    var f = window._jobFilter || 'all';
-    // selected kind vanished (e.g. all those jobs deleted) -> fall back to 全部
-    if (f !== 'all' && !document.querySelector('#joblist .jf[data-filter="' + f + '"]')) f = window._jobFilter = 'all';
-    document.querySelectorAll('#joblist tbody tr').forEach(function(tr){
-      tr.style.display = (f === 'all' || tr.getAttribute('data-kind') === f) ? '' : 'none';
-    });
-    document.querySelectorAll('#joblist .jf').forEach(function(b){
-      b.classList.toggle('active', b.getAttribute('data-filter') === f);
-    });
-  }
-  function toggleAllJobs(cb){ document.querySelectorAll('.jobsel').forEach(x => x.checked = cb.checked); }
-  function deleteSelected(){
-    var ids = Array.from(document.querySelectorAll('.jobsel:checked')).map(x => x.value);
-    if (!ids.length) { alert('請先勾選要刪除的紀錄'); return; }
-    if (!confirm('刪除 ' + ids.length + ' 筆紀錄?(進行中的會先取消;已完成的會連同 log 一併移除)')) return;
-    fetch('/api/jobs/delete', {method:'POST', headers:{'Content-Type':'application/json'},
-                               body: JSON.stringify({ids: ids})})
-      .then(r => r.json()).then(() => refreshJoblist());
-  }
-  // before the joblist auto-refresh swaps, remember which rows are checked + scroll
-  window._jobSel = new Set(); window._jobScroll = 0;
-  document.body.addEventListener('htmx:beforeSwap', function(e){
-    var t = e.detail && e.detail.target;
-    if (t && t.id === 'joblist'){
-      window._jobSel = new Set(Array.from(document.querySelectorAll('.jobsel:checked')).map(x => x.value));
-      var sc = t.closest('.col'); window._jobScroll = sc ? sc.scrollTop : 0;
-    }
-  });
+  // Joblist UI (filter / search / paginate / SSE) lives in /static/js/joblist.js.
+  // Functions exposed by it: reloadJoblist, setJobFilter, filterJobs/Status,
+  // loadMoreJobs, onJobSearchInput, toggleAllJobs, deleteSelected.
+  // It also installs its own htmx:beforeSwap/afterSwap handlers for #joblist.
   document.body.addEventListener('htmx:afterSwap', function(e){
     var t = e.detail && e.detail.target;
     if (t && t.id === 'main'){
       var box = t.querySelector('[data-log-job]');
       if (box) startLogStream(box.getAttribute('data-log-job'));
-    }
-    if (t && t.id === 'joblist'){           // restore selection + scroll + filter after live refresh
-      document.querySelectorAll('.jobsel').forEach(x => { if (window._jobSel.has(x.value)) x.checked = true; });
-      var sc = t.closest('.col'); if (sc) sc.scrollTop = window._jobScroll;
-      applyJobFilter();
     }
   });
 </script>
