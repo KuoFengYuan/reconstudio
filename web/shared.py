@@ -25,6 +25,7 @@ GSUTIL_BIN = settings.gsutil_bin
 GCS_ROOT = settings.gcs_root         # GCS browser start prefix ('' = list all buckets)
 
 templates = Jinja2Templates(directory=str(BASE / "templates"))
+templates.env.add_extension("jinja2.ext.do")   # enables {% do dict.update(...) %} in templates
 
 
 def _fmt_dt(epoch, fmt="%Y-%m-%d %H:%M:%S"):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import struct
 import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 from .config import settings
@@ -38,9 +39,35 @@ def _qvec_to_rt(q, t):
     return center, rt
 
 
+# --------------------------------------------------------------------------- #
+# mtime-keyed read cache.
+#
+# The sparse-model .bin files are immutable once a job finishes — a camera cull
+# writes a *new* dir (see cull_cameras) and a FORCE re-run rewrites them with a
+# fresh mtime — so memoising the parsers by (path, mtime, size) is safe and
+# collapses the viewer's repeated reads into one parse per model: opening the 3D
+# view used to parse cameras/images/points on every request, and every camera
+# double-click + every thumbnail fetch re-parsed the *whole* images.bin from
+# scratch (image_detail does its own targeted scan and is intentionally left
+# uncached — it only reads up to the clicked index).
+#
+# Callers must treat the returned dict/list as read-only (it is shared across
+# requests); every reader here only ever reads from it.
+# --------------------------------------------------------------------------- #
+def _stat_key(path: Path) -> tuple[str, int, int]:
+    """Cache key that busts when the file is replaced/rewritten."""
+    st = os.stat(path)
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
 def read_cameras(path: Path) -> dict:
+    return _read_cameras(_stat_key(path))
+
+
+@lru_cache(maxsize=32)
+def _read_cameras(key: tuple[str, int, int]) -> dict:
     cams: dict[int, dict] = {}
-    with open(path, "rb") as f:
+    with open(key[0], "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
         for _ in range(n):
             cid, model, w, h = struct.unpack("<IiQQ", f.read(24))
@@ -51,8 +78,13 @@ def read_cameras(path: Path) -> dict:
 
 
 def read_images(path: Path) -> list[dict]:
+    return _read_images(_stat_key(path))
+
+
+@lru_cache(maxsize=32)
+def _read_images(key: tuple[str, int, int]) -> list[dict]:
     out: list[dict] = []
-    with open(path, "rb") as f:
+    with open(key[0], "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
         for _ in range(n):
             f.read(4)                                    # image_id
@@ -79,12 +111,17 @@ def count_points(path: Path) -> int:
 
 
 def points_stats(path: Path) -> tuple[int, float, float]:
+    return _points_stats(_stat_key(path))
+
+
+@lru_cache(maxsize=32)
+def _points_stats(key: tuple[str, int, int]) -> tuple[int, float, float]:
     """(num_points, mean_reprojection_error_px, mean_track_length).
 
     points3D.bin record: id(u64) xyz(3*f64) rgb(3*u8) error(f64) track_len(u64)
     then track_len*(image_id u32, point2D_idx u32). Track bytes are skipped.
     """
-    with open(path, "rb") as f:
+    with open(key[0], "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
         err_sum, trk_sum = 0.0, 0
         for _ in range(n):

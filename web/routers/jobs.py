@@ -1,7 +1,8 @@
-"""Job views / status / list (htmx fragments) + JSON API + SSE log stream."""
+"""Job views / status / list (htmx fragments) + JSON API + SSE log/jobs streams."""
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -13,10 +14,64 @@ router = APIRouter()
 
 
 @router.get("/ui/joblist", response_class=HTMLResponse)
-async def joblist(request: Request):
-    running = sum(1 for j in manager.jobs.values() if j.status == "running")
-    return _page(request, "_joblist.html", jobs=manager.list(),
+async def joblist(request: Request,
+                  q: str = "", kind: str = "all", status: str = "all",
+                  limit: int = 50):
+    """Filtered + paginated job table fragment.
+
+    `q` matches title or id (substring, case-insensitive); kind/status='all' means
+    no filter on that axis. `limit` is the visible-row cap ('Load more' grows it).
+    Chip counts are computed on the FULL set so the user sees true totals."""
+    all_jobs = manager.list()                                       # sorted newest-first
+    kind_counts = Counter(j["kind"] for j in all_jobs)
+    status_counts = Counter(j["status"] for j in all_jobs)
+
+    qn = (q or "").strip().lower()
+
+    def match(j) -> bool:
+        if kind != "all" and j["kind"] != kind:
+            return False
+        if status != "all" and j["status"] != status:
+            return False
+        if qn:
+            hay = ((j.get("title") or "") + "\0" + (j.get("id") or "")).lower()
+            if qn not in hay:
+                return False
+        return True
+    filtered = [j for j in all_jobs if match(j)]
+    limit = max(10, min(int(limit or 50), 1000))
+    visible = filtered[:limit]
+
+    running = sum(1 for j in all_jobs if j["status"] == "running")
+    return _page(request, "_joblist.html",
+                 jobs=visible, total=len(filtered), all_total=len(all_jobs),
+                 kind_counts=dict(kind_counts), status_counts=dict(status_counts),
+                 q=q, sel_kind=kind, sel_status=status, limit=limit,
                  max_jobs=MAX_JOBS, running=running)
+
+
+@router.get("/api/jobs/stream")
+async def jobs_stream():
+    """SSE: emit `refresh` whenever any job's status/stage changes.
+
+    No pub/sub hooks in JobManager — we poll its in-memory state at 1 Hz here
+    and only push when the signature differs. Idle = 0 events; the client's
+    EventSource auto-reconnects on drop."""
+    async def gen():
+        last = None
+        while True:
+            cur = tuple(sorted(
+                (j.id, j.status, j.current_stage) for j in manager.jobs.values()
+            ))
+            if cur != last:
+                last = cur
+                yield "event: refresh\ndata: ok\n\n"
+            await asyncio.sleep(1.0)
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    })
 
 
 @router.get("/ui/jobs/{job_id}", response_class=HTMLResponse)

@@ -1,19 +1,34 @@
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
   <button class="ghost" onclick="deleteSelected()" style="border-color:var(--err);color:var(--err)">🗑 刪除選取</button>
-  <span class="hint">勾選後刪除;進行中的會先取消。狀態每 3 秒自動更新。
+  <input class="ghost" type="search" id="jobsearch" placeholder="🔍 搜尋 title / id…"
+         value="{{ q }}" oninput="onJobSearchInput(this.value)"
+         style="flex:1;min-width:160px;max-width:280px;padding:4px 8px">
+  <span class="hint">勾選後刪除;進行中的會先取消。狀態即時更新(SSE)。
     {% if max_jobs %}· 同時執行 {{ running or 0 }}/{{ max_jobs }}{% endif %}</span>
 </div>
-{% if not jobs %}
+{% if not all_total %}
 <p class="hint">尚無 job。</p>
 {% else %}
 {% set kinds = [('frames','🎬','抽幀'),('colmap','📐','COLMAP'),('train','🧠','訓練'),('mesh','🧩','Mesh')] %}
-<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-  <button class="ghost jf" data-filter="all" onclick="filterJobs('all')">全部 ({{ jobs|length }})</button>
+{% set kinds_map = {} %}{% for k, emo, _ in kinds %}{% do kinds_map.update({k: emo}) %}{% endfor %}
+<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+  <button class="ghost jf{% if sel_kind == 'all' %} active{% endif %}" onclick="setJobFilter('kind','all')">全部 ({{ all_total }})</button>
   {% for k, emo, lab in kinds %}
-    {% set n = jobs|selectattr('kind','equalto',k)|list|length %}
-    {% if n %}<button class="ghost jf" data-filter="{{ k }}" onclick="filterJobs('{{ k }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
+    {% set n = kind_counts.get(k, 0) %}
+    {% if n %}<button class="ghost jf{% if sel_kind == k %} active{% endif %}" onclick="setJobFilter('kind','{{ k }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
   {% endfor %}
 </div>
+{% set statuses = [('done','✅','成功'),('failed','❌','失敗'),('cancelled','⏸','取消'),('running','▶','執行中'),('queued','⏳','排隊')] %}
+<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+  <button class="ghost jfs{% if sel_status == 'all' %} active{% endif %}" onclick="setJobFilter('status','all')">全部 ({{ all_total }})</button>
+  {% for s, emo, lab in statuses %}
+    {% set n = status_counts.get(s, 0) %}
+    {% if n %}<button class="ghost jfs{% if sel_status == s %} active{% endif %}" onclick="setJobFilter('status','{{ s }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
+  {% endfor %}
+</div>
+{% if not jobs %}
+<p class="hint">符合篩選條件的 job 為 0 筆。</p>
+{% else %}
 <table style="width:100%;border-collapse:collapse;font-size:13px">
   <thead><tr style="color:var(--mut);text-align:left">
     <th style="padding:6px 8px"><input type="checkbox" onclick="toggleAllJobs(this)"></th>
@@ -21,10 +36,10 @@
   </tr></thead>
   <tbody>
   {% for j in jobs %}
-  <tr data-kind="{{ j.kind }}" style="border-top:1px solid var(--line)">
+  <tr data-kind="{{ j.kind }}" data-status="{{ j.status }}" style="border-top:1px solid var(--line)">
     <td style="padding:6px 8px"><input type="checkbox" class="jobsel" value="{{ j.id }}"></td>
     <td><span class="badge {{ j.status }}" style="padding:1px 8px;font-size:11px">{{ j.status }}</span></td>
-    <td>{{ {'frames':'🎬','train':'🧠','mesh':'🧩'}.get(j.kind,'📐') }} {{ j.title }}{% if j.current_stage %} <span class="hint">@{{ j.current_stage }}</span>{% endif %}</td>
+    <td>{{ kinds_map.get(j.kind, '📐') }} {{ j.title }}{% if j.current_stage %} <span class="hint">@{{ j.current_stage }}</span>{% endif %}</td>
     <td style="white-space:nowrap;color:var(--mut);font-size:12px">{{ j.started_at | dt('%Y-%m-%d') }}{% if j.started_at %}<br><span style="opacity:.65">{{ j.started_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
     <td style="white-space:nowrap;color:var(--mut);font-size:12px">{{ j.finished_at | dt('%Y-%m-%d') }}{% if j.finished_at %}<br><span style="opacity:.65">{{ j.finished_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
     <td><code class="hint">{{ j.id }}</code></td>
@@ -33,4 +48,13 @@
   {% endfor %}
   </tbody>
 </table>
+{% if total > jobs|length %}
+<div style="text-align:center;padding:10px">
+  <span class="hint">顯示 {{ jobs|length }} / 共 {{ total }} 筆{% if total != all_total %}(經篩選){% endif %}</span>
+  <button class="ghost" onclick="loadMoreJobs()" style="margin-left:10px">載入更多 ▼</button>
+</div>
+{% else %}
+<div style="text-align:center;padding:6px"><span class="hint">已顯示全部 {{ total }} 筆{% if total != all_total %}(經篩選){% endif %}</span></div>
+{% endif %}
+{% endif %}
 {% endif %}

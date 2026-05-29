@@ -1,29 +1,29 @@
-"""Python port of colmap_pipeline.sh.
+"""COLMAP orchestrator (the long-form `run_colmap`).
 
 Stages (skippable via `stages`, re-runnable via force):
-  stage -> extract -> match -> calibrate(global only) -> mapper -> undistort
-Idempotency uses the same sentinels / output checks as the shell script, and the
-banners it emits match `log()` so the panel's stage parser is unchanged.
+  stage -> extract -> match -> calibrate(global only) -> mapper -> simplify
+        -> align -> undistort -> reorient
+Idempotency uses sentinel files / output checks; the banners match `log()` so the
+panel's stage parser is unchanged.
 """
 from __future__ import annotations
 
-import concurrent.futures as futures
 import os
 import shutil
-import subprocess
 import time
 import urllib.request
 from pathlib import Path
 
-from .config import settings
-from .runner import Cancelled, Runner
+from ..config import settings
+from ..runner import Runner
+from ._gps import gps_coverage
+from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
+from ._resize import resize_to_fullhd, resize_workers
 
 COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "simplify",
                  "align", "undistort", "reorient"]
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 # colmap / ffmpeg binaries (PATH by default; override via COLMAP_BIN / FFMPEG_BIN).
 COLMAP_BIN = settings.colmap_bin
-FFMPEG_BIN = settings.ffmpeg_bin
 
 COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
@@ -59,7 +59,6 @@ COLMAP_DEFAULTS = {
     # (leaf_max_num_images 500, image_overlap 50, num_workers -1 = auto).
     "hm_leaf_max_num_images": "", "hm_image_overlap": "", "hm_num_workers": "",
 }
-FULLHD_MAX = "1920"   # longest side cap for the "fullhd" resize option
 
 
 def _download(url: str, dest: Path, r: Runner) -> None:
@@ -77,279 +76,6 @@ def _download(url: str, dest: Path, r: Runner) -> None:
             tmp.unlink(missing_ok=True)
             time.sleep(2)
     raise RuntimeError(f"vocab tree download failed: {last}")
-
-
-def _resize_workers() -> int:
-    return settings.resolved_resize_workers()
-
-
-def _resize_enc_args(rel: str) -> list[str]:
-    """Highest-quality encode for the output format. JPEG: q=1 + full-chroma 4:4:4
-    (no subsampling). PNG/TIFF: lossless, so just rescale."""
-    ext = Path(rel).suffix.lower()
-    if ext in (".jpg", ".jpeg"):
-        return ["-q:v", "1", "-pix_fmt", "yuvj444p"]
-    if ext == ".png":
-        return ["-compression_level", "1"]          # lossless; light zlib = faster write
-    return []
-
-
-def _resize_to_fullhd(img_root: str, lines: list[str], ws: Path,
-                      force: bool, r: Runner, preserve_exif: bool = False) -> str:
-    """Physically downscale every listed image so its longest side is <= FULLHD_MAX,
-    writing real FullHD copies under ws/images_fullhd/<relpath> (aspect kept, never
-    upscaled). The whole COLMAP run then operates on these — no in-COLMAP size cap.
-
-    Speed: many ffmpeg workers in parallel (NVDEC/GPU can't accelerate JPEG stills,
-    so we saturate CPU cores instead). Quality: Lanczos downscaling + max-quality
-    encode. Idempotent via a sentinel; honors FORCE; resumes by skipping done files.
-
-    preserve_exif (GPS flow): ffmpeg's JPEG encoder drops EXIF, so each resized JPEG
-    gets the original's Exif APP1 grafted back in — keeping the FullHD downscale AND
-    the GPS priors. Uses a distinct sentinel so toggling the mode rebuilds cleanly.
-    Returns the new image root."""
-    if not shutil.which(FFMPEG_BIN):
-        raise RuntimeError(f"ffmpeg not found: '{FFMPEG_BIN}' (set FFMPEG_BIN); "
-                           "needed for the FullHD resize")
-    out_root = ws / "images_fullhd"
-    sentinel = ws / (".resize_fullhd_exif.done" if preserve_exif else ".resize_fullhd.done")
-    other = ws / (".resize_fullhd.done" if preserve_exif else ".resize_fullhd_exif.done")
-    if sentinel.exists() and not force:
-        r.log(f"skip resize (sentinel exists; set FORCE=1 to redo) -> {out_root}")
-        return str(out_root)
-    # force, or a complete run in the *other* EXIF mode -> rebuild from scratch (the
-    # existing copies have the wrong EXIF state); otherwise keep partial files to resume.
-    if force or (other.exists() and not sentinel.exists()):
-        shutil.rmtree(out_root, ignore_errors=True)
-        other.unlink(missing_ok=True)
-    workers = _resize_workers()
-    r.banner(f"resize input -> FullHD (longest side <= {FULLHD_MAX}px, Lanczos, "
-             f"max quality, {workers} parallel"
-             f"{', EXIF/GPS preserved' if preserve_exif else ''}) -> {out_root}")
-    # cap the longest side, keep aspect, never upscale (min with original); -2 keeps
-    # the other side an even number; Lanczos = best-quality downscaling filter.
-    vf = (f"scale='if(gte(iw,ih),min({FULLHD_MAX},iw),-2)':"
-          f"'if(gte(iw,ih),-2,min({FULLHD_MAX},ih))':flags=lanczos")
-
-    def _one(rel: str) -> None:
-        dst = out_root / rel
-        if dst.exists() and not force:
-            return                                   # resume a partial run cheaply
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        src = Path(img_root) / rel
-        argv = [FFMPEG_BIN, "-y", "-nostdin", "-loglevel", "error",
-                "-i", str(src), "-vf", vf, *_resize_enc_args(rel), str(dst)]
-        res = subprocess.run(argv, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(f"ffmpeg resize failed for {rel}: "
-                               f"{res.stderr.strip()[:200]}")
-        if preserve_exif and Path(rel).suffix.lower() in (".jpg", ".jpeg"):
-            app1 = _read_app1_exif(src)              # carry GPS (+focal) past the re-encode
-            if app1:
-                _graft_app1(dst, app1)
-
-    n, done = len(lines), 0
-    with futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        pending = [ex.submit(_one, rel) for rel in lines]
-        for fut in futures.as_completed(pending):
-            if r.cancelled:
-                ex.shutdown(wait=False, cancel_futures=True)
-                raise Cancelled()
-            fut.result()                             # propagate ffmpeg failures
-            done += 1
-            if done % 250 == 0 or done == n:
-                r.log(f"  resized {done}/{n}")
-    sentinel.touch()
-    return str(out_root)
-
-
-def _has_images(folder: Path) -> bool:
-    return folder.is_dir() and any(
-        c.is_file() and c.suffix.lower() in IMAGE_EXTS for c in folder.iterdir())
-
-
-def _list_images(folder: Path, prefix: str) -> list[str]:
-    """Image files directly in `folder` (symlinks followed), relative as prefix/name
-    (or just name when prefix is '' — a single flat folder = image_root itself)."""
-    out: list[str] = []
-    if folder.is_dir():
-        for entry in folder.iterdir():
-            if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
-                out.append(f"{prefix}/{entry.name}" if prefix else entry.name)
-    return sorted(out)
-
-
-def _list_image_names(folder: Path) -> list[str]:
-    """Bare image filenames directly in `folder`, sorted. The h3dgs custom matcher
-    pairs images by per-folder frame order, so it needs the names without the group
-    prefix (the prefix is re-attached when emitting "prefix/name" match pairs)."""
-    out: list[str] = []
-    if folder.is_dir():
-        for entry in folder.iterdir():
-            if entry.is_file() and entry.suffix.lower() in IMAGE_EXTS:
-                out.append(entry.name)
-    return sorted(out)
-
-
-def _resolve_layout(img_root: str, folders: list[str], layout: str,
-                    force_nested: bool, workspace: str | None = None) -> tuple[list[str], bool, str]:
-    """Return (folders, nested, layout_name) for the three fixed input formats:
-      single  : XXX/*.jpg              -> folders=[''] (image_root itself), 1 camera
-      multi   : ROOT/<group>/*.jpg     -> folders=[groups], flat, camera per group
-      nested  : ROOT/<group>/<vid>/*.jpg -> staged into groups, camera per group
-    """
-    root = Path(img_root)
-    # Ignore the workspace dir if the user nested it inside image_root, so it isn't
-    # mistaken for a camera group.
-    skip = set()
-    if workspace:
-        try:
-            wp = Path(workspace)
-            if wp.resolve().parent == root.resolve():
-                skip.add(wp.name)
-        except OSError:
-            pass
-    subdirs = sorted([x.name for x in root.iterdir()
-                      if x.is_dir() and not x.name.startswith(".") and x.name not in skip])
-
-    # Explicit single, or auto when the root itself holds images (subdirs are then
-    # likely junk such as the workspace) -> single flat folder.
-    if layout == "single" or (layout == "auto" and _has_images(root)):
-        return (folders if folders else [""]), False, "single"
-
-    chosen = folders or subdirs
-    if not chosen:
-        if _has_images(root):
-            return [""], False, "single"
-        raise FileNotFoundError(f"no images or subfolders found under: {img_root}")
-
-    if layout == "nested" or force_nested:
-        return chosen, True, "nested"
-    if layout == "multi":
-        return chosen, False, "multi"
-
-    # auto: nested if the first group has no direct images but does have subdirs
-    nested = False
-    for f in chosen:
-        g = root / f
-        if g.is_dir() and not _has_images(g) and any(c.is_dir() for c in g.iterdir()):
-            nested = True
-        break
-    return chosen, nested, ("nested" if nested else "multi")
-
-
-def _jpeg_gps_present(path: Path) -> bool:
-    """True iff the JPEG at `path` carries a non-empty EXIF GPS IFD (lat + lon).
-
-    Pure stdlib (the project ships no Pillow/piexif): walk JPEG segments to the Exif
-    APP1, parse the TIFF/IFD0 for the GPS IFD pointer (tag 0x8825), then confirm that
-    GPS IFD holds GPSLatitude (0x0002) and GPSLongitude (0x0004). Best-effort — any
-    parse hiccup or non-JPEG returns False."""
-    import struct
-    try:
-        with path.open("rb") as fh:
-            if fh.read(2) != b"\xff\xd8":                 # not a JPEG (no SOI)
-                return False
-            app1 = b""
-            while True:                                   # find the Exif APP1 segment
-                hdr = fh.read(2)
-                if len(hdr) < 2 or hdr[0] != 0xFF:
-                    return False
-                marker = hdr[1]
-                if marker == 0xD8 or 0xD0 <= marker <= 0xD7:
-                    continue                              # standalone markers, no length
-                if marker == 0xDA or marker == 0xD9:      # SOS / EOI: pixel data, give up
-                    return False
-                seg_len = int.from_bytes(fh.read(2), "big")
-                if seg_len < 2:
-                    return False
-                body = fh.read(seg_len - 2)
-                if marker == 0xE1 and body[:6] == b"Exif\x00\x00":
-                    app1 = body[6:]                       # the TIFF block
-                    break
-        if len(app1) < 8 or app1[:2] not in (b"II", b"MM"):
-            return False
-        bo = "<" if app1[:2] == b"II" else ">"
-        ifd0 = struct.unpack(bo + "I", app1[4:8])[0]
-
-        def tags(off: int) -> dict[int, int]:
-            n = struct.unpack(bo + "H", app1[off:off + 2])[0]
-            out: dict[int, int] = {}
-            for k in range(n):
-                e = off + 2 + k * 12
-                tag = struct.unpack(bo + "H", app1[e:e + 2])[0]
-                out[tag] = struct.unpack(bo + "I", app1[e + 8:e + 12])[0]
-            return out
-
-        gps_off = tags(ifd0).get(0x8825)
-        if not gps_off:
-            return False
-        g = tags(gps_off)
-        return 0x0002 in g and 0x0004 in g                # GPSLatitude + GPSLongitude
-    except Exception:                                     # noqa: BLE001 — detection is best-effort
-        return False
-
-
-def _read_app1_exif(path: Path) -> bytes | None:
-    """Return the raw Exif APP1 segment (FF E1 + length + body) from a JPEG, or None.
-    Walks the JPEG segments rather than scanning, so it grabs the real Exif block."""
-    try:
-        with path.open("rb") as fh:
-            if fh.read(2) != b"\xff\xd8":
-                return None
-            while True:
-                hdr = fh.read(2)
-                if len(hdr) < 2 or hdr[0] != 0xFF:
-                    return None
-                marker = hdr[1]
-                if marker == 0xD8 or 0xD0 <= marker <= 0xD7:
-                    continue
-                if marker == 0xDA or marker == 0xD9:      # SOS / EOI: header is over
-                    return None
-                ln = fh.read(2)
-                body = fh.read(int.from_bytes(ln, "big") - 2)
-                if marker == 0xE1 and body[:6] == b"Exif\x00\x00":
-                    return b"\xff\xe1" + ln + body
-    except Exception:                                     # noqa: BLE001
-        return None
-
-
-def _graft_app1(dst: Path, app1: bytes) -> bool:
-    """Splice an Exif APP1 segment in right after the SOI of the JPEG at `dst`.
-    ffmpeg's mjpeg output has no EXIF, so re-inserting the original's restores GPS
-    (and focal). The TIFF block is copied verbatim — its internal offsets stay valid.
-    Returns True on success."""
-    try:
-        data = dst.read_bytes()
-        if data[:2] != b"\xff\xd8" or not app1:
-            return False
-        dst.write_bytes(data[:2] + app1 + data[2:])
-        return True
-    except OSError:
-        return False
-
-
-def _gps_coverage(img_root: str, lines: list[str], r: Runner) -> tuple[int, int]:
-    """Return (n_with_gps, n_total) for the inputs. The GPS pipeline needs a prior on
-    EVERY image (a frame without one can't be spatially matched or anchored), so this
-    can't sample — it checks each image (in parallel, the set can be large). Only JPEGs
-    can carry EXIF GPS, so non-JPEG inputs count toward n_total but never toward
-    n_with_gps — any PNG/TIFF therefore makes coverage incomplete."""
-    n_total = len(lines)
-    cand = [ln for ln in lines if Path(ln).suffix.lower() in (".jpg", ".jpeg")]
-    if not cand:
-        return 0, n_total
-    n_gps = 0
-    with futures.ThreadPoolExecutor(max_workers=_resize_workers()) as ex:
-        pending = [ex.submit(_jpeg_gps_present, Path(img_root) / rel) for rel in cand]
-        for fut in futures.as_completed(pending):
-            if r.cancelled:
-                ex.shutdown(wait=False, cancel_futures=True)
-                raise Cancelled()
-            if fut.result():
-                n_gps += 1
-    return n_gps, n_total
 
 
 def run_colmap(p: dict, r: Runner) -> None:
@@ -391,7 +117,7 @@ def run_colmap(p: dict, r: Runner) -> None:
 
     if not Path(img_root).is_dir():
         raise FileNotFoundError(f"image_root not found: {img_root}")
-    folders, nested, layout_name = _resolve_layout(
+    folders, nested, layout_name = resolve_layout(
         img_root, folders, str(p.get("layout") or "auto"), bool(d["nested_layout"]),
         workspace=p.get("workspace"))
     shown = "<root>" if folders == [""] else " ".join(folders)
@@ -457,7 +183,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     # image_list.txt (paths relative to img_root)
     lines: list[str] = []
     for f in folders:
-        lines += _list_images(Path(img_root) / f, f)
+        lines += list_images(Path(img_root) / f, f)
     lst.write_text("\n".join(lines) + ("\n" if lines else ""))
     r.log(f"image_list: {len(lines)} images across {len(folders)} folder(s): {' '.join(folders)}")
     if not lines:
@@ -469,7 +195,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     # or anchored — so any GPS option needs FULL coverage, checked here before any work
     # runs. The FullHD resize still runs (so we keep the downscale); it just preserves
     # the EXIF GPS through the re-encode (see preserve_exif below).
-    n_gps, n_total = _gps_coverage(img_root, lines, r)
+    n_gps, n_total = gps_coverage(img_root, lines, r, resize_workers())
     gps_present = (n_total > 0 and n_gps == n_total)   # GPS flow valid only at 100%
     gps_opts = [name for name, on in (("MATCHER=spatial", matcher == "spatial"),
                                       ("MAPPER=pose_prior", mapper == "pose_prior"),
@@ -497,7 +223,7 @@ def run_colmap(p: dict, r: Runner) -> None:
         # the custom matcher's optional GPS-neighbour pairs (not a hard-fail option,
         # so it's not in gps_opts, but it still reads GPS off the resized images).
         preserve = bool(gps_opts) or (matcher == "custom" and cm_n_gps > 0)
-        img_root = _resize_to_fullhd(img_root, lines, ws, force, r, preserve_exif=preserve)
+        img_root = resize_to_fullhd(img_root, lines, ws, force, r, preserve_exif=preserve)
 
     # 1. feature_extractor
     if stage_on("extract"):
@@ -557,8 +283,8 @@ def run_colmap(p: dict, r: Runner) -> None:
                 # via matches_importer — far fewer pairs than exhaustive for large,
                 # ordered multi-camera captures. Names come from the same folder→sorted
                 # grouping used for extraction, so they match the DB exactly.
-                from . import large_scene
-                groups = [(f, _list_image_names(Path(img_root) / f)) for f in folders]
+                from .. import large_scene
+                groups = [(f, list_image_names(Path(img_root) / f)) for f in folders]
                 matching_txt = ws / "matching.txt"
                 r.banner(f"matches_importer (custom matcher: seq={cm_n_seq} quad={cm_n_quad} "
                          f"loop={cm_n_loop} gps={cm_n_gps}) -> {matching_txt}")
@@ -654,7 +380,7 @@ def run_colmap(p: dict, r: Runner) -> None:
         elif need(sentinel):
             if not (model0 / "cameras.bin").is_file():
                 raise RuntimeError("sparse model missing, cannot simplify")
-            from . import large_scene
+            from .. import large_scene
             # Back the full model up once, then always delete *from that backup* so the
             # stage is idempotent: image_deleter errors on already-missing ids, and a
             # second run must not re-measure outliers on an already-trimmed model.
@@ -728,7 +454,7 @@ def run_colmap(p: dict, r: Runner) -> None:
                 raise FileNotFoundError(f"masks_dir not found: {masks_dir}")
             mask_done = ws / ".masks.done"
             if need(mask_done):
-                from . import large_scene
+                from .. import large_scene
                 src0 = ws / "sparse" / "0"
                 mask_model = src0 / "masks"
                 mask_model.mkdir(parents=True, exist_ok=True)
@@ -767,7 +493,7 @@ def run_colmap(p: dict, r: Runner) -> None:
         elif need(sentinel):
             if not (dense_sparse / "cameras.bin").is_file():
                 raise RuntimeError("undistorted model missing, cannot reorient")
-            from . import large_scene
+            from .. import large_scene
             if not backup.exists():            # snapshot the un-reoriented model once
                 shutil.copytree(dense_sparse, backup)
             if gps_align and gps_present:

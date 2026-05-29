@@ -177,7 +177,7 @@ nested  ROOT/<group>/<vid>/*.jpg -> 先 stage 再每群 1 台相機(① 的輸�
 - **🧊 3D 結果**(COLMAP 後):拖曳旋轉 / 滾輪縮放 / 右鍵平移;**雙擊相機**看影像名、分數、縮圖;
   品質指標 `reproj err`、`track len`;可手動勾掉壞相機 → 寫出**非破壞性**的 `cleaned/<時間>/` 副本。
 - **🧊 Mesh 檢視器**:打光實體 mesh,切 **mm / recon**、**📏 量尺**點兩點量距離、亮度 / 白底 / 線框 / 頂點色。
-- **歷史**:狀態每 3 秒自動更新;勾選 → **🗑 刪除**(進行中的會先取消)。
+- **歷史**:狀態變動時以 SSE 即時刷新(閒置零事件,另有 30s 後備輪詢);可依**類型 / 狀態**篩選、**搜尋**標題或 id、分頁「載入更多」(篩選條件存 localStorage);勾選 → **🗑 刪除**(進行中的會先取消)。
 
 ---
 
@@ -252,7 +252,7 @@ jobs.py       JobManager:asyncio 佇列、N=MAX_JOBS workers、狀態存檔 + lo
 pipeline/     領域層（torch-free,shell out 到外部工具）
    config.py    Settings:所有設定的單一來源
    runner.py    子行程執行 + 取消        backends.py  後端登錄 + /doctor preflight
-   frames / colmap / train / gcs        model.py     解析 COLMAP 稀疏模型
+   frames / colmap/ / train / gcs       model.py     解析 COLMAP 稀疏模型(讀取快取)
 ```
 
 請求流程:`form ─POST /ui/*─► JobManager(asyncio 佇列)─► run_* 在 thread 內 shell out
@@ -264,28 +264,28 @@ pipeline/     領域層（torch-free,shell out 到外部工具）
 | path | 角色 |
 |------|------|
 | `app.py` | app factory:建 FastAPI、mount static、include routers、啟動 job manager |
-| `web/routers/` | APIRouter:`pages` · `browse` · `create`(建 job 表單)· `jobs`(查詢/取消/SSE log)· `viz`(3D/mesh 檢視 + 下載 + cull + 去背)· `doctor` |
+| `web/routers/` | APIRouter:`pages` · `browse` · `create`(建 job 表單)· `jobs`(查詢/取消/SSE log + 篩選分頁 joblist + 狀態變動 SSE)· `viz`(3D/mesh 檢視 + 下載 + cull + 去背)· `doctor` |
 | `web/services/` | `models.py`(job→路徑解析、去背模型衍生)· `forms.py`(表單→參數驗證) |
 | `web/shared.py` | Jinja templates、`_page` render helper、UI 表單常數 |
 | `jobs.py` | `JobManager`(佇列、N workers、cancel/delete)+ 各類 log 解析 + `MAX_JOBS` |
 | `pipeline/config.py` | `Settings`:所有設定的單一來源(pydantic-settings) |
 | `pipeline/runner.py` | log emitter + 子行程串流 + 取消(multi-child) |
 | `pipeline/frames.py` | `run_frames`:抽幀(NVDEC + CPU fallback)、去模糊、並行、flatten |
-| `pipeline/colmap.py` | `run_colmap`:layout 偵測、stages、sentinels、NESTED staging、並行 Lanczos FullHD resize |
+| `pipeline/colmap/` | COLMAP 子套件:`_run`(`run_colmap` orchestrator:stages、sentinels、NESTED staging)· `_layout`(版面偵測)· `_resize`(並行 Lanczos FullHD)· `_gps`(EXIF GPS 覆蓋 / 鄰近配對) |
 | `pipeline/train.py` | `run_train`(COLMAP→trainer scene + PINHOLE guard)、`run_mesh`(mesh + 選用 ChArUco mm 縮放) |
 | `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor` preflight |
 | `pipeline/gcs.py` | GCS 瀏覽(`gsutil ls`)+ 下載(`gsutil -m rsync -r`) |
-| `pipeline/model.py` | 解析 COLMAP 稀疏模型(poses/cameras/points/分數)+ PLY 匯出 |
+| `pipeline/model.py` | 解析 COLMAP 稀疏模型(poses/cameras/points/分數)+ PLY 匯出;讀取結果以 `(path, mtime)` 做 LRU 快取,檢視器重複請求(scene / 縮圖)只解析一次 |
 | `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器 + `doctor.html` |
 | `tools/` | trainer-env 腳本:`estimate_marker_scale.py`、`scale_mesh.py`、vendored `colmap_read_write_model.py` |
-| `tests/` · `pyproject.toml` · `.github/` | pipeline 純函式測試 · 工具設定(ruff/mypy/pytest)· CI |
+| `tests/` · `pyproject.toml` · `.github/` | 離線單元測試(log 解析器 · 模型二進位 I/O + 快取 · 表單驗證 · 路徑解析 / 防穿越 · layout 偵測 · runner 子行程 · frames · gcs)· 工具設定(ruff/mypy/pytest)· CI |
 | `backends.example.json` · `local.env.example` | per-machine 設定範本(實檔 gitignored) |
 
 ## 開發
 
 ```bash
 pip install -e ".[dev]"   # 面板 + ruff / mypy / pytest
-pytest                    # pipeline 純函式測試
+pytest                    # 離線單元測試(無需 colmap/ffmpeg/GPU/網路)
 ruff check .              # lint
 mypy pipeline/config.py   # 型別檢查（目前嚴格守住 config.py）
 ```
