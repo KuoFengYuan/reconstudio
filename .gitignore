@@ -12,6 +12,7 @@ __pycache__/
 *.py[cod]
 .venv/
 *.egg-info/
+build/
 
 # editor / OS
 .vscode/
