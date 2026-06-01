@@ -71,7 +71,7 @@ cmake -B build && cmake --build build -j"$(nproc)"   # binary 在 build/LichtFel
 
 ## 4. 選用元件
 
-- **☁️ 從 GCS 下載資料**:需 Google Cloud SDK + 登入 + 設定 project — 見下方 [☁️ GCS](#-從-gcs-下載資料選用)。
+- **☁️ GCS 上傳 / 下載**:需 Google Cloud SDK + 登入 + 設定 project — 見下方 [☁️ GCS](#-gcs-上傳--下載選用)。
 - **🧹 SuperSplat 去背編輯器**:`./tools/build_supersplat.sh`(需 node ≥18 + npm + git;產物在
   `static/supersplat/`,已 gitignore)。
 
@@ -97,7 +97,7 @@ cp backends.example.json backends.json  # 後端 env / repo / exec
 
 # 二、使用教學
 
-照 **①→②→③→④** 順序,每個階段完成後都有「接著跑下一步」的按鈕,會自動帶入路徑。
+照 **①→②→③→④** 順序,每個階段完成後都有「接著跑下一步」的按鈕,會自動帶入路徑。(左側設定面板可用左上角 **◀** 收合 / 展開,預設展開。)
 
 ## ① 抽幀(影片 → 清晰幀)
 
@@ -174,10 +174,11 @@ nested  ROOT/<group>/<vid>/*.jpg -> 先 stage 再每群 1 台相機(① 的輸�
 
 ## 檢視與歷史
 
-- **🧊 3D 結果**(COLMAP 後):拖曳旋轉 / 滾輪縮放 / 右鍵平移;**雙擊相機**看影像名、分數、縮圖;
-  品質指標 `reproj err`、`track len`;可手動勾掉壞相機 → 寫出**非破壞性**的 `cleaned/<時間>/` 副本。
+- **🧊 3D 結果**(COLMAP 後):**拖曳旋轉 · 滾輪縮放 · 右鍵平移 · WASD 飛行 · Q/E 上下 · R 重置**(飛行速度可調);**雙擊相機**看影像名、分數、縮圖;品質指標 `reproj err`、`track len`。面板以 **顯示 / 工具** 分區。
+  - **挑壞相機**:勾「🗑 挑選要移除的相機」→ 框/點選壞相機 → 寫出**非破壞性**的 `cleaned/<時間>/` 副本(可選同時清掉對應 3D 點)。
+  - **✂️ 刪點**:**框選或筆刷**標記要刪的點 —— 會先**標紅預覽**(不會直接消失),按 **🗑 刪除標選** 才真的刪;另有**復原全部**、**匯出清理後 .ply**。純前端、只刪點不動相機、非破壞性。
 - **🧊 Mesh 檢視器**:打光實體 mesh,切 **mm / recon**、**📏 量尺**點兩點量距離、亮度 / 白底 / 線框 / 頂點色。
-- **歷史**:狀態變動時以 SSE 即時刷新(閒置零事件,另有 30s 後備輪詢);可依**類型 / 狀態**篩選、**搜尋**標題或 id、分頁「載入更多」(篩選條件存 localStorage);勾選 → **🗑 刪除**(進行中的會先取消)。
+- **歷史**:狀態變動時即時刷新(每分頁一條 **WebSocket** 多工承載 joblist 刷新 + log,故不會耗盡瀏覽器每網域連線數;閒置零事件,另有 30s 後備輪詢);可依**類型 / 狀態**兩軸篩選(點了即時反應)、**搜尋**標題或 id、分頁「載入更多」(篩選條件存 localStorage);勾選 → **🗑 刪除**(進行中的會先取消)。
 
 ---
 
@@ -208,14 +209,20 @@ nested  ROOT/<group>/<vid>/*.jpg -> 先 stage 再每群 1 台相機(① 的輸�
 
 ---
 
-# ☁️ 從 GCS 下載資料(選用)
+# ☁️ GCS 上傳 / 下載(選用)
 
-面板內建 **☁️ GCS** 分頁,把 Google Cloud Storage 的資料同步到本機後再進流程。它**與重建流程解耦**
-—— 只把 bytes 從 `gs://` 搬到本機;下載完到任一分頁用「瀏覽」選那個資料夾即可,**不會自動帶你去下一步**。
+面板內建 **☁️ 資料** 分頁,在本機與 Google Cloud Storage 之間搬資料。它**與重建流程解耦**
+—— 只搬 bytes;搬完到任一分頁用「瀏覽」選那個資料夾即可,**不會自動帶你去下一步**。底層都走 `gsutil -m`(平行)。
 
-- **來源**:填 `gs://bucket/path`,或按 **☁️ 瀏覽** 點選 bucket / 資料夾。
+**從 GCS 下載到本機**
+- **來源**:填 `gs://bucket/path`,或按 **☁️ 瀏覽** 點選 bucket / 資料夾(可勾多個、一個任務一次下載)。
 - **下載到**:本機路徑;留空 = 自動放到 `RECON_STUDIO_DEST_ROOT` 底下的 `<bucket>/<路徑>`。
-- 底層 `gsutil -m rsync -r`:**可續傳、只補差異**。勾 **鏡像模式 `-d`** 會**刪除**本機多餘檔(有風險)。
+- 底層 `gsutil -m rsync -r`:**可續傳、只補差異**。
+
+**上傳到 GCS**
+- **來源**:按 **瀏覽** 從 server 上挑**檔案或資料夾**(可多選、可跨層累積;單一檔案如 `.ply` / `.sog` / `.jpg` 也行),或手動輸入路徑。
+- **目的地**:填 `gs://bucket/path`。
+- 單一資料夾用 `gsutil -m rsync -r`(只補差異);檔案 / 多選 / 混合用 `gsutil -m cp -r` 落到該 `gs://` 前綴下。
 
 **設定 GCS 帳號(一次性)** — 需本機裝好 Google Cloud SDK(提供 `gcloud` + `gsutil`)並登入:
 
@@ -256,8 +263,10 @@ pipeline/     領域層（torch-free,shell out 到外部工具）
 ```
 
 請求流程:`form ─POST /ui/*─► JobManager(asyncio 佇列)─► run_* 在 thread 內 shell out
-─► console.log ─SSE─► 瀏覽器`。Job 狀態存在 `RECON_STUDIO_DATA/jobs/<id>/`;取消會 `SIGTERM`
-整個子行程群組;COLMAP / resize 用 sentinel 做 idempotent(勾 `FORCE` 重跑)。
+─► console.log ─► 瀏覽器`。即時更新走**每分頁一條 WebSocket**(`/ws`):多工承載 joblist 刷新訊號 +
+被監看 job 的 log tail,取代舊的雙 SSE(避免多分頁/多 log 把瀏覽器每網域 ~6 連線上限耗盡而卡在
+「Loading…」)。Job 狀態存在 `RECON_STUDIO_DATA/jobs/<id>/`;取消會 `SIGTERM` 整個子行程群組;
+COLMAP / resize 用 sentinel 做 idempotent(勾 `FORCE` 重跑)。
 
 ## 主要檔案
 

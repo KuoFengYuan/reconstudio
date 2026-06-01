@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from jobs import COLMAP_STAGES, MAX_JOBS, manager
@@ -118,47 +118,71 @@ async def delete_jobs(request: Request):
     return {"results": {jid: await manager.delete(jid) for jid in ids}}
 
 
+# Replay only the last _LOG_TAIL_BYTES on connect, then tail live. A 4–5k-image
+# COLMAP log is many MB; dumping the whole thing froze the browser. _LOG_READ_CHUNK
+# caps how much we read per tick so a 20k-image run dumping megabytes between ticks
+# can't turn one read into a multi-MB blocking op — the backlog is drained over
+# successive reads instead (the `more` flag below skips the inter-tick sleep until
+# caught up). The read+decode itself runs in a worker thread (asyncio.to_thread)
+# so it never blocks the event loop / starves other requests.
+_LOG_TAIL_BYTES = 256 * 1024
+_LOG_READ_CHUNK = 512 * 1024
+
+
+def _tail_read(path, pos, tail_bytes, max_chunk):
+    """Blocking (call via asyncio.to_thread): read up to `max_chunk` new bytes.
+
+    Returns (text, new_pos, started_mid_file, more_pending). First call (pos is
+    None) starts from the last `tail_bytes` of the file."""
+    if not path.exists():
+        return "", pos, False, False
+    size = path.stat().st_size
+    started = False
+    if pos is None:
+        pos = max(0, size - tail_bytes)
+        started = pos > 0
+    if size <= pos:
+        return "", pos, started, False
+    with path.open("rb") as fh:
+        fh.seek(pos)
+        data = fh.read(max_chunk)
+        pos = fh.tell()
+    return data.decode("utf-8", "replace"), pos, started, size > pos
+
+
 @router.get("/api/jobs/{job_id}/logs")
 async def stream_logs(job_id: str):
-    """SSE: replay the whole console.log, then tail new lines until the job ends."""
+    """SSE: replay the recent tail of console.log, then tail new lines until the job ends."""
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
-
-    # Replay only the last TAIL_BYTES on connect, then tail live. A 4–5k-image
-    # COLMAP log is many MB; dumping the whole thing froze the browser. The recent
-    # tail is what matters live, and the full log stays on disk for forensics.
-    TAIL_BYTES = 256 * 1024
 
     async def gen():
         path = job.log_path
         pos = None            # byte offset we've streamed up to; None = not started
         trim_partial = False  # drop the half line at the tail's start
+        first = True
         while True:
-            if path.exists():
-                size = path.stat().st_size
-                if pos is None:
-                    pos = max(0, size - TAIL_BYTES)
-                    trim_partial = pos > 0
-                if size > pos:
-                    with path.open("rb") as fh:
-                        fh.seek(pos)
-                        data = fh.read()
-                        pos = fh.tell()
-                    text = data.decode("utf-8", "replace")
-                    if trim_partial:                 # we started mid-line: drop it
-                        nl = text.find("\n")
-                        text = text[nl + 1:] if nl >= 0 else ""
-                        trim_partial = False
-                    if text:
-                        # one SSE event per chunk (multi-line data) so the browser does
-                        # a single DOM write instead of trickling in line-by-line.
-                        payload = "".join(f"data: {ln}\n" for ln in text.splitlines())
-                        yield payload + "\n"
+            text, pos, started, more = await asyncio.to_thread(
+                _tail_read, path, pos, _LOG_TAIL_BYTES, _LOG_READ_CHUNK)
+            if first:
+                trim_partial = started
+                first = False
+            if text and trim_partial:            # started mid-line: drop the half line
+                nl = text.find("\n")
+                text = text[nl + 1:] if nl >= 0 else ""
+                trim_partial = False
+            if text:
+                # one SSE event per chunk (multi-line data) so the browser does
+                # a single DOM write instead of trickling in line-by-line.
+                payload = "".join(f"data: {ln}\n" for ln in text.splitlines())
+                yield payload + "\n"
+            if more:
+                continue                          # backlog remains — read again now, no wait
             cur = manager.get(job_id)
-            ended = cur and cur.status in ("done", "failed", "cancelled")
-            no_more = not (path.exists() and path.stat().st_size > (pos or 0))
-            if ended and no_more:
+            # End only once the job is finished AND this read drained the file (no
+            # text left), so a final burst is never cut off.
+            if cur and cur.status in ("done", "failed", "cancelled") and not text:
                 yield f"event: end\ndata: {cur.status}\n\n"
                 return
             await asyncio.sleep(0.4)
@@ -169,3 +193,79 @@ async def stream_logs(job_id: str):
         "X-Accel-Buffering": "no",
         "Connection": "keep-alive",
     })
+
+
+@router.websocket("/ws")
+async def ws_bus(websocket: WebSocket):
+    """One multiplexed channel per browser tab — supersedes the per-tab SSE pair
+    (/api/jobs/stream + /api/jobs/{id}/logs). Both the job-list 'refresh' signal
+    and the watched job's log lines ride this single WebSocket, so a tab holds ONE
+    connection no matter how many jobs/logs it shows. WebSockets aren't subject to
+    the browser's ~6-connection-per-host HTTP cap that the old SSE design
+    exhausted (which froze new tabs on a blank "Loading…").
+
+    Protocol — client → server: {"action":"watch_log","job_id":"…"} to tail a job's
+    log, {"action":"unwatch_log"} to stop. server → client: {"type":"jobs"} on any
+    job-state change; {"type":"log","job":id,"lines":[…]} for tailed output;
+    {"type":"log_end","job":id,"status":…} once the tailed job finishes."""
+    await websocket.accept()
+    # Per-connection log-tail cursor; `job` None = not tailing anything.
+    log = {"job": None, "pos": None, "first": True, "trim": False}
+
+    async def reader():
+        """client → server: (un)subscribe the connection to a job's log."""
+        while True:
+            try:
+                msg = await websocket.receive_json()
+            except ValueError:                       # malformed frame — ignore, keep socket
+                continue
+            action = (msg or {}).get("action")
+            if action == "watch_log":
+                log.update(job=(msg.get("job_id") or "").strip() or None,
+                           pos=None, first=True, trim=False)
+            elif action == "unwatch_log":
+                log["job"] = None
+
+    async def pusher():
+        """server → client: job-state refresh + the watched job's log tail."""
+        last_sig = None
+        while True:
+            sig = tuple(sorted((j.id, j.status, j.current_stage)
+                               for j in manager.jobs.values()))
+            if sig != last_sig:
+                last_sig = sig
+                await websocket.send_json({"type": "jobs"})
+            jid = log["job"]
+            if jid:
+                job = manager.get(jid)
+                if not job:
+                    log["job"] = None
+                else:
+                    text, log["pos"], started, more = await asyncio.to_thread(
+                        _tail_read, job.log_path, log["pos"], _LOG_TAIL_BYTES, _LOG_READ_CHUNK)
+                    if log["first"]:
+                        log["trim"] = started
+                        log["first"] = False
+                    if text and log["trim"]:            # started mid-line: drop the half line
+                        nl = text.find("\n")
+                        text = text[nl + 1:] if nl >= 0 else ""
+                        log["trim"] = False
+                    if text:
+                        await websocket.send_json(
+                            {"type": "log", "job": jid, "lines": text.splitlines()})
+                    if more:
+                        continue                        # backlog remains — read again, no wait
+                    cur = manager.get(jid)
+                    if cur and cur.status in ("done", "failed", "cancelled") and not text:
+                        await websocket.send_json(
+                            {"type": "log_end", "job": jid, "status": cur.status})
+                        log["job"] = None               # stop tailing the finished job
+            await asyncio.sleep(0.4)
+
+    tasks = [asyncio.create_task(reader()), asyncio.create_task(pusher())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

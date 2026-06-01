@@ -7,6 +7,7 @@ images.bin is parsed directly but the per-image 2D observations are skipped
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 import subprocess
 from functools import lru_cache
@@ -176,6 +177,46 @@ def cull_cameras(src_model: Path, out_model: Path, names: list[str],
                         "--min_track_len", "2", "--max_reproj_error", "4",
                         "--min_tri_angle", "1.5"],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _f32(v: float) -> float:
+    """Round a float64 to its float32 value — the exact value COLMAP's model_converter
+    wrote into the viewer's .ply (so positions sent back from the viewer match)."""
+    return struct.unpack("<f", struct.pack("<f", float(v)))[0]
+
+
+def cull_points(src_model: Path, out_model: Path, del_keys: set) -> int:
+    """Write a copy of `src_model` to `out_model` with selected 3D points removed,
+    producing a valid COLMAP model (cameras/images copied unchanged, points3D rewritten
+    without the deleted points). The input is never modified. `del_keys` is a set of
+    (f32x, f32y, f32z) keys — points whose float32 xyz matches are dropped (the viewer
+    sends the float32 positions it loaded from the .ply). Returns #points removed.
+
+    points3D.bin record: id(u64) xyz(3·f64) rgb(3·u8) error(f64) track_len(u64) then
+    track_len·(image_id u32, point2D_idx u32). cameras.bin / images.bin (poses) are
+    copied verbatim; image↔point observations are left intact (trainers read points3D
+    for the init cloud)."""
+    src, out = Path(src_model), Path(out_model)
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / "cameras.bin", out / "cameras.bin")
+    shutil.copy2(src / "images.bin", out / "images.bin")
+    removed = 0
+    kept: list[bytes] = []
+    with open(src / "points3D.bin", "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(n):
+            head = f.read(51)                       # id(8)+xyz(24)+rgb(3)+error(8)+track_len(8)
+            x, y, z = struct.unpack("<3d", head[8:32])
+            track = f.read(struct.unpack("<Q", head[43:51])[0] * 8)
+            if (_f32(x), _f32(y), _f32(z)) in del_keys:
+                removed += 1
+            else:
+                kept.append(head + track)
+    with open(out / "points3D.bin", "wb") as f:
+        f.write(struct.pack("<Q", len(kept)))
+        for rec in kept:
+            f.write(rec)
+    return removed
 
 
 def scene(model_dir: Path) -> dict:

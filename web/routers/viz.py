@@ -18,6 +18,7 @@ from pipeline import get_backend
 from pipeline.model import (
     count_points,
     cull_cameras,
+    cull_points,
     ensure_ply,
     image_detail,
     read_images,
@@ -276,6 +277,75 @@ async def cull_ep(job_id: str, request: Request):
                              "removed": len(names), "removed_total": len(removed_total),
                              "kept": info["kept"], "points_before": pts_before,
                              "points_after": info["points"]})
+    finally:
+        with _CULL_LOCK:
+            _CULL.pop(job_id, None)
+
+
+@router.post("/api/jobs/{job_id}/cull_points")
+async def cull_points_ep(job_id: str, request: Request):
+    """Non-destructive POINT cull — the box/brush-selected 3D points are written out as
+    a cleaned model (sparse/0 for the viewer + dataset/sparse for training, images/poses
+    untouched), exactly like the camera cull produces a new training dataset (NOT a splat).
+    Selection arrives as the float32 positions the viewer loaded from the .ply, matched
+    against points3D by their float32 xyz."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    md = model_dir(job)
+    if not md:
+        raise HTTPException(404, "no sparse model for this job")
+    body = await request.json()
+    positions = body.get("positions") or []
+    if not positions:
+        raise HTTPException(400, "沒有要刪除的點（positions 為空）。")
+    from_ = (body.get("from") or "").strip()
+    src_model = (resolve_model(job, from_) if from_ else None) or md
+    dense = dense_dir(job)
+    src_dataset = dense / "sparse" if dense else None
+    if src_model != md:                                # culling a previous cleaned variant
+        cand = src_model.parent.parent / "dataset" / "sparse"
+        if (cand / "cameras.bin").is_file():
+            src_dataset = cand
+
+    ws = Path(job.meta["workspace"])
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    clean_root = ws / "cleaned" / ts
+    img_target = (dense / "images") if dense else None
+
+    def _build() -> dict:
+        from pipeline.model import _f32
+        del_keys = {(_f32(p[0]), _f32(p[1]), _f32(p[2])) for p in positions if len(p) >= 3}
+        s0 = clean_root / "sparse" / "0"
+        _cull_set_phase(job_id, "剪 sparse 模型（刪點）")
+        removed = cull_points(src_model, s0, del_keys)
+        _cull_set_phase(job_id, "讀統計（保留點數）")
+        kept = count_points(s0 / "points3D.bin")
+        dataset = None
+        if src_dataset is not None and (src_dataset / "points3D.bin").is_file():
+            _cull_set_phase(job_id, "剪 dataset 模型（刪點，給訓練用）")
+            ds = clean_root / "dataset"
+            cull_points(src_dataset, ds / "sparse", del_keys)
+            link = ds / "images"
+            if img_target and not os.path.lexists(link):
+                link.symlink_to(os.path.relpath(img_target, ds))
+            dataset = str(ds)
+        return {"removed": removed, "kept": kept, "dataset": dataset}
+
+    _cull_set_phase(job_id, "計算原始點數")
+    try:
+        pts_before = await asyncio.to_thread(count_points, src_model / "points3D.bin")
+        info = await asyncio.to_thread(_build)
+        _cull_set_phase(job_id, "寫 audit")
+        audit = {"removed_points": info["removed"], "from": from_ or None,
+                 "points_before": pts_before, "points_after": info["kept"],
+                 "source_job": job_id, "source_model": str(src_model), "created": ts}
+        (clean_root / "removed.json").write_text(json.dumps(audit, ensure_ascii=False, indent=2))
+        rel = clean_root.relative_to(ws).as_posix()
+        return JSONResponse({"ok": True, "cleaned_dir": str(clean_root),
+                             "dataset_dir": info["dataset"], "viz_model": f"{rel}/sparse/0",
+                             "removed": info["removed"], "points_before": pts_before,
+                             "points_after": info["kept"]})
     finally:
         with _CULL_LOCK:
             _CULL.pop(job_id, None)
