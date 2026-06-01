@@ -53,6 +53,51 @@ async def create_gcs_sync(request: Request):
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
 
+@router.post("/ui/gcs_upload", response_class=HTMLResponse)
+async def create_gcs_upload(request: Request):
+    """Upload local files / folders to a gs:// path. Sources come from `srcs`
+    (newline-joined, from the multi-select picker) and/or a single `src` text
+    field. A lone directory uploads via `gsutil -m rsync -r`; any other mix
+    (files, multiple items) uploads via `gsutil -m cp -r` (see run_gcs_upload)."""
+    raw = await request.form()
+    srcs = [s.strip() for s in (raw.get("srcs") or "").splitlines() if s.strip()]
+    one = (raw.get("src") or "").strip()
+    if one:
+        srcs.append(one)
+    seen: set[str] = set()
+    srcs = [s for s in srcs if not (s in seen or seen.add(s))]   # dedupe, keep order
+    dest = (raw.get("dest") or "").strip()
+    try:
+        if not dest.startswith("gs://"):
+            raise ValueError("目的地必須是 gs:// 路徑")
+        if not srcs:
+            raise ValueError("請選擇至少一個來源(檔案或資料夾)")
+        resolved: list[str] = []
+        for s in srcs:
+            sp = Path(s).expanduser()
+            if not sp.is_absolute():
+                raise ValueError(f"來源需為絕對路徑:{s}")
+            sp = sp.resolve()
+            if not sp.exists():
+                raise ValueError(f"來源不存在:{sp}")
+            if sp != BROWSE_ROOT and BROWSE_ROOT not in sp.parents:
+                raise ValueError(f"來源需在 {BROWSE_ROOT} 底下:{sp}")
+            resolved.append(str(sp))
+        params = {"direction": "upload", "srcs": resolved, "dest": dest,
+                  "gsutil_bin": GSUTIL_BIN}
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    n = len(resolved)
+    label = Path(resolved[0]).name + (f" +{n - 1}" if n > 1 else "")
+    job = Job(id=new_id(), kind="gcs",
+              title=f"{label} ⬆",
+              subtitle=(f"{n} 個來源  →  {dest}" if n > 1 else f"{resolved[0]}  →  {dest}"),
+              params=params, meta={"srcs": resolved, "dest": dest, "count": n})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
 @router.post("/ui/gcs_sync_multi", response_class=HTMLResponse)
 async def create_gcs_sync_multi(request: Request):
     """Multi-select download: ONE job pulls all checked gs:// folders in a single

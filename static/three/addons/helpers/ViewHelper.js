@@ -139,12 +139,13 @@ class ViewHelper extends Object3D {
 
 			//
 
-			const x = domElement.offsetWidth - dim;
+			const x = 0;                                   // top-left corner (was bottom-right)
+			const y = domElement.offsetHeight - dim;
 
 			renderer.clearDepth();
 
 			renderer.getViewport( viewport );
-			renderer.setViewport( x, 0, dim, dim );
+			renderer.setViewport( x, y, dim, dim );
 
 			renderer.render( this, orthoCamera );
 
@@ -165,10 +166,10 @@ class ViewHelper extends Object3D {
 			if ( this.animating === true ) return false;
 
 			const rect = domElement.getBoundingClientRect();
-			const offsetX = rect.left + ( domElement.offsetWidth - dim );
-			const offsetY = rect.top + ( domElement.offsetHeight - dim );
-			mouse.x = ( ( event.clientX - offsetX ) / ( rect.right - offsetX ) ) * 2 - 1;
-			mouse.y = - ( ( event.clientY - offsetY ) / ( rect.bottom - offsetY ) ) * 2 + 1;
+			const offsetX = rect.left;                     // top-left corner (was bottom-right)
+			const offsetY = rect.top;
+			mouse.x = ( ( event.clientX - offsetX ) / dim ) * 2 - 1;
+			mouse.y = - ( ( event.clientY - offsetY ) / dim ) * 2 + 1;
 
 			raycaster.setFromCamera( mouse, orthoCamera );
 

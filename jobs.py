@@ -24,6 +24,7 @@ from pipeline import (
     run_colmap,
     run_frames,
     run_gcs_sync,
+    run_gcs_upload,
     run_mesh,
     run_train,
 )
@@ -36,12 +37,19 @@ JOBS_DIR = settings.jobs_dir
 # How many jobs may run concurrently. Tune per machine via COLMAP_PANEL_MAX_JOBS.
 MAX_JOBS = settings.max_jobs
 
+def _run_gcs(params: dict, runner: Runner) -> None:
+    """A 'gcs' job downloads by default, or uploads when direction == 'upload'."""
+    if params.get("direction") == "upload":
+        return run_gcs_upload(params, runner)
+    return run_gcs_sync(params, runner)
+
+
 RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "frames": run_frames,
     "colmap": run_colmap,
     "train": run_train,
     "mesh": run_mesh,
-    "gcs": run_gcs_sync,
+    "gcs": _run_gcs,
 }
 
 # --- COLMAP stage parsing --------------------------------------------------- #

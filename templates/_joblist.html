@@ -11,19 +11,21 @@
 {% else %}
 {% set kinds = [('frames','🎬','抽幀'),('colmap','📐','COLMAP'),('train','🧠','訓練'),('mesh','🧩','Mesh')] %}
 {% set kinds_map = {} %}{% for k, emo, _ in kinds %}{% do kinds_map.update({k: emo}) %}{% endfor %}
-<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
-  <button class="ghost jf{% if sel_kind == 'all' %} active{% endif %}" onclick="setJobFilter('kind','all')">全部 ({{ all_total }})</button>
+<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">
+  <span class="hint" style="min-width:2.6em;text-align:right">類型</span>
+  <button class="ghost jf{% if sel_kind == 'all' %} active{% endif %}" data-axis="kind" data-val="all" onclick="setJobFilter('kind','all')">全部 ({{ all_total }})</button>
   {% for k, emo, lab in kinds %}
     {% set n = kind_counts.get(k, 0) %}
-    {% if n %}<button class="ghost jf{% if sel_kind == k %} active{% endif %}" onclick="setJobFilter('kind','{{ k }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
+    {% if n %}<button class="ghost jf{% if sel_kind == k %} active{% endif %}" data-axis="kind" data-val="{{ k }}" onclick="setJobFilter('kind','{{ k }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
   {% endfor %}
 </div>
 {% set statuses = [('done','✅','成功'),('failed','❌','失敗'),('cancelled','⏸','取消'),('running','▶','執行中'),('queued','⏳','排隊')] %}
-<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
-  <button class="ghost jfs{% if sel_status == 'all' %} active{% endif %}" onclick="setJobFilter('status','all')">全部 ({{ all_total }})</button>
+<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
+  <span class="hint" style="min-width:2.6em;text-align:right">狀態</span>
+  <button class="ghost jfs{% if sel_status == 'all' %} active{% endif %}" data-axis="status" data-val="all" onclick="setJobFilter('status','all')">全部 ({{ all_total }})</button>
   {% for s, emo, lab in statuses %}
     {% set n = status_counts.get(s, 0) %}
-    {% if n %}<button class="ghost jfs{% if sel_status == s %} active{% endif %}" onclick="setJobFilter('status','{{ s }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
+    {% if n %}<button class="ghost jfs{% if sel_status == s %} active{% endif %}" data-axis="status" data-val="{{ s }}" onclick="setJobFilter('status','{{ s }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
   {% endfor %}
 </div>
 {% if not jobs %}

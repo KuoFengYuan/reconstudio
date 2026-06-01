@@ -310,3 +310,35 @@ def run_gcs_sync(params: dict, runner: Runner) -> None:
     runner.log("")
     runner.run(argv)                 # streams gsutil progress into the job log
     runner.log(f"\n[gcs] 完成 → {dest}")
+
+
+def run_gcs_upload(params: dict, runner: Runner) -> None:
+    """Upload local files / folders to a gs:// path (parallel, `-m`).
+
+    The reverse of run_gcs_sync. A single directory uses `rsync -r` (resumable,
+    only-diffs). Anything else — one or more files, multiple items, or a mix —
+    uses `cp -r` into the destination prefix (rsync only syncs dir↔dir)."""
+    srcs = list(params.get("srcs") or ([params["src"]] if params.get("src") else []))
+    srcs = [s.rstrip("/") for s in (str(s).strip() for s in srcs) if s]
+    dest = (params.get("dest") or "").strip()
+    g = _gsutil(params.get("gsutil_bin"))
+
+    if not dest.startswith("gs://"):
+        raise ValueError(f"目的地必須是 gs:// 路徑:{dest!r}")
+    if not srcs:
+        raise ValueError("沒有要上傳的來源(檔案或資料夾)")
+    for s in srcs:
+        if not Path(s).exists():
+            raise ValueError(f"來源不存在:{s}")
+    if shutil.which(g) is None:
+        raise RuntimeError(f"找不到 {g};請確認 Google Cloud SDK 已安裝且在 PATH。")
+
+    runner.banner(f"GCS upload  {len(srcs)} 個來源  →  {dest}")
+    if len(srcs) == 1 and Path(srcs[0]).is_dir():
+        argv = [g, "-m", "rsync", "-r", srcs[0], dest.rstrip("/")]          # sync dir contents in
+    else:
+        argv = [g, "-m", "cp", "-r", *srcs, dest.rstrip("/") + "/"]          # each item under dest/
+    runner.log("$ " + " ".join(argv))
+    runner.log("")
+    runner.run(argv)                 # streams gsutil progress into the job log
+    runner.log(f"\n[gcs] 完成 → {dest}")

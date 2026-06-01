@@ -23,17 +23,31 @@ def _safe_dir(path: str, base: Path | None = None) -> Path:
     return p
 
 
+_MAX_FILES = 1000   # cap files listed per dir in multi-select mode (huge image dirs)
+
+
 @router.get("/ui/browse", response_class=HTMLResponse)
 async def browse(request: Request, path: str = "", target: str = "image_root",
-                 root: str = "input"):
+                 root: str = "input", pick: str = "dir"):
+    """Local picker. pick='dir' (default) lists folders only and picks one folder.
+    pick='multi' also lists files and renders checkboxes so the caller can select
+    any mix of files + folders (used by the GCS upload source)."""
     base = DEST_ROOT if root == "dest" else BROWSE_ROOT
     p = _safe_dir(path, base)
     dirs = sorted((d.name for d in p.iterdir()
                    if d.is_dir() and not d.name.startswith(".")), key=str.lower)
+    files: list[str] = []
+    truncated = False
+    if pick == "multi":
+        allf = sorted((f.name for f in p.iterdir()
+                       if f.is_file() and not f.name.startswith(".")), key=str.lower)
+        files = allf[:_MAX_FILES]
+        truncated = len(allf) > _MAX_FILES
     nvideos = sum(1 for f in p.iterdir() if f.suffix.lower() in VIDEO_EXTS)
     return _page(request, "_browse.html", path=str(p),
                  parent=(str(p.parent) if p != base else None),
-                 dirs=dirs, target=target, nvideos=nvideos, root=root)
+                 dirs=dirs, files=files, truncated=truncated, pick=pick,
+                 target=target, nvideos=nvideos, root=root)
 
 
 @router.get("/ui/gcs_browse", response_class=HTMLResponse)

@@ -1,3 +1,34 @@
+{% if pick == 'multi' %}
+<div>
+  <div style="margin-bottom:8px">
+    <code style="color:var(--mut);word-break:break-all">{{ path }}</code>
+    <div class="hint">勾選要上傳的<b>檔案或資料夾</b>(可跨層累積),再按下方「套用所選」。點資料夾名稱進入下一層。</div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:3px">
+    {% if parent %}
+    <button class="ghost" style="text-align:left"
+            hx-get="/ui/browse?path={{ parent|urlencode }}&target={{ target }}&root={{ root }}&pick=multi"
+            hx-target="#picker-body" hx-swap="innerHTML">⬆ ..</button>
+    {% endif %}
+    {% for d in dirs %}
+    <div style="display:flex;gap:7px;align-items:center">
+      <input type="checkbox" class="local-pick" data-path="{{ path }}/{{ d }}" onclick="localToggle(this)" style="width:auto">
+      <button class="ghost" style="text-align:left;flex:1"
+              hx-get="/ui/browse?path={{ (path ~ '/' ~ d)|urlencode }}&target={{ target }}&root={{ root }}&pick=multi"
+              hx-target="#picker-body" hx-swap="innerHTML">📁 {{ d }}</button>
+    </div>
+    {% endfor %}
+    {% for f in files %}
+    <label style="display:flex;gap:7px;align-items:center;padding:3px 2px;cursor:pointer">
+      <input type="checkbox" class="local-pick" data-path="{{ path }}/{{ f }}" onclick="localToggle(this)" style="width:auto">
+      <span style="word-break:break-all">📄 {{ f }}</span>
+    </label>
+    {% endfor %}
+    {% if truncated %}<span class="hint">檔案過多,只顯示前 {{ files|length }} 個(其餘請改選整個資料夾)。</span>{% endif %}
+    {% if not dirs and not files %}<span class="hint">（此層是空的）</span>{% endif %}
+  </div>
+</div>
+{% else %}
 <div>
   <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
     <code style="flex:1;color:var(--mut);word-break:break-all">{{ path }}{% if nvideos %} <span style="color:var(--accent)">· {{ nvideos }} 支影片</span>{% endif %}</code>
@@ -18,3 +49,4 @@
     {% endfor %}
   </div>
 </div>
+{% endif %}

@@ -24,8 +24,14 @@
   header h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:.02em; }
   header .sub { color:var(--mut); font-size:12px; }
   .wrap { display:grid; grid-template-columns:404px 1fr; height:calc(100vh - 47px); }
+  /* left panel hidden → collapse to a SINGLE column so the right (output) column
+     fills the width. NB: must be 1fr, not "0 1fr" — with .col.left display:none the
+     right column would otherwise flow into the empty 0-width first track. */
+  .wrap.nleft { grid-template-columns:1fr; }
+  .wrap.nleft .col.left { display:none; }
   .col { overflow:auto; padding:16px 16px 28px; }
   .col.left { border-right:1px solid var(--line); background:#101319; }
+  #toggle-left { padding:3px 10px; font-size:15px; line-height:1; cursor:pointer; }
   /* fixed (always-visible) section */
   fieldset { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 12px;
              padding:12px 13px; background:var(--panel); }
@@ -99,6 +105,7 @@
 </head>
 <body>
 <header>
+  <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示左側設定面板">◀</button>
   <h1>Recon Studio</h1>
   <span class="sub">影片 → 清晰幀 → COLMAP → 訓練 → Mesh</span>
 </header>
@@ -107,8 +114,8 @@
   <!-- ============================= left: forms ============================= -->
   <div class="col left">
     <div class="tabs">
-      <button class="ghost" id="t-gcs" onclick="showForm('gcs')">☁️ GCS</button>
-      <button class="ghost active" id="t-frames" onclick="showForm('frames')">抽幀</button>
+      <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
+      <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
       <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
       <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
       <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
@@ -573,12 +580,26 @@
           <button type="button" class="ghost" onclick="openPicker('gcs_dest','dest')">瀏覽</button>
         </div>
         <div class="hint">可手動輸入或用「瀏覽」挑 server 上任一資料夾。提醒:放在 <code>{{ browse_root }}</code> 以外的話,之後 COLMAP/訓練 分頁的「瀏覽」看不到它（需手動輸入路徑）。</div>
-        <label style="margin-top:10px;display:flex;align-items:center;gap:6px;font-weight:normal">
-          <input type="checkbox" name="delete" style="width:auto"> 鏡像模式 <code>-d</code>（刪除本機多餘檔案,使本機與雲端完全一致）
-        </label>
-        <div class="hint">⚠ 鏡像模式會<b>刪除</b>目的資料夾中雲端沒有的檔案,請確認 dest 指向專屬下載目錄。</div>
       </fieldset>
       <button class="submit" type="submit">⬇ 下載</button>
+    </form>
+
+    <!-- ----- 上傳到 GCS (local → gs://, gsutil -m rsync) ----- -->
+    <form id="form-gcsup" style="display:none" hx-post="/ui/gcs_upload" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>上傳到 GCS</legend>
+        <div class="hint">把本機<b>檔案 / 資料夾</b>推上 gs://(<code>gsutil -m</code> 平行;單一資料夾 rsync 只補差異,檔案/多選用 cp)。</div>
+        <label>來源(可多選:檔案或資料夾)</label>
+        <div class="row">
+          <input name="src" id="gcsup_src" placeholder="手動輸入單一路徑,或按「瀏覽」勾選多個">
+          <button type="button" class="ghost" onclick="openLocalPicker()">瀏覽</button>
+        </div>
+        <input type="hidden" name="srcs" id="gcsup_srcs">
+        <div id="gcsup-items" class="chips" style="margin-top:6px"></div>
+        <label>目的地(GCS)</label>
+        <input name="dest" id="gcsup_dest" placeholder="gs://bucket/path/to/dataset" required>
+      </fieldset>
+      <button class="submit" type="submit">⬆ 上傳到 GCS</button>
     </form>
   </div>
 
@@ -617,10 +638,32 @@
       <button class="ghost" type="button" onclick="clearGcsSel()">清除</button>
       <button class="submit" type="button" style="width:auto;padding:6px 14px" onclick="gcsDownloadSelected()">⬇ 下載勾選</button>
     </div>
+    <!-- local multi-select tray: tick files/folders across levels for GCS upload -->
+    <div id="local-tray" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--line);align-items:center;gap:8px">
+      <span class="hint" style="flex:1">已選 <b id="local-count">0</b> 個(檔案 / 資料夾)</span>
+      <button class="ghost" type="button" onclick="clearLocalSel()">清除</button>
+      <button class="submit" type="button" style="width:auto;padding:6px 14px" onclick="applyLocalSelected()">✔ 套用所選</button>
+    </div>
   </div>
 </div>
 
 <script>
+  // Collapsible left config panel (default open). State persists in localStorage
+  // so a reload keeps the user's choice; the ◀/☰ header button toggles it.
+  function applyLeftPanel(){
+    var collapsed = localStorage.getItem('rs_left_collapsed') === '1';
+    var wrap = document.querySelector('.wrap');
+    if (wrap) wrap.classList.toggle('nleft', collapsed);
+    var btn = document.getElementById('toggle-left');
+    if (btn) { btn.textContent = collapsed ? '☰' : '◀'; btn.title = (collapsed ? '顯示' : '隱藏') + '左側設定面板'; }
+  }
+  function toggleLeftPanel(){
+    var collapsed = localStorage.getItem('rs_left_collapsed') !== '1';   // flip
+    localStorage.setItem('rs_left_collapsed', collapsed ? '1' : '0');
+    applyLeftPanel();
+  }
+  applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
+
   function showForm(which){
     ['frames','colmap','train','mesh','gcs'].forEach(function(k){
       var f = document.getElementById('form-' + k);
@@ -628,8 +671,12 @@
       var t = document.getElementById('t-' + k);
       if (t) t.classList.toggle('active', k===which);
     });
+    var gu = document.getElementById('form-gcsup');     // 上傳到 GCS form (sibling of #form-gcs)
+    if (gu) gu.style.display = (which==='gcs') ? '' : 'none';
     if (which==='train' || which==='mesh') syncBackendParams(which);
   }
+  showForm('gcs');   // default landing = the 資料 tab (free navigation, no fixed order)
+
   // Show the selected backend's param block within a form; disable inputs in the
   // hidden blocks so only the chosen backend's fields are submitted (no key clash).
   function syncBackendParams(form){
@@ -778,14 +825,69 @@
     document.getElementById('blur-thr').style.display = v==='threshold'  ? '' : 'none';
   }
   function openPicker(target, root){
-    var tray = document.getElementById('gcs-tray');   // local picker: no multi-select
-    if (tray) tray.style.display = 'none';
+    window._pickerMode = 'dir';                        // single-folder mode (no multi-select)
+    var t1 = document.getElementById('gcs-tray'); if (t1) t1.style.display = 'none';
+    var t2 = document.getElementById('local-tray'); if (t2) t2.style.display = 'none';
     document.getElementById('picker').classList.add('open');
     // Paint a placeholder synchronously so the modal isn't briefly empty between
     // .open and the htmx swap (server is <30ms locally; perceived gap was just paint).
     document.getElementById('picker-body').innerHTML = '<p class="hint">載入中…</p>';
     htmx.ajax('GET', '/ui/browse?target=' + target + (root ? '&root=' + root : ''),
               {target:'#picker-body', swap:'innerHTML'});
+  }
+  // Local MULTI-select picker (files + folders) for the GCS-upload source. Mirrors
+  // the GCS cloud cart: selection lives in localSel so it survives folder nav, and
+  // localApplyChecks() re-ticks boxes after each list re-render.
+  window.localSel = new Set();
+  function openLocalPicker(){
+    window._pickerMode = 'local';
+    var t1 = document.getElementById('gcs-tray'); if (t1) t1.style.display = 'none';
+    // seed the cart from whatever's already chosen so 瀏覽 can ADD across sessions
+    localSel = new Set((document.getElementById('gcsup_srcs').value || '').split('\n').filter(Boolean));
+    localUpdateTray();
+    document.getElementById('picker').classList.add('open');
+    document.getElementById('picker-body').innerHTML = '<p class="hint">載入中…</p>';
+    htmx.ajax('GET', '/ui/browse?target=gcsup_src&pick=multi', {target:'#picker-body', swap:'innerHTML'});
+  }
+  function localToggle(cb){
+    if (cb.checked) localSel.add(cb.dataset.path); else localSel.delete(cb.dataset.path);
+    localUpdateTray();
+  }
+  function localUpdateTray(){
+    var tray = document.getElementById('local-tray'), c = document.getElementById('local-count');
+    if (c) c.textContent = localSel.size;
+    if (tray) tray.style.display = (window._pickerMode === 'local') ? 'flex' : 'none';
+  }
+  function localApplyChecks(){
+    document.querySelectorAll('#picker-body .local-pick').forEach(function(cb){
+      cb.checked = localSel.has(cb.dataset.path); });
+  }
+  function clearLocalSel(){
+    localSel.clear();
+    document.querySelectorAll('#picker-body .local-pick').forEach(function(cb){ cb.checked = false; });
+    localUpdateTray();
+  }
+  function applyLocalSelected(){
+    setGcsupSrcs(Array.from(localSel));
+    window._pickerMode = null;
+    var t = document.getElementById('local-tray'); if (t) t.style.display = 'none';
+    document.getElementById('picker').classList.remove('open');
+  }
+  function setGcsupSrcs(list){
+    var hidden = document.getElementById('gcsup_srcs'); if (hidden) hidden.value = list.join('\n');
+    renderGcsupItems(list);
+  }
+  function renderGcsupItems(list){
+    var box = document.getElementById('gcsup-items'); if (!box) return;
+    box.innerHTML = '';
+    list.forEach(function(p){
+      var chip = document.createElement('span'); chip.className = 'dl'; chip.title = p;
+      chip.textContent = (p.replace(/\/+$/, '').split('/').pop() || p) + ' ';
+      var x = document.createElement('button'); x.type = 'button'; x.className = 'ghost';
+      x.style.cssText = 'padding:0 7px;margin-left:2px'; x.textContent = '×';
+      x.onclick = function(){ localSel.delete(p); setGcsupSrcs(Array.from(localSel)); };
+      chip.appendChild(x); box.appendChild(chip);
+    });
   }
   // Apply a local-picker selection. For the GCS dest, append the gs:// source's
   // leaf to the chosen folder (pick /data/foo -> /data/foo/<dataset>).
@@ -816,6 +918,8 @@
     window.GCS_ROOT = gf ? (gf.dataset.gcsRoot || '') : '';
   })();
   function openGcsPicker(){
+    window._pickerMode = 'gcs';
+    var lt = document.getElementById('local-tray'); if (lt) lt.style.display = 'none';
     gcsSel.clear(); gcsUpdateTray();   // fresh selection each time the cloud picker opens
     document.getElementById('picker').classList.add('open');
     document.getElementById('picker-body').innerHTML = '<p class="hint">載入中… (GCS 第一次可能要幾秒)</p>';
@@ -853,7 +957,9 @@
   }
   // re-apply tick state each time the cloud picker list re-renders
   document.body.addEventListener('htmx:afterSwap', function(e){
-    if (e.target && e.target.id === 'picker-body') gcsApplyChecks();
+    if (e.target && e.target.id === 'picker-body') {
+      if (window._pickerMode === 'local') localApplyChecks(); else gcsApplyChecks();
+    }
   });
   function gcsDownloadSelected(){
     if (!gcsSel.size) return;
@@ -904,7 +1010,7 @@
   }
   // embed the 3D viewer inline (its own importmap needs an isolated document -> iframe)
   function openViz(id){
-    if (window._es) { try { window._es.close(); } catch(e){} }
+    if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
     document.getElementById('main').innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
       '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
@@ -912,7 +1018,7 @@
       '<iframe src="/viz/' + id + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
   }
   function openMeshViz(id){
-    if (window._es) { try { window._es.close(); } catch(e){} }
+    if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
     document.getElementById('main').innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
       '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
@@ -924,7 +1030,7 @@
   // Delete → Ctrl+Z to undo. The「送回」button asks the iframe (postMessage) to serialize
   // the edited cloud and POSTs it back; the server stages a non-destructive _edited_ dir.
   function openSuperSplat(jobId){
-    if (window._es) { try { window._es.close(); } catch(e){} }
+    if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
     var ply = location.origin + '/api/jobs/' + jobId + '/gaussians.ply';
     var url = '/static/supersplat/index.html?load=' + encodeURIComponent(ply) + '&filename=point_cloud.ply';
     document.getElementById('main').innerHTML =
@@ -976,27 +1082,29 @@
   // live log via SSE — started here (not in the swapped fragment) because htmx
   // does not reliably execute inline <script> in swapped content.
   function startLogStream(jobId){
-    if (window._es) { try { window._es.close(); } catch(e){} }
+    window._logJobId = jobId;
     var pre = document.getElementById('log');
     if (!pre) return;
     pre.textContent = '';
-    // Keep the log text in memory and write the DOM once per SSE event. Reading +
+    // Keep the log text in memory and write the DOM once per message. Reading +
     // rewriting the whole pre.textContent for *every* line was O(n²): replaying a
     // finished job's multi-MB log froze the tab ("Page Unresponsive").
     var lines = [];
     var lastProg = false;
     var MAX_LINES = 5000;     // keep only the recent tail in the DOM; a 4–5k-image
                               // run emits tens of thousands of lines and froze the tab
-    var es = new EventSource('/api/jobs/' + jobId + '/logs');
-    window._es = es;
-    es.onmessage = function(ev){
+    // Log lines arrive over the shared WebSocket (window.rsBus, in joblist.js) — no
+    // dedicated connection. We just register how to render them for THIS job.
+    window.rsBus.onLog = function(job, incoming){
+      if (job !== window._logJobId) return;
       var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-      ev.data.split('\n').forEach(function(ln){ lastProg = pushLogLine(lines, ln, lastProg); });
+      incoming.forEach(function(ln){ lastProg = pushLogLine(lines, ln, lastProg); });
       if (lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
       pre.textContent = lines.length ? lines.join('\n') + '\n' : '';
       if (atBottom) pre.scrollTop = pre.scrollHeight;
     };
-    es.addEventListener('end', function(){ es.close(); });
+    window.rsBus.onLogEnd = function(job){ if (job === window._logJobId) window._logJobId = null; };
+    window.rsBus.watchLog(jobId);
   }
   // tqdm refreshes the same bar with \r; treat progress lines as in-place updates
   // so the bar moves at the bottom instead of flooding the pane with thousands of
@@ -1016,7 +1124,8 @@
     var t = e.detail && e.detail.target;
     if (t && t.id === 'main'){
       var box = t.querySelector('[data-log-job]');
-      if (box) startLogStream(box.getAttribute('data-log-job'));
+      if (box) { startLogStream(box.getAttribute('data-log-job')); }
+      else if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // left the job view → stop tailing
     }
   });
 </script>

@@ -20,8 +20,12 @@
   #gui.collapsed .bd { display:none; }
   .stat { display:flex; justify-content:space-between; color:var(--mut); margin:1px 0; }
   .stat b { color:var(--fg); font-variant-numeric:tabular-nums; }
-  .ctl { margin-top:11px; }
-  .ctl > label { display:block; color:var(--mut); margin-bottom:4px; }
+  .ctl { margin-top:9px; }
+  .ctl > label { display:flex; justify-content:space-between; color:var(--mut); margin-bottom:4px; }
+  .ctl > label span { color:var(--fg); font-variant-numeric:tabular-nums; }
+  .sec { color:var(--accent); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase;
+         margin:14px 0 6px; padding-bottom:3px; border-bottom:1px solid var(--line); }
+  .bd > .sec:first-child { margin-top:0; }
   input[type=range] { width:100%; accent-color:var(--accent); }
   .rowbtn { display:flex; gap:10px; align-items:center; margin-top:11px; flex-wrap:wrap; }
   .rowbtn label { display:flex; align-items:center; gap:5px; color:var(--mut); }
@@ -33,14 +37,31 @@
   #legend span { display:flex; align-items:center; gap:4px; color:var(--mut); font-size:12px; }
   .sw { width:10px; height:10px; border-radius:2px; }
   #sel { position:fixed; left:12px; top:12px; background:var(--panel); border:1px solid var(--accent);
-         border-radius:9px; padding:9px 12px; min-width:220px; max-width:300px; display:none; }
+         border-radius:9px; padding:9px 12px; min-width:220px; max-width:300px; display:none;
+         overflow-wrap:anywhere; word-break:break-word; }
   #sel img { width:100%; border-radius:6px; margin-top:7px; display:block; }
   #sel .x { float:right; cursor:pointer; color:var(--mut); }
   #sel b { color:var(--accent); }
   #msg { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; color:var(--mut); }
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
              color:var(--mut); pointer-events:none; font-size:13px; }
-  #hint { position:fixed; left:12px; bottom:10px; color:var(--mut); font-size:11px; }
+  #hint { position:fixed; top:8px; left:50%; transform:translateX(-50%); text-align:center;
+          color:var(--mut); font-size:11px; line-height:1.5; max-width:52vw; pointer-events:none; }
+          /* top-centre: clear of the toolbar (bottom), cull panel (bottom-left),
+             gizmo (top-left) and stats panel (top-right) */
+  #brush-cur { position:fixed; border:1.5px dashed var(--accent); background:rgba(255,80,80,.12);
+               border-radius:50%; pointer-events:none; transform:translate(-50%,-50%); display:none; z-index:6; }
+  .tb-hide { display:none !important; }          /* mode toggles moved to the bottom toolbar */
+  #toolbar { position:fixed; left:50%; bottom:14px; transform:translateX(-50%); z-index:7;
+             display:flex; gap:3px; align-items:center; background:var(--panel); border:1px solid var(--line);
+             border-radius:11px; padding:5px 7px; backdrop-filter:blur(6px); box-shadow:0 6px 24px rgba(0,0,0,.45); }
+  #toolbar button { background:transparent; border:1px solid transparent; border-radius:7px; padding:6px 11px;
+                    font:inherit; font-size:13px; color:var(--mut); cursor:pointer; white-space:nowrap; }
+  #toolbar button:hover { background:var(--panel); color:var(--fg); filter:brightness(1.4); }
+  #toolbar button.on { background:var(--accent); color:#15181f; border-color:var(--accent); }
+  #toolbar .sep { width:1px; height:20px; background:var(--line); margin:0 4px; }
+  #toolbar #tb-brush { display:none; align-items:center; gap:6px; color:var(--mut); font-size:12px; padding:0 6px; }
+  #toolbar #tb-brush input[type=range] { width:90px; }
   #cull { position:fixed; left:12px; bottom:32px; width:300px; max-width:46vw; background:var(--panel);
           border:1px solid var(--err); border-radius:9px; padding:9px 11px; display:none; }
   #cull-hd { color:var(--err); font-weight:600; margin-bottom:4px; }
@@ -70,35 +91,44 @@
     <span>▾</span><b>🧊 {{ job.title }}</b>
   </div>
   <div class="bd">
+    <div class="sec">統計</div>
     <div class="stat"><span>images</span><b id="s-img">…</b></div>
     <div class="stat"><span>cameras</span><b id="s-cam">…</b></div>
     <div class="stat"><span>points</span><b id="s-pts">…</b></div>
     <div class="stat"><span>reproj err</span><b id="s-err">…</b></div>
     <div class="stat"><span>track len</span><b id="s-trk">…</b></div>
+    <div class="sec">顯示</div>
     <div class="ctl"><label>點大小 <span id="psz-v">1.5</span></label>
       <input id="psize" type="range" min="0.3" max="6" step="0.1" value="1.5"></div>
     <div class="ctl"><label>相機大小 <span id="csz-v">1.0</span></label>
       <input id="csize" type="range" min="0" max="3" step="0.05" value="1"></div>
+    <div class="ctl"><label>飛行速度 <span id="fly-v">0.7</span></label>
+      <input id="flyspd" type="range" min="0.1" max="4" step="0.1" value="0.7"></div>
     <div class="rowbtn">
       <label><input id="show-cams" type="checkbox" checked> 相機</label>
       <label><input id="show-axes" type="checkbox" checked> 座標 gizmo</label>
     </div>
+    <div class="sec">工具</div>
     <div class="rowbtn">
       <label><input id="rot-obj" type="checkbox"> 🔄 旋轉物體(對齊)</label>
     </div>
-    <div class="rowbtn">
-      <button id="reset">重置視角</button>
-      <button id="reset-rot">歸零旋轉</button>
+    <div class="hint" style="margin-top:2px">挑相機 / 框選刪點 / 筆刷刪點 → 用底部工具列切換</div>
+    <div id="culltip" style="display:none;margin-top:4px;color:var(--mut);font-size:11px">拖曳=框選多台 · 點=單選 · Shift+拖曳=轉視角</div>
+    <div id="delpts-tip" style="display:none;margin-top:-4px;color:var(--mut);font-size:11px">選取會先<b>標紅</b>(不會直接消失) · 按🗑刪除標選才真的刪 · 只刪點不動相機 · 非破壞性</div>
+    <div id="delpts-actions" style="display:none;margin-top:6px">
+      <div class="hint" style="margin-bottom:5px">已標選 <b id="delpts-sel">0</b> 點</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button id="delpts-go" class="danger" style="display:none">🗑 刪除標選 → 產生清理後資料</button>
+        <button id="delpts-deselect" style="display:none">清除標選</button>
+      </div>
+      <div id="delpts-msg" style="margin-top:6px;font-size:11px;color:var(--mut);word-break:break-all"></div>
     </div>
-    <div class="rowbtn">
-      <label><input id="cull-mode" type="checkbox"> 🗑 挑選要移除的相機</label>
-    </div>
-    <div id="culltip" style="display:none;margin-top:-4px;color:var(--mut);font-size:11px">拖曳=框選多台 · 點=單選 · Shift+拖曳=轉視角</div>
     <div id="viewbanner">👁 正在看清理後結果 · 可繼續挑選移除（會累積在這版之上）</div>
     <div id="cleanpaths" style="display:none;margin-top:8px;font-size:11px;color:var(--mut);word-break:break-all">
       <div>📁 清理後資料夾</div><code id="cp-dir" style="color:var(--fg)"></code>
       <div style="margin-top:5px">🎯 訓練 source 用這個</div><code id="cp-ds" style="color:var(--accent)"></code>
     </div>
+    <div class="sec">相機分組</div>
     <div id="legend"></div>
   </div>
 </div>
@@ -118,7 +148,17 @@
   <div id="cull-msg"></div>
 </div>
 <div id="rband"></div>
-<div id="hint"><b>WASD</b>=移動 · <b>Q/E</b>=上下 · 拖曳=旋轉 · 滾輪=縮放 · 右鍵=平移 · 雙擊相機=資訊 ‖ 挑選模式:點=單選/取消 · 勾「框選模式」後拖曳=框選一群</div>
+<div id="brush-cur"></div>
+<!-- SuperSplat-style bottom toolbar: one active interaction tool at a time -->
+<div id="toolbar">
+  <button data-tool="nav" class="on" title="導覽:拖曳旋轉 · 右鍵平移 · 滾輪縮放 · WASD 飛行">🧭 導覽</button>
+  <button data-tool="cam" title="挑選要移除的相機">🎥 挑相機</button>
+  <span class="sep"></span>
+  <button data-tool="box" title="框選刪點(標紅預覽)">▭ 框選刪點</button>
+  <button data-tool="brush" title="筆刷刪點(標紅預覽)">🖌 筆刷刪點</button>
+  <span id="tb-brush"><input id="brush-size" type="range" min="8" max="150" step="2" value="30">筆刷 <span id="brush-v">30</span></span>
+</div>
+<div id="hint"><b>WASD</b>=移動 · <b>Q/E</b> 或右鍵拖曳=上下 · <b>R</b>=重置 · 拖曳=旋轉 · 滾輪=縮放 · 雙擊相機=資訊 ‖ 挑選模式:點=單選/取消 · 勾「框選模式」後拖曳=框選一群</div>
 
 <script type="importmap">
 { "imports": { "three": "/static/three/three.module.js",
@@ -129,7 +169,7 @@ import * as THREE from 'three';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+import { ViewHelper } from '/static/three/addons/helpers/ViewHelper.js?v=tl1';   // ?v busts cache after the top-left edit
 
 const JOB = "{{ job.id }}";
 const MSUB = "{{ model_sub }}";                    // viewing a cleaned variant if set
@@ -153,6 +193,36 @@ const controls = new TrackballControls(camera, renderer.domElement);   // free 3
 controls.rotateSpeed = 3.2; controls.zoomSpeed = 1.3; controls.panSpeed = 0.9;
 controls.staticMoving = false; controls.dynamicDampingFactor = 0.15;
 controls.keys = [];                 // free A/S/D for WASD fly-nav (else they switch modes)
+controls.noPan = true;              // disable TrackballControls pan — we do our own (below)
+
+// Right-drag = pan STRICTLY in the screen plane (camera right + true-up only; ZERO
+// forward/back component, whatever the orientation). Scaled so the point under the
+// cursor stays under it. TrackballControls' built-in pan drifted fore/aft — this doesn't.
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+let _panX = null, _panY = null;
+renderer.domElement.addEventListener('pointerdown', e => {
+  // NB: do NOT toggle controls.enabled here — with noPan the trackball ignores right-drag
+  // anyway, and disabling it mid-gesture makes its pointerup early-return, leaving PAN state
+  // stuck (next left-click gets swallowed). Just track the drag ourselves.
+  if (e.button === 2){ _panX = e.clientX; _panY = e.clientY; e.preventDefault(); }
+});
+addEventListener('pointermove', e => {
+  if (_panX === null) return;
+  const dx = e.clientX - _panX, dy = e.clientY - _panY; _panX = e.clientX; _panY = e.clientY;
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+  const right = new THREE.Vector3().crossVectors(fwd, camera.up).normalize();
+  const up = new THREE.Vector3().crossVectors(right, fwd).normalize();   // orthonormal, ⟂ view → no fwd/back
+  const dist = camera.position.distanceTo(controls.target);
+  const wpp = 2 * dist * Math.tan(camera.fov * Math.PI / 360) / (renderer.domElement.clientHeight || innerHeight);
+  const mv = right.multiplyScalar(-dx * wpp).addScaledVector(up, dy * wpp);   // grab-pan in screen plane
+  camera.position.add(mv); controls.target.add(mv);
+});
+addEventListener('pointerup', e => { if (e.button === 2){ _panX = _panY = null; } });
+
+let flySpeed = 0.7;                 // WASD fly-nav speed (× sceneSize/s); set by the 飛行速度 slider
+const _flyEl = document.getElementById('flyspd');
+if (_flyEl) _flyEl.oninput = e => {
+  flySpeed = +e.target.value; document.getElementById('fly-v').textContent = e.target.value; };
 
 // rotation gizmo on the object (drag rings to reorient/align); off by default
 const gizmo = new TransformControls(camera, renderer.domElement);
@@ -178,6 +248,11 @@ const HILITE = 0x00e5ff;   // double-clicked (info) camera colour
 const CULLCLR = 0xf85149;  // marked-for-removal camera colour
 let selectMode = false;            // 挑選要移除的相機
 let boxMode = false;               // 框選模式: drag=box-select (off: drag=rotate)
+let delPtsMode = false;            // ✂️ 刪點模式: box / brush select → mark → delete (client-side, non-destructive)
+let delTool = 'box';               // 'box' | 'brush'
+let brushR = 30;                   // brush radius in screen px
+let _scrX = null, _scrY = null, _rIdx = null;     // brush: cached screen coords + render-index of alive points
+let ptPos = null, ptCol = null, ptAlive = null, ptSel = null;   // point xyz/rgb, alive mask, pending-delete mask
 const selected = new Set();        // camera indices (gi) marked for removal
 
 function fitView(){
@@ -247,6 +322,10 @@ new PLYLoader().load(`/api/jobs/${JOB}/model.ply${MQ}`, (geo) => {
   document.getElementById('loading').style.display = 'none';
   const mat = new THREE.PointsMaterial({size:1.5, vertexColors:true, sizeAttenuation:false});
   points = new THREE.Points(geo, mat); inner.add(points);
+  ptPos = geo.attributes.position.array;                          // for ✂️ delete-points + export
+  ptCol = geo.attributes.color ? geo.attributes.color.array : null;
+  ptAlive = new Uint8Array(geo.attributes.position.count).fill(1);
+  ptSel = new Uint8Array(geo.attributes.position.count);          // pending-delete highlight mask
   fitView();
   document.getElementById('psize').oninput = e => { mat.size = +e.target.value; document.getElementById('psz-v').textContent = e.target.value; };
   loadCameras();
@@ -334,8 +413,8 @@ window.clearSel = () => {           // close info box + clear camera highlight
 };
 document.getElementById('show-axes').onchange = e => { showGizmo = e.target.checked; };
 document.getElementById('rot-obj').onchange = e => { gizmo.enabled = gizmo.visible = e.target.checked; };
-document.getElementById('reset').onclick = () => fitView();
-document.getElementById('reset-rot').onclick = () => { obj.quaternion.identity(); fitView(); };
+// R key = reset everything (object rotation + view). The two buttons were removed.
+function resetAll(){ obj.quaternion.identity(); fitView(); }
 
 // ── camera culling (挑選要移除的相機) ───────────────────────────────────────
 // 點相機 = 單選/取消(individual);Shift+拖曳框 = 群選(group)。選好按「移除選取」→
@@ -361,14 +440,25 @@ function updateCullTip(){
     ? '拖曳=框選一群 · 點=單選/取消 · Shift+拖曳=旋轉視角'
     : '拖曳=旋轉 · 點=單選/取消 · 勾「框選模式」可拖曳框選一群';
 }
-document.getElementById('cull-mode').onchange = e => {
-  selectMode = e.target.checked;
+// Bottom toolbar: exactly one active interaction tool. nav = orbit/pan/fly; cam = pick
+// cameras to cull; box / brush = mark points to delete. Replaces the old right-panel
+// checkboxes/radios (mutual exclusion is automatic — one tool at a time).
+function setTool(tool){
+  selectMode = (tool === 'cam');
+  delPtsMode = (tool === 'box' || tool === 'brush');
+  delTool = (tool === 'brush') ? 'brush' : 'box';
   cull.style.display = selectMode ? 'block' : 'none';
   document.getElementById('culltip').style.display = selectMode ? 'block' : 'none';
-  controls.enabled = true;                     // leaving box-drag mid-way can't strand it
   if (!selectMode){ selected.clear(); refreshCams(); }
+  if (!delPtsMode) clearSelection();             // leaving point-edit drops the red highlight
+  document.getElementById('delpts-tip').style.display = delPtsMode ? '' : 'none';
+  document.getElementById('tb-brush').style.display = (tool === 'brush') ? 'inline-flex' : 'none';
+  if (tool !== 'brush') document.getElementById('brush-cur').style.display = 'none';
+  controls.enabled = true;                       // leaving a box/brush drag can't strand it
   updateCullTip(); updateCullPanel();
-};
+  document.querySelectorAll('#toolbar [data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === tool));
+}
+document.querySelectorAll('#toolbar [data-tool]').forEach(b => b.onclick = () => setTool(b.dataset.tool));
 document.getElementById('box-mode').onchange = e => { boxMode = e.target.checked; updateCullTip(); };
 
 function updateCullPanel(){
@@ -402,11 +492,14 @@ function camsInRect(x0, y0, x1, y1){
 // click = single toggle, Shift+drag = box-select. 框選模式 ON: drag = box-select,
 // Shift+drag = rotate. Alt = the box deselects. Capture phase so we can suspend
 // TrackballControls before it starts orbiting when the drag is meant to be a box.
-let pdx = 0, pdy = 0, boxing = false, maybeBox = false, addToSel = true;
+let pdx = 0, pdy = 0, boxing = false, maybeBox = false, addToSel = true, delBox = false, brushing = false;
 const onCanvas = e => e.target === renderer.domElement;
 renderer.domElement.addEventListener('pointerdown', e => {
-  pdx = e.clientX; pdy = e.clientY; boxing = false; maybeBox = false;
-  if (selectMode && e.button === 0 && onCanvas(e)){
+  pdx = e.clientX; pdy = e.clientY; boxing = false; maybeBox = false; delBox = false;
+  if (delPtsMode && e.button === 0 && onCanvas(e)){          // ✂️ mark points (box or brush)
+    if (delTool === 'brush'){ brushing = true; controls.enabled = false; brushProject(); brushAt(e.clientX, e.clientY); e.preventDefault(); }
+    else { maybeBox = true; delBox = true; controls.enabled = false; }
+  } else if (selectMode && e.button === 0 && onCanvas(e)){
     const wantBox = boxMode ? !e.shiftKey : e.shiftKey;   // is this drag a box, or a rotate?
     if (wantBox){ maybeBox = true; addToSel = !e.altKey; controls.enabled = false; }
   }
@@ -425,9 +518,11 @@ addEventListener('pointerup', e => {
     maybeBox = false; controls.enabled = true;
     if (boxing){                                                  // 框選 a group
       boxing = false; rband.style.display = 'none';
+      if (delBox){ delBox = false; selectPointsInRect(pdx, pdy, e.clientX, e.clientY); return; }
       camsInRect(pdx, pdy, e.clientX, e.clientY).forEach(i => addToSel ? selected.add(i) : selected.delete(i));
       refreshCams(); updateCullPanel(); return;
     }
+    delBox = false;
   }
   if (selectMode && e.button === 0 && onCanvas(e) && !wasDrag){    // a click -> single toggle
     const idx = pickCamera(e.clientX, e.clientY);
@@ -462,6 +557,141 @@ cullGo.onclick = async () => {
   cullGo.disabled = selected.size === 0;
 };
 
+// ── ✂️ delete points (client-side, non-destructive) ─────────────────────────
+// Box-select projects every alive point to screen; selected points are masked
+// out (ptAlive=0) and the rendered cloud is rebuilt. Cameras are never touched.
+// "復原全部" restores the mask; "匯出清理後 .ply" downloads the remaining points.
+function pointsInRect(x0,y0,x1,y1){
+  if (!ptAlive) return [];
+  const r = renderer.domElement.getBoundingClientRect();
+  const minX=Math.min(x0,x1),maxX=Math.max(x0,x1),minY=Math.min(y0,y1),maxY=Math.max(y0,y1);
+  inner.updateWorldMatrix(true,false);
+  const m = inner.matrixWorld, v = new THREE.Vector3(), hit = [];
+  for (let i=0;i<ptAlive.length;i++){
+    if (!ptAlive[i]) continue;
+    v.set(ptPos[i*3],ptPos[i*3+1],ptPos[i*3+2]).applyMatrix4(m).project(camera);
+    if (v.z>1) continue;
+    const sx=r.left+(v.x*0.5+0.5)*r.width, sy=r.top+(-v.y*0.5+0.5)*r.height;
+    if (sx>=minX&&sx<=maxX&&sy>=minY&&sy<=maxY) hit.push(i);
+  }
+  return hit;
+}
+// Box-select MARKS points (highlighted red) — nothing is removed until you press
+// 🗑 刪除標選. ptSel = pending highlight mask; ptAlive = actually-kept mask.
+const HL = [1.0, 0.25, 0.25];
+function selectPointsInRect(x0,y0,x1,y1){
+  const hit = pointsInRect(x0,y0,x1,y1);
+  if (!hit.length) return;
+  for (const i of hit) if (ptAlive[i]) ptSel[i] = 1;
+  rebuildPoints();
+}
+function rebuildPoints(){
+  let n=0; for (let i=0;i<ptAlive.length;i++) if (ptAlive[i]) n++;
+  const pos=new Float32Array(n*3), col=new Float32Array(n*3);
+  let j=0, sel=0;
+  for (let i=0;i<ptAlive.length;i++){ if(!ptAlive[i])continue;
+    pos[j*3]=ptPos[i*3]; pos[j*3+1]=ptPos[i*3+1]; pos[j*3+2]=ptPos[i*3+2];
+    if (ptSel[i]){ col[j*3]=HL[0]; col[j*3+1]=HL[1]; col[j*3+2]=HL[2]; sel++; }
+    else if (ptCol){ col[j*3]=ptCol[i*3]; col[j*3+1]=ptCol[i*3+1]; col[j*3+2]=ptCol[i*3+2]; }
+    else { col[j*3]=col[j*3+1]=col[j*3+2]=0.78; }
+    j++;
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  g.setAttribute('color', new THREE.BufferAttribute(col,3));
+  const old=points.geometry; points.geometry=g; old.dispose();
+  const del=ptAlive.length-n;
+  document.getElementById('s-pts').textContent = n.toLocaleString() + (del?(' (-'+del.toLocaleString()+')'):'');
+  document.getElementById('delpts-actions').style.display = sel ? '' : 'none';
+  document.getElementById('delpts-sel').textContent = sel.toLocaleString();
+  document.getElementById('delpts-go').style.display = sel? '' : 'none';
+  document.getElementById('delpts-deselect').style.display = sel? '' : 'none';
+}
+async function commitDeleteSelected(){     // send marked points to the server → cleaned model (training dataset)
+  if (!ptSel) return;
+  const positions = [];
+  for (let i=0;i<ptSel.length;i++) if (ptSel[i] && ptAlive[i]) positions.push([ptPos[i*3], ptPos[i*3+1], ptPos[i*3+2]]);
+  if (!positions.length) return;
+  const msg = document.getElementById('delpts-msg'), go = document.getElementById('delpts-go');
+  go.disabled = true; msg.textContent = '處理中…(寫出清理後模型,點多可能要一下子)';
+  try {
+    const r = await fetch(`/api/jobs/${JOB}/cull_points`, {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({positions, from: MSUB})});
+    const d = await r.json();
+    if (!r.ok || !d.ok) throw new Error(d.detail || r.statusText);
+    const href = `/viz/${JOB}?m=${encodeURIComponent(d.viz_model)}`;
+    msg.innerHTML = `✅ 刪 ${d.removed.toLocaleString()} 點,保留 ${d.points_after.toLocaleString()}。<br>` +
+      `<b>清理後資料夾</b><br><code>${d.cleaned_dir}</code><br>` +
+      (d.dataset_dir ? `<b>訓練 source 用這個</b><br><code>${d.dataset_dir}</code><br>` : '') +
+      `<a href="${href}" target="_blank">在檢視器開啟清理後結果 ↗</a>`;
+    ptSel.fill(0); rebuildPoints();        // clear local red marks; the result is the new model (reopen via link)
+  } catch(err){ msg.textContent = '❌ 失敗: ' + err; }
+  go.disabled = false;
+}
+function clearSelection(){ if(!ptSel)return; ptSel.fill(0); rebuildPoints(); }
+function undoDeletions(){ if(!ptAlive)return; ptAlive.fill(1); ptSel.fill(0); rebuildPoints(); }
+// Brush select: the camera is static during a stroke, so cache every alive point's
+// screen coords once (brushProject), then each move is a cheap 2D radius test that
+// marks points red live (brushAt). rebuildPoints() on pointerup syncs the counters.
+function brushProject(){
+  const r = renderer.domElement.getBoundingClientRect();
+  inner.updateWorldMatrix(true,false);
+  const m = inner.matrixWorld, v = new THREE.Vector3(), N = ptAlive.length;
+  _scrX = new Float32Array(N); _scrY = new Float32Array(N); _rIdx = new Int32Array(N).fill(-1);
+  let j = 0;
+  for (let i=0;i<N;i++){
+    if (!ptAlive[i]) continue;
+    _rIdx[i] = j++;
+    v.set(ptPos[i*3],ptPos[i*3+1],ptPos[i*3+2]).applyMatrix4(m).project(camera);
+    if (v.z > 1){ _scrX[i] = _scrY[i] = 1e9; continue; }
+    _scrX[i] = r.left + (v.x*0.5+0.5)*r.width;
+    _scrY[i] = r.top + (-v.y*0.5+0.5)*r.height;
+  }
+}
+function brushAt(mx,my){
+  if (!_scrX) return;
+  const rr = brushR*brushR, colorAttr = points.geometry.attributes.color;
+  let changed = false;
+  for (let i=0;i<ptAlive.length;i++){
+    if (!ptAlive[i] || ptSel[i]) continue;
+    const dx = _scrX[i]-mx, dy = _scrY[i]-my;
+    if (dx*dx + dy*dy <= rr){ ptSel[i] = 1; colorAttr.setXYZ(_rIdx[i], HL[0],HL[1],HL[2]); changed = true; }
+  }
+  if (changed) colorAttr.needsUpdate = true;
+}
+addEventListener('pointermove', e => {
+  if (delPtsMode && delTool === 'brush'){
+    const c = document.getElementById('brush-cur');
+    c.style.display = 'block'; c.style.left = e.clientX+'px'; c.style.top = e.clientY+'px';
+    c.style.width = c.style.height = (brushR*2)+'px';
+  }
+  if (brushing) brushAt(e.clientX, e.clientY);
+});
+addEventListener('pointerup', () => { if (brushing){ brushing = false; controls.enabled = true; rebuildPoints(); } });
+function exportCleanedPly(){
+  if (!ptAlive) return;
+  let n=0; for (let i=0;i<ptAlive.length;i++) if (ptAlive[i]) n++;
+  const header = 'ply\nformat binary_little_endian 1.0\nelement vertex '+n+
+    '\nproperty float x\nproperty float y\nproperty float z\n'+
+    'property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n';
+  const hb = new TextEncoder().encode(header), stride = 15;
+  const buf = new ArrayBuffer(hb.length + n*stride);
+  new Uint8Array(buf).set(hb,0);
+  const dv = new DataView(buf, hb.length); let off=0;
+  for (let i=0;i<ptAlive.length;i++){ if(!ptAlive[i])continue;
+    dv.setFloat32(off, ptPos[i*3], true); dv.setFloat32(off+4, ptPos[i*3+1], true); dv.setFloat32(off+8, ptPos[i*3+2], true);
+    dv.setUint8(off+12, ptCol?Math.round(ptCol[i*3]*255):200);
+    dv.setUint8(off+13, ptCol?Math.round(ptCol[i*3+1]*255):200);
+    dv.setUint8(off+14, ptCol?Math.round(ptCol[i*3+2]*255):200);
+    off+=stride;
+  }
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([buf],{type:'application/octet-stream'}));
+  a.download='cleaned_points.ply'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+document.getElementById('brush-size').oninput = e => { brushR = +e.target.value; document.getElementById('brush-v').textContent = e.target.value; };
+document.getElementById('delpts-go').onclick = commitDeleteSelected;
+document.getElementById('delpts-deselect').onclick = clearSelection;
+
 // ── WASD fly-nav ────────────────────────────────────────────────────────────
 // W/S=前/後, A/D=左/右, Q/E=下/上;Shift=加速。速度依場景大小(sceneSize,在 fitView
 // 設定)自動縮放,所以不管場景是 1 單位還是 1000 單位都差不多手感。移動時 eye 與 orbit
@@ -473,6 +703,7 @@ addEventListener('keydown', e => {
   if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = true;
   if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.code === 'KeyR') { resetAll(); e.preventDefault(); return; }   // reset view + rotation
   if (NAV.has(e.code)) { keys.add(e.code); e.preventDefault(); }
 });
 addEventListener('keyup', e => {
@@ -493,7 +724,7 @@ function applyMove(dt){
   if (keys.has('KeyE')) mv.add(up);
   if (keys.has('KeyQ')) mv.sub(up);
   if (!mv.lengthSq()) return;
-  mv.normalize().multiplyScalar(sceneSize * 0.7 * (shiftHeld ? 3 : 1) * dt);  // ~0.7 span/s
+  mv.normalize().multiplyScalar(sceneSize * flySpeed * (shiftHeld ? 3 : 1) * dt);  // flySpeed span/s
   camera.position.add(mv); controls.target.add(mv);
 }
 
