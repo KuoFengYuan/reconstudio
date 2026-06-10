@@ -130,8 +130,7 @@
     </div>
     {% if scale_ok %}
     <div class="sec">GPS 尺度驗證</div>
-    <div class="rowbtn"><button id="scale-go">📏 驗證地圖尺度</button></div>
-    <div class="hint" style="margin-top:2px">相機位置 vs EXIF GPS:長基線距離比值驗尺度</div>
+    <div class="rowbtn"><button id="scale-go" title="相機位置 vs EXIF GPS:長基線距離比值驗尺度,殘差看絕對精度">📏 驗證地圖尺度</button></div>
     <div id="scale-out" style="display:none;margin-top:6px;font-size:11px;color:var(--mut);line-height:1.5"></div>
     {% endif %}
     <div class="sec">相機分組</div>
@@ -755,8 +754,8 @@ function renderScale(d){
   const fg = 'color:var(--fg)';
   const a = Math.abs(d.scale_err_pct);
   // green when indistinguishable from zero at this network's sensitivity
-  const col = a <= Math.max(0.1, 2 * d.sensitivity_pct) ? 'var(--ok,#3fb950)'
-            : a <= 1 ? 'var(--warn,#d29922)' : 'var(--err,#f85149)';
+  const col = a <= Math.max(0.1, 2 * d.sensitivity_pct) ? 'var(--ok)'
+            : a <= 1 ? 'var(--warn)' : 'var(--err)';
   const bins = d.bins.map(b =>
     `基線 ${b.lo_m}–${b.hi_m}m:<span style="${fg}">${b.median.toFixed(5)}</span> (${b.n}對)`
   ).join('<br>');
@@ -764,14 +763,16 @@ function renderScale(d){
     d.folders.map(f =>
       `&nbsp;${f.folder} <span style="${fg}">${f.bias_m.toFixed(2)}m</span>` +
       ` · 扣偏移後散布 ${f.spread_m.toFixed(2)}m (n=${f.n})`).join('<br>') : '';
+  // one headline line; everything else folds away so the side panel stays short
   return `尺度差 <b style="color:${col}">${d.scale_err_pct >= 0 ? '+' : ''}${d.scale_err_pct.toFixed(2)}%</b>` +
-    `(靈敏度約 ±${Math.max(d.sensitivity_pct, 0.01).toFixed(2)}%,${d.n_cams} 台 / ${d.n_pairs} 對)<br>` +
+    `(±${Math.max(d.sensitivity_pct, 0.01).toFixed(2)}%) · 殘差 <span style="${fg}">${d.resid_median_m.toFixed(2)}m</span>` +
+    (d.warning ? `<br><span style="color:var(--err)">⚠ ${d.warning}</span>` : '') +
+    `<details style="margin-top:3px"><summary style="cursor:pointer">詳細</summary>` +
+    `${d.n_cams} 台相機 / ${d.n_pairs} 對基線<br>` +
     bins + '<br>各區間一致=尺度均勻、無形變<br>' +
-    `位置殘差 median <span style="${fg}">${d.resid_median_m.toFixed(2)}m</span>` +
-    ` · p90 ${d.resid_p90_m.toFixed(2)}m (E/N/U ${d.resid_axis_median_m.join(' / ')}m)` +
+    `殘差 p90 ${d.resid_p90_m.toFixed(2)}m · 各軸 E/N/U ${d.resid_axis_median_m.join(' / ')}m` +
     fo +
-    (d.warning ? `<br><span style="color:var(--err,#f85149)">⚠ ${d.warning}</span>` : '') +
-    `<br><span style="opacity:.75">${d.note}</span>`;
+    `<br><span style="opacity:.75">${d.note}</span></details>`;
 }
 
 const clock = new THREE.Clock();
