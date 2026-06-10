@@ -764,11 +764,19 @@ function renderScale(d){
     d.folders.map(f =>
       `&nbsp;${f.folder} <span style="${fg}">${f.bias_m.toFixed(2)}m</span>` +
       ` · 扣偏移後散布 ${f.spread_m.toFixed(2)}m (n=${f.n})`).join('<br>') : '';
-  // one headline line; everything else folds away so the side panel stays short
-  return `尺度差 <b style="color:${col}">${d.scale_err_pct >= 0 ? '+' : ''}${d.scale_err_pct.toFixed(2)}%</b>` +
-    `(±${Math.max(d.sensitivity_pct, 0.01).toFixed(2)}%) · 殘差 <span style="${fg}">${d.resid_median_m.toFixed(2)}m</span>` +
+  // verdict first — a non-expert should know good/bad without reading numbers
+  const sens = Math.max(d.sensitivity_pct, 0.01);
+  const bound = Math.max(a, sens);                       // below sensitivity = report the bound
+  const verdict =
+    col === 'var(--ok)' ? `✅ <b style="color:var(--ok)">地圖尺度正常</b>` :
+    col === 'var(--warn)' ? `⚠️ <b style="color:var(--warn)">尺度略有偏差</b>` :
+    `❌ <b style="color:var(--err)">尺度異常</b>`;
+  return `${verdict}<br>` +
+    `每 100 公尺誤差約 <span style="${fg}">${col === 'var(--ok)' ? '≤' : ''}${(bound * 100).toFixed(0)} 公分</span><br>` +
+    `與 GPS 定位差:約 <span style="${fg}">${d.resid_median_m.toFixed(1)} 公尺</span>(多為 GPS 本身噪聲)` +
     (d.warning ? `<br><span style="color:var(--err)">⚠ ${d.warning}</span>` : '') +
-    `<details style="margin-top:3px"><summary style="cursor:pointer">詳細</summary>` +
+    `<details style="margin-top:3px"><summary style="cursor:pointer">詳細數據</summary>` +
+    `尺度差 ${d.scale_err_pct >= 0 ? '+' : ''}${d.scale_err_pct.toFixed(2)}%(靈敏度 ±${sens.toFixed(2)}%)<br>` +
     `${d.n_cams} 台相機 / ${d.n_pairs} 對基線<br>` +
     bins + '<br>各區間一致=尺度均勻、無形變<br>' +
     `殘差 p90 ${d.resid_p90_m.toFixed(2)}m · 各軸 E/N/U ${d.resid_axis_median_m.join(' / ')}m` +
