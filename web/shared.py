@@ -49,6 +49,8 @@ COLMAP_DEFAULTS = {
     "MATCHER": "both", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
     "GUIDED_MATCHING": "1", "MAPPER": "global", "DATASET_NAME": "training_dataset",
     "FORCE": "0", "NESTED_LAYOUT": "1", "VOCAB_TREE": "", "VOCAB_TREE_URL": "",
+    # 影像解析度 is a single dropdown (its <option> values carry the cap or "keep"), so the
+    # resize cap no longer needs its own form default here; forms.py derives resize_max.
     # spatial_matcher (MATCHER=spatial)
     "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
     # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
@@ -59,7 +61,8 @@ COLMAP_DEFAULTS = {
     "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
     # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
     "CM_N_SEQ": "0", "CM_N_QUAD": "10", "CM_N_LOOP": "5", "CM_N_GPS": "25",
-    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "MAX_IMAGE_SIZE": "", "MASKS_DIR": "",
+    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "SIFT_MAX_IMAGE_SIZE": "",
+    "MAX_IMAGE_SIZE": "", "MASKS_DIR": "",
     "SIMPLIFY": "0", "SIMPLIFY_MULT_MIN_DIST": "10",
     "REORIENT": "0", "REORIENT_TARGET_MED_DIST": "20", "REORIENT_UPSCALE": "0",
     "HM_LEAF_MAX_NUM_IMAGES": "", "HM_IMAGE_OVERLAP": "", "HM_NUM_WORKERS": "",

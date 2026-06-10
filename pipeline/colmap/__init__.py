@@ -8,7 +8,7 @@ Public surface:
 Internal layout (all `_`-prefixed = package-private):
     _run.py     run_colmap orchestrator + module constants
     _layout.py  image-folder layout detection (single / multi / nested)
-    _gps.py     EXIF/GPS read + APP1 grafting helpers
+    _gps.py     EXIF/GPS read (JPEG + TIFF) + APP1 grafting + pose_prior injection
     _resize.py  FullHD ffmpeg resize (parallel, EXIF-preserving)
 """
 from ._run import COLMAP_DEFAULTS, COLMAP_STAGES, run_colmap

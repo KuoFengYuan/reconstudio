@@ -98,7 +98,8 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(_run, "gps_coverage", fake_gps_coverage)
     monkeypatch.setattr(_run, "resize_to_fullhd",
-                        lambda img_root, lines, ws, force, r, preserve_exif=False: img_root)
+                        lambda img_root, lines, ws, force, r, preserve_exif=False,
+                        max_size="1920": img_root)
     monkeypatch.setattr(_run.shutil, "which", lambda _name: k.which)
     return k
 

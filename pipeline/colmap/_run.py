@@ -22,12 +22,12 @@ from pathlib import Path
 
 from ..config import settings
 from ..runner import Runner
-from ._gps import gps_coverage
+from ._gps import gps_coverage, inject_pose_priors
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
 
-COLMAP_STAGES = ["stage", "extract", "match", "calibrate", "mapper", "simplify",
-                 "align", "undistort", "reorient"]
+COLMAP_STAGES = ["stage", "extract", "gps_inject", "match", "calibrate", "mapper",
+                 "simplify", "align", "undistort", "reorient"]
 # colmap / ffmpeg binaries (PATH by default; override via COLMAP_BIN / FFMPEG_BIN).
 COLMAP_BIN = settings.colmap_bin
 
@@ -38,6 +38,10 @@ COLMAP_DEFAULTS = {
     "matcher": "both", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",
+    # resize longest-side cap for the "fullhd" option (default 1920). Raise for higher-res
+    # training images; the re-encode also produces clean TIFFs that dodge the undistort OIIO
+    # TIFF-writer segfault the raw aerial TIFFs trigger.
+    "resize_max": "1920",
     # spatial_matcher (large GPS scenes): match only GPS-near images.
     "spatial_max_neighbors": "50", "spatial_max_distance": "100", "spatial_ignore_z": "1",
     # GPS metric alignment via model_aligner (optional, off by default): rewrite the
@@ -53,6 +57,10 @@ COLMAP_DEFAULTS = {
     "cm_loop_matches": "",
     # feature_extractor focal seed for uncalibrated large scenes (h3dgs uses 0.5); "" = COLMAP default.
     "focal_factor": "",
+    # feature_extractor SIFT extraction longest-side cap. "" = COLMAP's built-in default of
+    # 3200 (it silently downscales above that before detecting SIFT). Set higher to extract
+    # at full detail, or lower to force coarser, more viewpoint-robust features.
+    "sift_max_image_size": "",
     # image_undistorter longest-side cap (h3dgs uses 2048); "" = no cap.
     "max_image_size": "",
     # optional foreground masks: undistort them through the same cameras as the images.
@@ -106,11 +114,13 @@ class _Ctx:
     matcher: str
     vocab_tree: Path
     fullhd: bool
+    resize_max: str
     gps_align: bool
     gps_align_type: str
     gps_align_max_error: str
     ba_gpu: bool
     focal_factor: str
+    sift_max_image_size: str
     max_image_size: str
     masks_dir: str
     simplify: bool
@@ -129,6 +139,9 @@ class _Ctx:
     lines: list[str] = field(default_factory=list)
     gps_present: bool = False
     gps_opts: list[str] = field(default_factory=list)
+    # img_root before the FullHD resize rebases it — the originals still carry EXIF GPS,
+    # which the resized copies don't, so gps_inject reads priors from here.
+    orig_root: str = ""
 
     def stage_on(self, s: str) -> bool:
         return s in self.stages
@@ -188,11 +201,13 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         r=r, d=d, ws=ws, img_root=img_root, folders=folders, stages=stages,
         nested=nested, layout_name=layout_name, force=force, mapper=mapper,
         camera_mode=camera_mode, matcher=matcher, vocab_tree=vocab_tree, fullhd=fullhd,
+        resize_max=(str(d["resize_max"]).strip() or "1920"),
         gps_align=bool(d["gps_align"]), gps_align_type=str(d["gps_align_type"]),
         gps_align_max_error=str(d["gps_align_max_error"]),
         ba_gpu=bool(d["ba_gpu"]),   # GPU bundle adjustment (incremental / pose_prior only)
         # h3dgs large-scene method options
         focal_factor=str(d["focal_factor"]).strip(),
+        sift_max_image_size=str(d["sift_max_image_size"]).strip(),
         max_image_size=str(d["max_image_size"]).strip(),
         masks_dir=str(d["masks_dir"]).strip(),
         simplify=bool(d["simplify"]), reorient=bool(d["reorient"]),
@@ -276,8 +291,10 @@ def _check_gps_coverage(c: _Ctx) -> None:
                 "switch to a non-GPS setup (MATCHER=vocab/both, MAPPER=global/incremental, "
                 "GPS 對齊 off). Note: video frames carry no per-frame GPS — it lives in the "
                 "container, not the frames.")
-        c.r.log(f"EXIF GPS on all {n_total} inputs -> GPS flow enabled ({', '.join(c.gps_opts)})"
-                + ("; FullHD resize will preserve the GPS EXIF" if c.fullhd else ""))
+        c.r.log(f"EXIF GPS on all {n_total} inputs -> GPS flow enabled ({', '.join(c.gps_opts)}); "
+                "JPEG priors read by COLMAP, TIFF priors via gps_inject"
+                + (" (FullHD resize keeps JPEG EXIF; TIFF GPS is read from the originals)"
+                   if c.fullhd else ""))
     elif n_gps:
         c.r.log(f"note: {n_gps}/{n_total} inputs have EXIF GPS but no GPS option selected; "
                 "running normally" + (" (the FullHD resize will drop the GPS)" if c.fullhd else ""))
@@ -286,13 +303,16 @@ def _check_gps_coverage(c: _Ctx) -> None:
 def _maybe_resize_fullhd(c: _Ctx) -> None:
     # FullHD: physically downscale the inputs to FullHD copies and run the entire
     # pipeline on those (image_list paths stay relative, so they remain valid). When the
-    # GPS flow is on, the resize grafts each original's EXIF back so GPS survives.
+    # GPS flow is on, the resize grafts each JPEG original's EXIF back so its GPS survives;
+    # TIFF GPS can't be grafted (offset-based IFD) and is injected separately from the
+    # originals by gps_inject, so the EXIF-stripped TIFF copies are fine.
     if c.fullhd:
         # keep EXIF GPS through the re-encode when any GPS flow needs it — including
         # the custom matcher's optional GPS-neighbour pairs (not a hard-fail option,
         # so it's not in gps_opts, but it still reads GPS off the resized images).
         preserve = bool(c.gps_opts) or (c.matcher == "custom" and c.cm_n_gps > 0)
-        c.img_root = resize_to_fullhd(c.img_root, c.lines, c.ws, c.force, c.r, preserve_exif=preserve)
+        c.img_root = resize_to_fullhd(c.img_root, c.lines, c.ws, c.force, c.r,
+                                      preserve_exif=preserve, max_size=c.resize_max)
 
 
 def _stage_extract(c: _Ctx) -> None:
@@ -310,12 +330,54 @@ def _stage_extract(c: _Ctx) -> None:
             # only passed when set, so normal runs keep COLMAP's default behavior.
             if c.focal_factor:
                 cam += ["--ImageReader.default_focal_length_factor", c.focal_factor]
+            # Feature-extraction size: COLMAP downscales the longest side to this before
+            # detecting SIFT. Its default (-1) behaves like a 3200 cap, so the downscale is
+            # invisible unless set. Option is FeatureExtraction.max_image_size on COLMAP
+            # 4.x (was SiftExtraction.* on older builds). Pass only when set; higher = more
+            # detail but slower and can OOM on huge aerials, lower = coarser/viewpoint-robust.
+            sift_size = (["--FeatureExtraction.max_image_size", c.sift_max_image_size]
+                         if c.sift_max_image_size else [])
+            if c.sift_max_image_size:
+                c.r.log(f"FeatureExtraction.max_image_size={c.sift_max_image_size} "
+                        "(COLMAP default -1 behaves like 3200)")
             c.r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(c.db),
                      "--image_path", c.img_root, "--image_list_path", str(c.lst), *cam,
                      "--ImageReader.camera_model", str(c.d["camera_model"]),
-                     "--SiftExtraction.max_num_features", str(c.d["max_features"])])
+                     "--SiftExtraction.max_num_features", str(c.d["max_features"]),
+                     *sift_size])
         else:
             c.r.log("skip extract (database.db exists; set FORCE=1 to redo)")
+
+
+def _stage_gps_inject(c: _Ctx) -> None:
+    # 1b. GPS pose priors for non-JPEG inputs. COLMAP's feature_extractor reads EXIF GPS
+    # only from JPEG (verified on 4.0.4: a GPS-tagged TIFF yields zero pose_priors rows
+    # while the identical JPEG yields one per image), so for TIFF — or any image COLMAP
+    # missed — we read the EXIF GPS off the ORIGINALS (c.orig_root, since the FullHD copies
+    # are EXIF-stripped) and write the priors into the DB ourselves, in COLMAP's own row
+    # layout. Must run AFTER extract (the DB + images table exist) and BEFORE match, since
+    # spatial_matcher reads priors too. Idempotent: only fills images lacking a prior.
+    if not c.stage_on("gps_inject"):
+        return
+    # same trigger as the resize EXIF-preserve: any hard GPS option, or the custom
+    # matcher's GPS-neighbour pairs. JPEG-only GPS runs need nothing here (COLMAP already
+    # populated them), and the call no-ops in that case anyway.
+    if not (c.gps_opts or (c.matcher == "custom" and c.cm_n_gps > 0)):
+        return
+    if not c.db.exists():
+        c.r.log("skip gps_inject (no database.db yet)")
+        return
+    # write a real covariance from the form's GPS uncertainty (metres) so the in-BA prior
+    # alignment works for any mapper, not just pose_prior with --overwrite_priors_covariance.
+    std = (float(c.d["prior_std_x"]), float(c.d["prior_std_y"]), float(c.d["prior_std_z"]))
+    n_inj, n_have = inject_pose_priors(c.db, c.orig_root or c.img_root, c.lines, c.r, std)
+    if n_inj:
+        c.r.banner(f"GPS pose priors: injected {n_inj} from EXIF (TIFF/non-JPEG; "
+                   f"std={std} m) -> {c.db}")
+        c.r.log(f"  {n_have} priors already present (JPEG GPS read by COLMAP at extract)")
+    else:
+        c.r.log(f"gps_inject: nothing to add ({n_have} priors already present; "
+                "JPEG GPS is read by COLMAP itself)")
 
 
 def _stage_match(c: _Ctx) -> None:
@@ -605,8 +667,10 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_nested(c)            # 0. NESTED staging (rebases img_root)
     _build_image_list(c)        # image_list.txt + c.lines
     _check_gps_coverage(c)      # c.gps_present / c.gps_opts (may abort)
+    c.orig_root = c.img_root    # capture pre-resize originals (intact EXIF) for gps_inject
     _maybe_resize_fullhd(c)     # FullHD downscale (rebases img_root)
     _stage_extract(c)           # 1. feature_extractor
+    _stage_gps_inject(c)        # 1b. inject TIFF/non-JPEG EXIF GPS into DB pose_priors
     _stage_match(c)             # 2. matcher
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)
     _stage_mapper(c)            # 4. mapper -> sparse/0

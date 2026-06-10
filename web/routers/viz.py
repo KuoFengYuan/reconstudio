@@ -6,6 +6,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -15,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from jobs import manager
 from pipeline import get_backend
+from pipeline.config import settings
 from pipeline.model import (
     count_points,
     cull_cameras,
@@ -92,10 +95,44 @@ async def image_detail_ep(job_id: str, idx: int, m: str | None = None):
     return JSONResponse(await asyncio.to_thread(image_detail, md, idx))
 
 
+# formats a browser's <img> can render directly; anything else (TIFF) is transcoded.
+_WEB_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+
+def _preview_jpeg(src: Path, ws: Path, name: str) -> Path | None:
+    """Transcode a non-web image (TIFF) to a cached JPEG preview so browsers can show it
+    (no native TIFF support). Cached under ws/.preview/<name>.jpg and reused while newer
+    than the source. Downscaled to <=1920 px so a 300 MB aerial TIFF becomes a light JPEG.
+    Returns the JPEG path, or None if ffmpeg is unavailable / fails."""
+    dst = ws / ".preview" / (name + ".jpg")
+    try:
+        if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
+            return dst
+    except OSError:
+        pass
+    ff = settings.ffmpeg_bin
+    if not shutil.which(ff):
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(".jpg.tmp")
+    r = subprocess.run(
+        # -f mjpeg: force the JPEG muxer — the ".tmp" temp name has no image extension for
+        # ffmpeg to infer the format from. area = fast, high-quality downscale.
+        [ff, "-y", "-nostdin", "-loglevel", "error", "-i", str(src),
+         "-vf", "scale='min(1920,iw)':-2:flags=area", "-q:v", "3", "-f", "mjpeg", str(tmp)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if r.returncode != 0 or not tmp.is_file():
+        tmp.unlink(missing_ok=True)
+        return None
+    tmp.replace(dst)
+    return dst
+
+
 @router.get("/api/jobs/{job_id}/imagefile/{idx}")
 async def image_file(job_id: str, idx: int, m: str | None = None):
     """Serve the source photo for image #idx (checked across the undistorted output,
-    the original image_root, and the NESTED staging dir)."""
+    the original image_root, and the NESTED staging dir). TIFF inputs are transcoded to a
+    cached JPEG preview — browsers can't render TIFF, so the raw file would fail to load."""
     job = manager.get(job_id)
     md = resolve_model(job, m) if job else None
     if not md:
@@ -107,9 +144,20 @@ async def image_file(job_id: str, idx: int, m: str | None = None):
     ws = Path(job.meta.get("workspace", ""))
     p = job.params or {}
     dense = ws / f"{p.get('dataset_name', 'training_dataset')}_{p.get('mapper', 'global')}_mapper"
-    for cand in (dense / "images" / name, Path(job.meta.get("image_root", "")) / name, ws / "staging" / name):
+    # prefer already-downscaled sources (undistorted output, the resize copy) over the raw
+    # original — for TIFF that makes the JPEG transcode read ~6 MB instead of ~300 MB. The
+    # resize folder is images_<resize_max> (images_fullhd is the pre-rename legacy name).
+    rmax = str(p.get("resize_max", "1920")).strip() or "1920"
+    for cand in (dense / "images" / name, ws / f"images_{rmax}" / name,
+                 ws / "images_fullhd" / name,
+                 Path(job.meta.get("image_root", "")) / name, ws / "staging" / name):
         if cand.is_file():
-            return FileResponse(cand)
+            if cand.suffix.lower() in _WEB_IMAGE_EXTS:
+                return FileResponse(cand)
+            jpg = await asyncio.to_thread(_preview_jpeg, cand, ws, name)
+            if jpg:
+                return FileResponse(jpg, media_type="image/jpeg")
+            raise HTTPException(415, f"cannot preview {cand.suffix} image (transcode failed)")
     raise HTTPException(404, f"image file not found: {name}")
 
 
