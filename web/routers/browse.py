@@ -8,8 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from pipeline import gcs_ls, gcs_parent
-from web.shared import (BROWSE_ROOT, DEST_ROOT, GSUTIL_BIN, MESH_EXTS, SPLAT_EXTS,
-                        VIDEO_EXTS, _page)
+from web.shared import BROWSE_ROOT, DEST_ROOT, GSUTIL_BIN, MESH_EXTS, SPLAT_EXTS, VIDEO_EXTS, _page
 
 router = APIRouter()
 
