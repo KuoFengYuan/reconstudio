@@ -5,6 +5,7 @@ stay in the routers; this layer only resolves and builds paths.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -12,7 +13,22 @@ import time
 from pathlib import Path
 
 
+def _block_model(d: Path) -> Path | None:
+    """A blocksplit block dir holds a flat sparse/ (no /0)."""
+    md = d / "sparse"
+    return md if (md / "images.bin").exists() and (md / "points3D.bin").exists() else None
+
+
 def model_dir(job) -> Path | None:
+    if getattr(job, "kind", "") == "blocksplit":
+        out = (job.meta or {}).get("out_dir")
+        if not out:
+            return None
+        # default view = the first block (older jobs have no block list in meta)
+        for d in sorted(Path(out).glob("block_*")):
+            if md := _block_model(d):
+                return md
+        return None
     ws = (job.meta or {}).get("workspace")
     if not ws:
         return None
@@ -37,6 +53,15 @@ def resolve_model(job, sub: str | None) -> Path | None:
     it from escaping the workspace via .. ."""
     if not sub:
         return model_dir(job)
+    if getattr(job, "kind", "") == "blocksplit":
+        out = (job.meta or {}).get("out_dir")
+        if not out:
+            return None
+        root = Path(out).resolve()
+        cand = (root / sub).resolve()         # sub = 'block_<x>_<y>', confined to out_dir
+        if not str(cand).startswith(str(root) + os.sep):
+            return None
+        return _block_model(cand)
     ws = (job.meta or {}).get("workspace")
     if not ws:
         return None
@@ -45,6 +70,29 @@ def resolve_model(job, sub: str | None) -> Path | None:
     if cand != cleaned and not str(cand).startswith(str(cleaned) + os.sep):
         return None
     return cand if (cand / "images.bin").exists() and (cand / "points3D.bin").exists() else None
+
+
+def block_list(job) -> list[dict]:
+    """[{name, views}] of a blocksplit job's blocks for the viewer's switcher.
+    manifest.json is the source of truth (covers jobs that predate the
+    meta.blocks log parser); fall back to globbing valid block dirs. Empty for
+    other job kinds."""
+    if getattr(job, "kind", "") != "blocksplit":
+        return []
+    out = (job.meta or {}).get("out_dir")
+    if not out:
+        return []
+    root = Path(out)
+    try:
+        mani = json.loads((root / "manifest.json").read_text())
+        blocks = [{"name": str(b["name"]), "views": b.get("train_views", "")}
+                  for b in mani.get("blocks", [])]
+        if blocks:
+            return blocks
+    except (OSError, ValueError, KeyError):
+        pass
+    return [{"name": d.name, "views": ""} for d in sorted(root.glob("block_*"))
+            if (d / "sparse" / "images.bin").is_file()]
 
 
 def trained_model_dir(job) -> Path | None:

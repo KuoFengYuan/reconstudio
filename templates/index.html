@@ -114,7 +114,7 @@
   .tabs.steps .tabrow + .tabrow { border-top:1px dashed var(--line); padding-top:4px; }
   .tabs.steps .lbl { flex:none; color:var(--mut); font-size:11px; padding:0 7px 0 5px;
                      letter-spacing:2px; user-select:none; }
-  .tabs.steps .tabrow.tools button { flex:0 1 auto; padding:6px 16px; }
+  .tabs.steps .tabrow.tools button { flex:0 1 auto; padding:6px 10px; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
@@ -145,8 +145,9 @@
       </div>
       <div class="tabrow tools">
         <span class="lbl">工具</span>
+        <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
         <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
-        <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat（點雲）</button>
+        <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
       </div>
     </div>
 
@@ -433,6 +434,51 @@
       {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
       {% endif %}
     {% endmacro %}
+
+    <!-- ----- blocksplit form ----- -->
+    <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>分塊（大場景 → 每塊獨立訓練）</legend>
+        <div class="hint">把重建好的場景切成子塊,每塊各自吃滿 splat 預算;要街道級細節用這個。</div>
+        <label>source（COLMAP workspace 或去畸變輸出）</label>
+        <div class="row">
+          <input name="source" id="bs_source" placeholder="{{ browse_root }}" required>
+          <button type="button" class="ghost" onclick="openPicker('bs_source')">瀏覽</button>
+        </div>
+        <label>out_dir（留空 = source/blocks/&lt;時間&gt;）</label>
+        <div class="row">
+          <input name="out_dir" id="bs_out" placeholder="留空自動">
+          <button type="button" class="ghost" onclick="openPicker('bs_out')">瀏覽</button>
+        </div>
+        <label>block_size（模型單位;GPS 對齊後 = 公尺）</label>
+        <input name="block_size" value="500">
+        <label>buffer（邊界外擴;訓練後裁掉避免接縫）</label>
+        <input name="buffer" value="120">
+        <label>region（minx,miny,maxx,maxy;留空 = 全範圍）</label>
+        <input name="region" placeholder="只要市區就填市區範圍">
+        <label class="checks" style="margin-top:8px"><input type="checkbox" name="tile" value="1" checked>
+          影像切片（保原生解析度;關閉 = 連結原圖）</label>
+        <div class="hint">切片 = 原圖裁成小張、主點跟著平移,訓練吃到原生 GSD。</div>
+      </fieldset>
+      <details class="grp">
+        <summary>進階</summary>
+        <div class="gbody">
+          <label>max_tile_px（切片最長邊）</label>
+          <input name="max_tile_px" value="4096">
+          <label>min_obs（影像進塊門檻:塊內 3D 點觀測數）</label>
+          <input name="min_obs" value="30">
+          <label>min_tile_obs（切片保留門檻）</label>
+          <input name="min_tile_obs" value="8">
+          <label>min_images（影像數不足的塊跳過）</label>
+          <input name="min_images" value="15">
+          <label>jpeg_quality（切片輸出品質）</label>
+          <input name="jpeg_quality" value="95">
+          <label>workers（切圖並行數）</label>
+          <input name="workers" value="4">
+        </div>
+      </details>
+      <button class="submit" type="submit">▶ 開始分塊</button>
+    </form>
 
     <!-- ----- train form ----- -->
     <form id="form-train" style="display:none" hx-post="/ui/train" hx-target="#main" hx-swap="innerHTML">
@@ -723,7 +769,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','train','mesh','gcs','viewer','supersplat'].forEach(function(k){
+    ['frames','colmap','blocksplit','train','mesh','gcs','viewer','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -1101,13 +1147,14 @@
     htmx.ajax('GET', '/ui/jobs/' + id, {target:'#main', swap:'innerHTML'});
   }
   // embed the 3D viewer inline (its own importmap needs an isolated document -> iframe)
-  function openViz(id){
+  function openViz(id, sub){
     if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
+    var url = '/viz/' + id + (sub ? '?m=' + encodeURIComponent(sub) : '');
     document.getElementById('main').innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
       '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
-      '<span class="hint">3D 結果</span></div>' +
-      '<iframe src="/viz/' + id + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
+      '<span class="hint">3D 結果' + (sub ? ' · ' + sub : '') + '</span></div>' +
+      '<iframe src="' + url + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
   }
   function openMeshViz(id){
     if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view

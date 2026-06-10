@@ -49,6 +49,48 @@ def parse_marker(form: dict, spec: dict) -> dict | None:
             "dict": str(pick("dict") or "DICT_5X5_100").strip()}
 
 
+def build_blocksplit_params(source: str, out_dir: str, form: dict) -> dict:
+    """Validate the 分塊 (block-split) form. Numbers stay strings (house style:
+    the pipeline converts); `tile` is the one real bool."""
+    def g(key: str, default: str) -> str:
+        v = (form.get(key) or "").strip()
+        return v if v else default
+
+    params = {
+        "source": source, "out_dir": out_dir,
+        "block_size": g("block_size", "500"), "buffer": g("buffer", "120"),
+        "region": (form.get("region") or "").strip(),
+        "tile": bool(form.get("tile")),
+        "max_tile_px": g("max_tile_px", "4096"),
+        "jpeg_quality": g("jpeg_quality", "95"),
+        "min_obs": g("min_obs", "30"), "min_tile_obs": g("min_tile_obs", "8"),
+        "min_images": g("min_images", "15"), "workers": g("workers", "4"),
+    }
+    for key in ("block_size", "buffer"):
+        try:
+            float(params[key])
+        except ValueError:
+            raise ValueError(f"{key} 需為數字") from None
+    if float(params["block_size"]) <= 0:
+        raise ValueError("block_size 需 > 0")
+    if float(params["buffer"]) < 0:
+        raise ValueError("buffer 需 ≥ 0")
+    for key in ("max_tile_px", "min_obs", "min_tile_obs", "min_images",
+                "jpeg_quality", "workers"):
+        if not str(params[key]).isdigit():
+            raise ValueError(f"{key} 需為正整數")
+    if not 1 <= int(params["jpeg_quality"]) <= 100:
+        raise ValueError("jpeg_quality 需在 1–100")
+    if int(params["max_tile_px"]) < 256:
+        raise ValueError("max_tile_px 需 ≥ 256")
+    if not 1 <= int(params["workers"]) <= 32:
+        raise ValueError("workers 需在 1–32")
+    if params["region"]:
+        from pipeline.blocksplit import parse_region  # zh errors, shared with pipeline
+        parse_region(params["region"])
+    return params
+
+
 def build_colmap_params(image_root: str, workspace: str, folders: list[str],
                         stages: list[str], form: dict) -> dict:
     def g(key: str, default: str) -> str:

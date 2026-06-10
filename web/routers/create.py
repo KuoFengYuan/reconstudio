@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -14,7 +15,12 @@ from fastapi.responses import HTMLResponse
 
 from jobs import COLMAP_STAGES, Job, manager, new_id
 from pipeline import build_cli, default_dest, gcs_multi_plan, get_backend
-from web.services.forms import build_colmap_params, parse_marker, scene_label
+from web.services.forms import (
+    build_blocksplit_params,
+    build_colmap_params,
+    parse_marker,
+    scene_label,
+)
 from web.services.models import prepare_edited_model
 from web.shared import BROWSE_ROOT, DEST_ROOT, FFMPEG_BIN, GSUTIL_BIN, _page
 
@@ -203,6 +209,30 @@ async def create_colmap(request: Request):
               subtitle=f"{image_root}  →  {workspace}",
               params=params, mirror=str(Path(workspace) / "pipeline.log"),
               meta={"image_root": image_root, "workspace": workspace, "subfolders": sub})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/blocksplit", response_class=HTMLResponse)
+async def create_blocksplit(request: Request):
+    """大場景分塊：把完成的 COLMAP 重建切成可獨立訓練的子塊（可選影像切片）。"""
+    form = dict(await request.form())
+    source = (form.get("source") or "").strip().rstrip("/")
+    out = (form.get("out_dir") or "").strip().rstrip("/")
+    try:
+        if not Path(source).is_dir():
+            raise ValueError(f"source 不是資料夾: {source!r}")
+        if not out:
+            out = str(Path(source) / "blocks" / time.strftime("%Y%m%d-%H%M%S"))
+        params = build_blocksplit_params(source, out, form)
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    job = Job(id=new_id(), kind="blocksplit",
+              title=f"🧱 分塊 · {scene_label(source)}",
+              subtitle=f"{source}  →  {out}",
+              params=params, mirror=str(Path(out) / "blocksplit.log"),
+              meta={"source": source, "out_dir": out, "tile": params["tile"]})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 

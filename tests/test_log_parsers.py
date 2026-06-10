@@ -358,8 +358,8 @@ def test_parsers_registry_maps_to_correct_callables():
     assert PARSERS["gcs"] is _parse_gcs
 
 
-def test_parsers_registry_has_exactly_the_five_kinds():
-    assert set(PARSERS) == {"colmap", "frames", "train", "mesh", "gcs"}
+def test_parsers_registry_has_exactly_the_known_kinds():
+    assert set(PARSERS) == {"colmap", "frames", "train", "mesh", "gcs", "blocksplit"}
 
 
 def test_parsers_registry_dispatch_round_trips():

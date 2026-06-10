@@ -75,6 +75,29 @@
     <div class="hint">到 COLMAP / 訓練 / Mesh 分頁，用「瀏覽」選這個資料夾即可（不會自動帶入，流程由你決定）。</div>
     {% endif %}
 
+  {% elif job.kind == 'blocksplit' %}
+    <div class="chips">
+      {% if job.meta.get('blocks') %}<span class="chip ok">{{ job.meta.blocks | length }} 塊</span>{% endif %}
+      {% if job.meta.get('tile') %}<span class="chip">原生解析度切片</span>{% endif %}
+    </div>
+    {% if job.status == 'done' %}
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      {% if job.meta.get('blocks') %}
+      <select id="bs_pick" style="max-width:300px">
+        {% for b in job.meta.blocks %}
+        <option value="{{ b.name }}">{{ b.name }}（{{ b.views }} views）</option>
+        {% endfor %}
+      </select>
+      <button onclick="openViz('{{ job.id }}', document.getElementById('bs_pick').value)">🧊 檢視這塊</button>
+      <button class="ghost" onclick="fillTrain('{{ job.meta.get('out_dir','') }}/' + document.getElementById('bs_pick').value)">🧠 帶入訓練</button>
+      {% else %}
+      <button onclick="openViz('{{ job.id }}')">🧊 檢視第一塊</button>
+      <span class="hint">舊 job 沒記到塊清單;其他塊在 viz 網址加 ?m=block_X_Y。</span>
+      {% endif %}
+    </div>
+    <div class="hint pathline">✅ 輸出：<code>{{ job.meta.get('out_dir','') }}</code>（每塊可直接當訓練 source）</div>
+    {% endif %}
+
   {% else %}
     <div class="chips">
       {% for s in stages %}
