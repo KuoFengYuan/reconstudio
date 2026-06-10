@@ -21,7 +21,6 @@ from pipeline import (
     COLMAP_STAGES,
     Cancelled,
     Runner,
-    run_blocksplit,
     run_colmap,
     run_frames,
     run_gcs_sync,
@@ -45,10 +44,18 @@ def _run_gcs(params: dict, runner: Runner) -> None:
     return run_gcs_sync(params, runner)
 
 
+def _run_blocksplit(params: dict, runner: Runner) -> None:
+    """Lazy import: blocksplit pulls numpy, which the panel base / CI's pure-Python
+    install doesn't carry. Kept out of pipeline/__init__'s eager chain (like
+    large_scene) so importing pipeline/jobs stays numpy-free."""
+    from pipeline.blocksplit import run_blocksplit
+    return run_blocksplit(params, runner)
+
+
 RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "frames": run_frames,
     "colmap": run_colmap,
-    "blocksplit": run_blocksplit,
+    "blocksplit": _run_blocksplit,
     "train": run_train,
     "mesh": run_mesh,
     "gcs": _run_gcs,

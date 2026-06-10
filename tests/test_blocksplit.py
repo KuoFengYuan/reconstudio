@@ -3,10 +3,16 @@ tiny synthetic dense scene (two clusters → two blocks, tiled and non-tiled).""
 import json
 from pathlib import Path
 
-import numpy as np
 import pytest
 
-from pipeline.blocksplit import (
+# blocksplit + the COLMAP read/write helpers need numpy (and the e2e split needs
+# cv2). The panel keeps these out of its base/CI install, so skip this module when
+# absent — mirrors how large_scene's numpy code isn't exercised in CI. Runs in full
+# locally (the `rec` env has both).
+np = pytest.importorskip("numpy")
+pytest.importorskip("cv2")
+
+from pipeline.blocksplit import (  # noqa: E402
     grid_cells,
     parse_region,
     run_blocksplit,
@@ -15,7 +21,7 @@ from pipeline.blocksplit import (
     tile_layout,
     tile_name,
 )
-from pipeline.vendor.read_write_model import (
+from pipeline.vendor.read_write_model import (  # noqa: E402
     Camera,
     Image,
     Point3D,
@@ -24,7 +30,7 @@ from pipeline.vendor.read_write_model import (
     write_images_binary,
     write_points3D_binary,
 )
-from web.services.forms import build_blocksplit_params
+from web.services.forms import build_blocksplit_params  # noqa: E402
 
 
 class _Runner:
