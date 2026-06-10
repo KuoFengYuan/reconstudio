@@ -258,12 +258,27 @@ def _parse_gcs(job: Job, line: str) -> None:
         job.current_stage = "done"
 
 
+# blocksplit: collect the per-block summary lines so the job view can offer a
+# block picker (檢視/帶入訓練) once the split is done.
+_BLOCKSPLIT_LINE = re.compile(r"^\[blocksplit\] (block_\d+_\d+): .*?→ (\d+) views")
+
+
+def _parse_blocksplit(job: Job, line: str) -> None:
+    m = _BLOCKSPLIT_LINE.match(line)
+    if not m:
+        return
+    blocks = job.meta.setdefault("blocks", [])
+    if not any(b.get("name") == m.group(1) for b in blocks):
+        blocks.append({"name": m.group(1), "views": int(m.group(2))})
+
+
 PARSERS: dict[str, Callable[[Job, str], None]] = {
     "colmap": _parse_colmap,
     "frames": _parse_frames,
     "train": _parse_train,
     "mesh": _parse_mesh,
     "gcs": _parse_gcs,
+    "blocksplit": _parse_blocksplit,
 }
 
 

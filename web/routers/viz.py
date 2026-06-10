@@ -50,7 +50,7 @@ async def viz(request: Request, job_id: str, m: str | None = None):
     # when viewing a cleaned variant, surface its folder + trainable dataset path so the
     # user can see/copy where it lives (the post-cull message is transient).
     clean_dir = clean_dataset = ""
-    if m and md and md != model_dir(job):
+    if m and md and job.kind != "blocksplit" and md != model_dir(job):
         root = md.parent.parent                         # .../cleaned/<ts>
         clean_dir = str(root)
         ds = root / "dataset"

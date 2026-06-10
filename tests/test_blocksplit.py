@@ -239,6 +239,38 @@ def test_run_blocksplit_no_tile_links_originals(tmp_path):
     assert not (out / "_tiles").exists()
 
 
+def test_viewer_resolution_for_blocksplit_job(tmp_path):
+    """model_dir/resolve_model must surface block models for blocksplit jobs."""
+    import types
+
+    from web.services.models import model_dir, resolve_model
+
+    ws = _scene(tmp_path)
+    out = tmp_path / "out_viz"
+    run_blocksplit(_params(ws, out), _Runner())
+
+    job = types.SimpleNamespace(kind="blocksplit",
+                                meta={"out_dir": str(out)}, params={})
+    assert model_dir(job) == out / "block_0_0" / "sparse"          # default = first
+    assert resolve_model(job, "block_1_0") == out / "block_1_0" / "sparse"
+    assert resolve_model(job, "no_such_block") is None
+    assert resolve_model(job, "../outside") is None                # confined to out_dir
+
+
+def test_jobstatus_parser_collects_blocks():
+    import types
+
+    from jobs import _parse_blocksplit
+
+    job = types.SimpleNamespace(meta={})
+    _parse_blocksplit(job, "[blocksplit] block_0_0: 33 src images → 33 views, 17522 pts (33 tiles)")
+    _parse_blocksplit(job, "[blocksplit] block_3_0: 110 src images → 139 views, 62449 pts (139 tiles)")
+    _parse_blocksplit(job, "[blocksplit] block_0_0: 33 src images → 33 views, 17522 pts (33 tiles)")
+    _parse_blocksplit(job, "[blocksplit] tiles [40/193] left/L-6_0-50336.tif")   # noise
+    assert job.meta["blocks"] == [{"name": "block_0_0", "views": 33},
+                                  {"name": "block_3_0", "views": 139}]
+
+
 def test_run_blocksplit_refuses_existing_output(tmp_path):
     ws = _scene(tmp_path)
     out = tmp_path / "out_dup"

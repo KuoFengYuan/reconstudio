@@ -1147,13 +1147,14 @@
     htmx.ajax('GET', '/ui/jobs/' + id, {target:'#main', swap:'innerHTML'});
   }
   // embed the 3D viewer inline (its own importmap needs an isolated document -> iframe)
-  function openViz(id){
+  function openViz(id, sub){
     if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
+    var url = '/viz/' + id + (sub ? '?m=' + encodeURIComponent(sub) : '');
     document.getElementById('main').innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
       '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
-      '<span class="hint">3D 結果</span></div>' +
-      '<iframe src="/viz/' + id + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
+      '<span class="hint">3D 結果' + (sub ? ' · ' + sub : '') + '</span></div>' +
+      '<iframe src="' + url + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
   }
   function openMeshViz(id){
     if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
