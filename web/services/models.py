@@ -5,6 +5,7 @@ stay in the routers; this layer only resolves and builds paths.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -69,6 +70,29 @@ def resolve_model(job, sub: str | None) -> Path | None:
     if cand != cleaned and not str(cand).startswith(str(cleaned) + os.sep):
         return None
     return cand if (cand / "images.bin").exists() and (cand / "points3D.bin").exists() else None
+
+
+def block_list(job) -> list[dict]:
+    """[{name, views}] of a blocksplit job's blocks for the viewer's switcher.
+    manifest.json is the source of truth (covers jobs that predate the
+    meta.blocks log parser); fall back to globbing valid block dirs. Empty for
+    other job kinds."""
+    if getattr(job, "kind", "") != "blocksplit":
+        return []
+    out = (job.meta or {}).get("out_dir")
+    if not out:
+        return []
+    root = Path(out)
+    try:
+        mani = json.loads((root / "manifest.json").read_text())
+        blocks = [{"name": str(b["name"]), "views": b.get("train_views", "")}
+                  for b in mani.get("blocks", [])]
+        if blocks:
+            return blocks
+    except (OSError, ValueError, KeyError):
+        pass
+    return [{"name": d.name, "views": ""} for d in sorted(root.glob("block_*"))
+            if (d / "sparse" / "images.bin").is_file()]
 
 
 def trained_model_dir(job) -> Path | None:

@@ -92,6 +92,16 @@
     <span>▾</span><b>🧊 {{ job.title }}</b>
   </div>
   <div class="bd">
+    {% if blocks %}
+    <div class="sec">分塊（{{ blocks | length }}）</div>
+    <select onchange="location.search = '?m=' + encodeURIComponent(this.value)"
+            style="width:100%;background:#222733;color:var(--fg);border:1px solid var(--line);
+                   border-radius:6px;padding:5px;font:inherit">
+      {% for b in blocks %}
+      <option value="{{ b.name }}" {{ 'selected' if b.name == cur_block }}>{{ b.name }}{% if b.views %}（{{ b.views }} views）{% endif %}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
     <div class="sec">統計</div>
     <div class="stat"><span>images</span><b id="s-img">…</b></div>
     <div class="stat"><span>cameras</span><b id="s-cam">…</b></div>

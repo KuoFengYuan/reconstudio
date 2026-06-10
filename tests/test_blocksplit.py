@@ -257,6 +257,29 @@ def test_viewer_resolution_for_blocksplit_job(tmp_path):
     assert resolve_model(job, "../outside") is None                # confined to out_dir
 
 
+def test_block_list_manifest_and_fallback(tmp_path):
+    """The viewer's block switcher: manifest first, glob fallback, [] otherwise."""
+    import types
+
+    from web.services.models import block_list
+
+    ws = _scene(tmp_path)
+    out = tmp_path / "out_list"
+    run_blocksplit(_params(ws, out), _Runner())
+
+    job = types.SimpleNamespace(kind="blocksplit",
+                                meta={"out_dir": str(out)}, params={})
+    names = [b["name"] for b in block_list(job)]
+    assert names == ["block_0_0", "block_1_0"]
+    assert all(isinstance(b["views"], int) for b in block_list(job))
+
+    (out / "manifest.json").unlink()                       # pre-manifest fallback
+    assert [b["name"] for b in block_list(job)] == ["block_0_0", "block_1_0"]
+
+    other = types.SimpleNamespace(kind="colmap", meta={"out_dir": str(out)}, params={})
+    assert block_list(other) == []
+
+
 def test_jobstatus_parser_collects_blocks():
     import types
 

@@ -29,6 +29,7 @@ from pipeline.model import (
     scene,
 )
 from web.services.models import (
+    block_list,
     dense_dir,
     make_edited_model,
     model_dir,
@@ -60,9 +61,12 @@ async def viz(request: Request, job_id: str, m: str | None = None):
     # EXIF GPS — so "aligned job + model exists" implies GPS coverage. The endpoint
     # re-validates against the actual files when clicked.
     scale_ok = bool(md) and bool((job.params or {}).get("gps_align"))
+    # blocksplit results are N sibling models — the viewer offers a block switcher
+    blocks = block_list(job)
+    cur_block = (m or (blocks[0]["name"] if blocks else "")) if md else ""
     return _page(request, "viz.html", job=job.to_dict(), has_model=bool(md),
                  model_sub=(m or ""), clean_dir=clean_dir, clean_dataset=clean_dataset,
-                 scale_ok=scale_ok)
+                 scale_ok=scale_ok, blocks=blocks, cur_block=cur_block)
 
 
 @router.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
