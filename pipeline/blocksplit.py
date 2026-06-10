@@ -23,8 +23,11 @@ a block when ≥ min_obs of its tracked 3D points fall inside the block(+buffer)
 a tile of that image is kept when ≥ min_tile_obs of those features land in it.
 A tile is the same camera at the same pose with the principal point shifted by
 the crop origin — geometrically exact, which is why no pose/GPS work is needed.
-The per-block images.bin carries empty 2D-point lists and points3D.bin empty
-tracks: trainers only read poses/intrinsics/xyz/rgb, and it keeps files small.
+Each block is a self-consistent COLMAP model: views carry the 2D observations
+of the block's points (shifted into tile pixel coordinates) and the points'
+tracks are rebuilt against the block's view ids, so the viewer's per-image
+"registered pts" / track-length stats stay meaningful. Trainers only read
+poses/intrinsics/xyz/rgb and ignore the rest.
 """
 from __future__ import annotations
 
@@ -56,8 +59,6 @@ BLOCKSPLIT_DEFAULTS = {
 }
 
 _PINHOLE = {"PINHOLE", "SIMPLE_PINHOLE"}
-_EMPTY_I64 = np.zeros(0, dtype=np.int64)
-_EMPTY_XY = np.zeros((0, 2), dtype=np.float64)
 
 
 # --------------------------------------------------------------------------- #
@@ -292,25 +293,44 @@ def run_blocksplit(p: dict, r: Runner) -> None:
 
         b_cams: dict[int, Camera] = {}
         b_imgs: dict[int, Image] = {}
+        trk_img: dict[int, list[int]] = {}   # point row → view ids observing it
+        trk_idx: dict[int, list[int]] = {}   # …and the obs index inside that view
         n_tiles = 0
+
+        def _add_view(vid, src, cam_id, name, vxy, vrows):
+            """Emit one view with its observations and grow the points' tracks."""
+            b_imgs[vid] = Image(id=vid, qvec=src.qvec, tvec=src.tvec,
+                                camera_id=cam_id, name=name,
+                                xys=np.asarray(vxy, np.float64),
+                                point3D_ids=pid[vrows].astype(np.int64))
+            for k, j in enumerate(vrows):
+                trk_img.setdefault(int(j), []).append(vid)
+                trk_idx.setdefault(int(j), []).append(k)
+
         for im, tiles in b["members"]:
+            rows_im, xys_im = obs[im.id]
+            hit = b["pmask"][rows_im]               # this view's obs of block points
+            sub_rows, sub_xy = rows_im[hit], xys_im[hit]
             if tiles is None:                       # no tiling: link the original
                 b_cams[im.camera_id] = cameras[im.camera_id]
-                b_imgs[im.id] = Image(id=im.id, qvec=im.qvec, tvec=im.tvec,
-                                      camera_id=im.camera_id, name=im.name,
-                                      xys=_EMPTY_XY, point3D_ids=_EMPTY_I64)
+                _add_view(im.id, im, im.camera_id, im.name, sub_xy, sub_rows)
                 link = bdir / "images" / im.name
                 link.parent.mkdir(parents=True, exist_ok=True)
                 if not link.is_symlink():
                     link.symlink_to((images_dir / im.name).resolve())
                 continue
+            cam = cameras[im.camera_id]
+            cols, rows_n = tile_layout(cam.width, cam.height, max_tile_px)
             for trr, tcc in tiles:
                 cam_t = tile_cams[(im.camera_id, trr, tcc)]
                 b_cams[cam_t.id] = cam_t
+                x0, y0, x1, y1 = tile_bounds(cam.width, cam.height,
+                                             cols, rows_n, tcc, trr)
+                in_t = ((sub_xy[:, 0] >= x0) & (sub_xy[:, 0] < x1) &
+                        (sub_xy[:, 1] >= y0) & (sub_xy[:, 1] < y1))
                 nm = tile_name(im.name, trr, tcc)
-                b_imgs[next_img_id] = Image(id=next_img_id, qvec=im.qvec, tvec=im.tvec,
-                                            camera_id=cam_t.id, name=nm,
-                                            xys=_EMPTY_XY, point3D_ids=_EMPTY_I64)
+                _add_view(next_img_id, im, cam_t.id, nm,
+                          sub_xy[in_t] - (x0, y0), sub_rows[in_t])
                 next_img_id += 1
                 n_tiles += 1
                 link = bdir / "images" / nm
@@ -319,10 +339,13 @@ def run_blocksplit(p: dict, r: Runner) -> None:
                     link.symlink_to((pool / nm).resolve())
 
         rows = np.nonzero(b["pmask"])[0]
-        b_pts = {int(pid[j]): Point3D(id=int(pid[j]), xyz=xyz[j], rgb=rgb[j],
-                                      error=err[j], image_ids=_EMPTY_I64,
-                                      point2D_idxs=_EMPTY_I64)
-                 for j in rows}
+        b_pts = {}
+        for j in rows:
+            jj = int(j)
+            b_pts[int(pid[jj])] = Point3D(
+                id=int(pid[jj]), xyz=xyz[jj], rgb=rgb[jj], error=err[jj],
+                image_ids=np.asarray(trk_img.get(jj, ()), dtype=np.int64),
+                point2D_idxs=np.asarray(trk_idx.get(jj, ()), dtype=np.int64))
         write_cameras_binary(b_cams, str(bdir / "sparse" / "cameras.bin"))
         write_images_binary(b_imgs, str(bdir / "sparse" / "images.bin"))
         write_points3D_binary(b_pts, str(bdir / "sparse" / "points3D.bin"))

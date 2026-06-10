@@ -212,6 +212,18 @@ def test_run_blocksplit_tiled(tmp_path):
         assert c.model == "PINHOLE"
         assert (c.width, c.height) == (32, 24)
         assert c.params[2] in (32.0, 0.0) and c.params[3] in (24.0, 0.0)
+    # views carry the block's observations in tile coordinates, and the rebuilt
+    # tracks round-trip: point → (view, idx) → same point
+    for im in imgs.values():
+        assert len(im.xys) == len(im.point3D_ids) > 0
+        assert all(int(p) in pts for p in im.point3D_ids)
+        assert (im.xys[:, 0] >= 0).all() and (im.xys[:, 0] < 32).all()
+        assert (im.xys[:, 1] >= 0).all() and (im.xys[:, 1] < 24).all()
+    tracked = [p for p in pts.values() if len(p.image_ids)]
+    assert tracked
+    p0 = tracked[0]
+    vid, k = int(p0.image_ids[0]), int(p0.point2D_idxs[0])
+    assert int(imgs[vid].point3D_ids[k]) == p0.id
     # every view's symlink resolves to a real crop in the pool
     for im in imgs.values():
         link = out / "block_0_0" / "images" / im.name
