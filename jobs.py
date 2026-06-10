@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -145,6 +147,12 @@ class Job:
     current_stage: str | None = None
     stage_status: dict[str, str] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # The Runner's reader thread mutates meta/stage_status (via the log
+        # parsers) while the event loop snapshots the job for save()/to_dict().
+        # Kept off the dataclass fields so asdict()/Job(**data) stay unaffected.
+        self._lock = threading.Lock()
+
     @property
     def dir(self) -> Path:
         return JOBS_DIR / self.id
@@ -153,12 +161,24 @@ class Job:
     def log_path(self) -> Path:
         return self.dir / "console.log"
 
+    def parse_line(self, parser: Callable[[Job, str], None], line: str) -> None:
+        """Apply a log parser under the job lock (called from the Runner thread)."""
+        with self._lock:
+            parser(self, line)
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        with self._lock:
+            return asdict(self)
 
     def save(self) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        (self.dir / "job.json").write_text(json.dumps(asdict(self), indent=2))
+        with self._lock:
+            payload = json.dumps(asdict(self), indent=2)
+        # tmp + rename: a crash mid-write must never leave a truncated job.json
+        # (_load_existing would silently drop the record).
+        tmp = self.dir / "job.json.tmp"
+        tmp.write_text(payload)
+        os.replace(tmp, self.dir / "job.json")
 
 
 def _parse_colmap(job: Job, line: str) -> None:
@@ -391,7 +411,8 @@ class JobManager:
             if job.mirror:
                 Path(job.mirror).parent.mkdir(parents=True, exist_ok=True)
             job.dir.mkdir(parents=True, exist_ok=True)
-            runner = Runner(job.log_path, on_line=lambda ln: parser(job, ln), mirror=job.mirror)
+            runner = Runner(job.log_path, on_line=lambda ln: job.parse_line(parser, ln),
+                            mirror=job.mirror)
         except Exception as exc:  # noqa: BLE001
             job.status = "failed"
             job.error = f"setup failed: {exc}"
