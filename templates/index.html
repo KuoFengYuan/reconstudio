@@ -114,7 +114,7 @@
   .tabs.steps .tabrow + .tabrow { border-top:1px dashed var(--line); padding-top:4px; }
   .tabs.steps .lbl { flex:none; color:var(--mut); font-size:11px; padding:0 7px 0 5px;
                      letter-spacing:2px; user-select:none; }
-  .tabs.steps .tabrow.tools button { flex:0 1 auto; padding:6px 16px; }
+  .tabs.steps .tabrow.tools button { flex:0 1 auto; padding:6px 10px; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
@@ -140,14 +140,14 @@
         <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
         <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
         <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
-        <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
         <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
         <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
       </div>
       <div class="tabrow tools">
         <span class="lbl">工具</span>
+        <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
         <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
-        <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat（點雲）</button>
+        <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
       </div>
     </div>
 
