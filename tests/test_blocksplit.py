@@ -172,7 +172,7 @@ def _scene(tmp_path):
                         np.broadcast_to(grad, (_H, _W, 3)).copy())
             cam_iids.append(iid)
             iid += 1
-        for k, p3 in zip(ids, cluster_pts):
+        for k, p3 in zip(ids, cluster_pts, strict=True):
             pts[int(k)] = Point3D(id=int(k), xyz=p3, rgb=np.array([10, 20, 30]),
                                   error=1.0, image_ids=np.array(cam_iids),
                                   point2D_idxs=np.array([0, 0, 0]))

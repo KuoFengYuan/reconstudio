@@ -34,7 +34,6 @@ from __future__ import annotations
 import concurrent.futures as futures
 import json
 import math
-import os
 import time
 from pathlib import Path, PurePosixPath
 
@@ -197,8 +196,8 @@ def run_blocksplit(p: dict, r: Runner) -> None:
 
     for ix, iy, bx0, by0, bx1, by1 in cells:
         r.check_cancel()
-        inb = ((X >= bx0 - buffer) & (X < bx1 + buffer) &
-               (Y >= by0 - buffer) & (Y < by1 + buffer))
+        inb = ((bx0 - buffer <= X) & (bx1 + buffer > X) &
+               (by0 - buffer <= Y) & (by1 + buffer > Y))
         if not inb.any():
             continue
         members: list[tuple[Image, list[tuple[int, int]] | None]] = []
@@ -297,15 +296,18 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         trk_idx: dict[int, list[int]] = {}   # …and the obs index inside that view
         n_tiles = 0
 
-        def _add_view(vid, src, cam_id, name, vxy, vrows):
+        # default args bind THIS block's dicts at def-time (the closure is called
+        # only within this iteration; the binding just satisfies bugbear B023).
+        def _add_view(vid, src, cam_id, name, vxy, vrows,
+                      _imgs=b_imgs, _trk_img=trk_img, _trk_idx=trk_idx):
             """Emit one view with its observations and grow the points' tracks."""
-            b_imgs[vid] = Image(id=vid, qvec=src.qvec, tvec=src.tvec,
-                                camera_id=cam_id, name=name,
-                                xys=np.asarray(vxy, np.float64),
-                                point3D_ids=pid[vrows].astype(np.int64))
+            _imgs[vid] = Image(id=vid, qvec=src.qvec, tvec=src.tvec,
+                               camera_id=cam_id, name=name,
+                               xys=np.asarray(vxy, np.float64),
+                               point3D_ids=pid[vrows].astype(np.int64))
             for k, j in enumerate(vrows):
-                trk_img.setdefault(int(j), []).append(vid)
-                trk_idx.setdefault(int(j), []).append(k)
+                _trk_img.setdefault(int(j), []).append(vid)
+                _trk_idx.setdefault(int(j), []).append(k)
 
         for im, tiles in b["members"]:
             rows_im, xys_im = obs[im.id]
