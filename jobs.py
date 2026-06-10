@@ -21,6 +21,7 @@ from pipeline import (
     COLMAP_STAGES,
     Cancelled,
     Runner,
+    run_blocksplit,
     run_colmap,
     run_frames,
     run_gcs_sync,
@@ -47,6 +48,7 @@ def _run_gcs(params: dict, runner: Runner) -> None:
 RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "frames": run_frames,
     "colmap": run_colmap,
+    "blocksplit": run_blocksplit,
     "train": run_train,
     "mesh": run_mesh,
     "gcs": _run_gcs,

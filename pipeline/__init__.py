@@ -6,6 +6,7 @@ sentinels, stage skipping — lives in Python. Log output mirrors the original
 shell scripts' format so the panel's progress parsers keep working.
 """
 from .backends import available_backends, build_cli, doctor, get_backend, list_gpus  # noqa: F401
+from .blocksplit import BLOCKSPLIT_DEFAULTS, run_blocksplit  # noqa: F401
 from .colmap import COLMAP_DEFAULTS, COLMAP_STAGES, run_colmap  # noqa: F401
 from .config import settings  # noqa: F401
 from .frames import FRAMES_DEFAULTS, run_frames  # noqa: F401
