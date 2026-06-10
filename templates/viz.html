@@ -128,6 +128,12 @@
       <div>📁 清理後資料夾</div><code id="cp-dir" style="color:var(--fg)"></code>
       <div style="margin-top:5px">🎯 訓練 source 用這個</div><code id="cp-ds" style="color:var(--accent)"></code>
     </div>
+    {% if scale_ok %}
+    <div class="sec">GPS 尺度驗證</div>
+    <div class="rowbtn"><button id="scale-go">📏 驗證地圖尺度</button></div>
+    <div class="hint" style="margin-top:2px">相機位置 vs EXIF GPS:長基線距離比值驗尺度</div>
+    <div id="scale-out" style="display:none;margin-top:6px;font-size:11px;color:var(--mut);line-height:1.5"></div>
+    {% endif %}
     <div class="sec">相機分組</div>
     <div id="legend"></div>
   </div>
@@ -726,6 +732,46 @@ function applyMove(dt){
   if (!mv.lengthSq()) return;
   mv.normalize().multiplyScalar(sceneSize * flySpeed * (shiftHeld ? 3 : 1) * dt);  // flySpeed span/s
   camera.position.add(mv); controls.target.add(mv);
+}
+
+// --- GPS scale check (button exists only for GPS-aligned jobs) -------------- //
+const scaleBtn = document.getElementById('scale-go');
+if (scaleBtn) scaleBtn.onclick = async () => {
+  const out = document.getElementById('scale-out');
+  scaleBtn.disabled = true;
+  out.style.display = 'block';
+  out.textContent = '讀原始檔 GPS + 計算中…';
+  try {
+    const r = await fetch(`/api/jobs/${JOB}/scale_check${MQ}`);
+    const d = await r.json();
+    out.innerHTML = r.ok ? renderScale(d) : `⚠ ${d.detail || ('HTTP ' + r.status)}`;
+  } catch (e) {
+    out.textContent = '⚠ ' + e;
+  } finally {
+    scaleBtn.disabled = false;
+  }
+};
+function renderScale(d){
+  const fg = 'color:var(--fg)';
+  const a = Math.abs(d.scale_err_pct);
+  // green when indistinguishable from zero at this network's sensitivity
+  const col = a <= Math.max(0.1, 2 * d.sensitivity_pct) ? 'var(--ok,#3fb950)'
+            : a <= 1 ? 'var(--warn,#d29922)' : 'var(--err,#f85149)';
+  const bins = d.bins.map(b =>
+    `基線 ${b.lo_m}–${b.hi_m}m:<span style="${fg}">${b.median.toFixed(5)}</span> (${b.n}對)`
+  ).join('<br>');
+  const fo = d.folders.length ? '<br>各資料夾固定偏移(桿臂,非地圖誤差):<br>' +
+    d.folders.map(f =>
+      `&nbsp;${f.folder} <span style="${fg}">${f.bias_m.toFixed(2)}m</span>` +
+      ` · 扣偏移後散布 ${f.spread_m.toFixed(2)}m (n=${f.n})`).join('<br>') : '';
+  return `尺度差 <b style="color:${col}">${d.scale_err_pct >= 0 ? '+' : ''}${d.scale_err_pct.toFixed(2)}%</b>` +
+    `(靈敏度約 ±${Math.max(d.sensitivity_pct, 0.01).toFixed(2)}%,${d.n_cams} 台 / ${d.n_pairs} 對)<br>` +
+    bins + '<br>各區間一致=尺度均勻、無形變<br>' +
+    `位置殘差 median <span style="${fg}">${d.resid_median_m.toFixed(2)}m</span>` +
+    ` · p90 ${d.resid_p90_m.toFixed(2)}m (E/N/U ${d.resid_axis_median_m.join(' / ')}m)` +
+    fo +
+    (d.warning ? `<br><span style="color:var(--err,#f85149)">⚠ ${d.warning}</span>` : '') +
+    `<br><span style="opacity:.75">${d.note}</span>`;
 }
 
 const clock = new THREE.Clock();
