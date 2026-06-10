@@ -74,3 +74,10 @@ ENUMS = {
     "MAPPER": ["global", "incremental", "pose_prior", "hierarchical"],
 }
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}
+# formats the standalone mesh viewer can load (three.js loaders vendored under
+# static/three/addons/loaders). .gltf is excluded: its external .bin/texture refs
+# wouldn't resolve through the single-file /api/viewer/meshfile endpoint.
+MESH_EXTS = {".ply", ".obj", ".stl", ".glb"}
+# formats the self-hosted SuperSplat viewer opens (3DGS point clouds; .ply here is
+# a gaussian cloud like point_cloud.ply, not a mesh)
+SPLAT_EXTS = {".ply", ".splat", ".ksplat", ".spz", ".sog"}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mesh · {{ job.title }}</title>
+<title>Viewer · {{ fname }}</title>
 <style>
   :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#c9d1d9; --panel:rgba(22,26,33,.92);
           --ok:#3fb950; --warn:#d29922; --err:#f85149; }
@@ -38,8 +38,19 @@
   #measval small { color:var(--mut); font-size:12px; font-weight:500; }
   #loading { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
              color:var(--mut); pointer-events:none; font-size:13px; }
-  #err { position:fixed; inset:0; display:none; align-items:center; justify-content:center; color:var(--err); padding:20px; text-align:center; }
+  /* open-file overlay: local-mode landing AND the error surface — any load failure
+     re-opens it with the reason, so a dead path/bad file always offers a way out. */
+  #pickov { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
+            background:rgba(8,10,14,.72); z-index:20; }
+  #pickov .pbox { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+                  padding:26px 30px; max-width:440px; text-align:center; box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  #pickov .pbox .ttl { font-size:15px; font-weight:600; margin-bottom:8px; }
+  #pickov .pbox .sub { color:var(--mut); margin-bottom:14px; }
+  #pick-err { color:var(--err); margin-bottom:14px; display:none; word-break:break-all; }
+  #pickov.drag .pbox { border-color:var(--accent); }
   #hint { position:fixed; left:12px; bottom:10px; color:var(--mut); font-size:11px; }
+  #pathbar { position:fixed; left:12px; top:10px; color:var(--mut); font-size:11px; max-width:46vw;
+             overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #mlabel { position:fixed; transform:translate(-50%,-50%); background:var(--panel); border:1px solid var(--accent);
             color:var(--fg); border-radius:6px; padding:2px 7px; font-size:12px; font-weight:600; display:none;
             pointer-events:none; white-space:nowrap; }
@@ -47,12 +58,21 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="loading">● 載入 mesh 中…</div>
-<div id="err"></div>
+<div id="loading" style="display:none">● 載入 mesh 中…</div>
 <div id="mlabel"></div>
+<div id="pathbar">{{ path }}</div>
+<div id="pickov">
+  <div class="pbox">
+    <div class="ttl">開啟 mesh 檔案</div>
+    <div id="pick-err"></div>
+    <div class="sub">支援 <b>.ply / .obj / .stl / .glb</b><br>把檔案拖放到這個視窗,或</div>
+    <button class="go" id="pick-btn">📂 選擇本機檔案…</button>
+  </div>
+</div>
+<input type="file" id="filein" accept=".ply,.obj,.stl,.glb" style="display:none">
 <div id="gui">
   <div class="hd" onclick="document.getElementById('gui').classList.toggle('collapsed')">
-    <span>▾</span><b>🧩 {{ job.title }}</b>
+    <span>▾</span><b id="hd-name">🧩 {{ fname }}</b>
   </div>
   <div class="bd">
     <div class="stat"><span>頂點</span><b id="s-v">…</b></div>
@@ -60,14 +80,14 @@
     <div class="stat"><span>尺寸</span><b id="s-dim">…</b></div>
     <div class="stat"><span>對角線</span><b id="s-diag">…</b></div>
 
-    {% if has_scaled %}
-    <div class="ctl"><label>顯示版本</label>
-      <div class="seg" id="src">
-        <button data-src="scaled" class="on">實際尺寸 (mm)</button>
-        <button data-src="raw">原始 (recon)</button>
+    <div class="ctl"><label>單位標示（檔案本身的數值不換算）</label>
+      <div class="seg" id="unitseg">
+        <button data-u="units" class="on">units</button>
+        <button data-u="mm">mm</button>
+        <button data-u="cm">cm</button>
+        <button data-u="m">m</button>
       </div>
     </div>
-    {% endif %}
 
     <div class="ctl"><label>亮度 <span id="lit-v">1.0</span></label>
       <input id="lit" type="range" min="0.4" max="2.6" step="0.1" value="1.0"></div>
@@ -77,6 +97,9 @@
         <label><input id="wire" type="checkbox"> 線框</label>
         <label><input id="vcol" type="checkbox" checked> 頂點色</label>
         <label><input id="whitebg" type="checkbox"> 白底</label>
+      </div>
+      <div class="rowbtn">
+        <label><input id="flipy" type="checkbox"> ↕ 翻轉(COLMAP Y-down)</label>
       </div>
       <div class="rowbtn">
         <label><input id="rot-obj" type="checkbox"> 🔄 旋轉物體(對齊)</label>
@@ -95,6 +118,7 @@
     <div class="rowbtn">
       <button class="go" id="reset">重置視角</button>
       <button id="reset-rot">歸零旋轉</button>
+      <button id="open-file" title="開啟其他檔案">📂</button>
     </div>
   </div>
 </div>
@@ -107,39 +131,47 @@
 <script type="module">
 import * as THREE from 'three';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 
-const JOB = "{{ job.id }}";
-const HAS_SCALED = {{ has_scaled | tojson }};
-// Each version shows its file's NATIVE units: scaled = real mm, raw = arbitrary
-// COLMAP/recon units (NOT converted) — so the two genuinely differ.
-const SOURCES = {
-  raw:    { url: `/api/jobs/${JOB}/mesh.ply`,        unit: 'units' },
-  scaled: { url: `/api/jobs/${JOB}/mesh_scaled.ply`, unit: 'mm' },
-};
-let curSrc = HAS_SCALED ? 'scaled' : 'raw';
-const unit = () => SOURCES[curSrc].unit;
+// Two sources, one pipeline: a server path (?path=), or a file picked/dropped right
+// here (local mode — parsed in the browser, nothing uploaded). Both converge on an
+// ArrayBuffer parsed client-side by extension.
+const PATH = {{ path | tojson }};
+const SUPPORTED = ['.ply', '.obj', '.stl', '.glb'];
+const extOf = n => { const i = n.lastIndexOf('.'); return i < 0 ? '' : n.slice(i).toLowerCase(); };
+let curExt = '';
+// Pure label: the measured numbers are always the file's native values, the
+// user just tells the viewer what those values mean.
+let unitLabel = 'units';
+const unit = () => unitLabel;
 
 const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias:true});
 renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeight);
 renderer.autoClear = false;
 const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b0d11);
 
-// Lighting: ambient + sky/ground + a headlight that follows the camera. A lit
-// mesh would otherwise look muddy vs. the unlit point cloud, so this is fairly
-// bright and the 亮度 slider scales all three together.
+// Lighting: ambient + sky/ground + a headlight that follows the camera (same
+// setup as the job-bound mesh viewer; the 亮度 slider scales all three).
 const ambient = new THREE.AmbientLight(0xffffff, 0.55); scene.add(ambient);
 const hemi = new THREE.HemisphereLight(0xffffff, 0x666c77, 1.3); scene.add(hemi);
 const head = new THREE.DirectionalLight(0xffffff, 1.7); scene.add(head);
 const BASE_LIT = { a: 0.55, h: 1.3, d: 1.7 };
 function setBrightness(m){ ambient.intensity = BASE_LIT.a*m; hemi.intensity = BASE_LIT.h*m; head.intensity = BASE_LIT.d*m; }
 
-// obj -> flip(180° about X: COLMAP Y-down -> three Y-up) -> inner(-centre) -> mesh
+// obj -> flip(optional 180° about X: COLMAP Y-down -> three Y-up) -> inner(-centre) -> mesh.
+// Recon outputs (.ply/.obj/.stl from this pipeline) are COLMAP-oriented -> flip ON;
+// .glb is Y-up by spec -> flip OFF. The ↕ checkbox lets the user override either way.
+const flipDefault = ext => ext !== '.glb';
 const obj = new THREE.Group();   scene.add(obj);
-const flip = new THREE.Group();  flip.rotation.x = Math.PI; obj.add(flip);
+const flip = new THREE.Group();  obj.add(flip);
 const inner = new THREE.Group(); flip.add(inner);
+function setFlip(on){ flip.rotation.x = on ? Math.PI : 0; obj.updateMatrixWorld(true); }
 
 const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.001, 1e7);
 const controls = new TrackballControls(camera, renderer.domElement);
@@ -160,16 +192,14 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight); controls.handleResize();
 });
 
-const flipW = v => new THREE.Vector3(v.x, -v.y, -v.z);
 let mesh, material, sceneSize = 1, centerC = new THREE.Vector3();
-const geoCache = {};
 
 function setStats(geo){
   const nV = geo.attributes.position.count;
   const nF = geo.index ? geo.index.count/3 : nV/3;
   geo.computeBoundingBox();
   const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
-  const u = unit(), dp = u === 'mm' ? 1 : 3;     // recon units are small -> more decimals
+  const u = unit(), dp = u === 'units' ? 3 : u === 'mm' ? 1 : 2;
   document.getElementById('s-v').textContent = nV.toLocaleString();
   document.getElementById('s-f').textContent = Math.round(nF).toLocaleString();
   document.getElementById('s-dim').textContent =
@@ -182,10 +212,12 @@ function fitView(geo){
   geo.boundingBox.getCenter(centerC);
   const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
   sceneSize = Math.max(sz.x, sz.y, sz.z) || 1;
+  // inner shifts the model centre to the origin, so the (possibly flipped)
+  // model always spins about the world origin — flip toggles need no refit.
   inner.position.copy(centerC).multiplyScalar(-1);
-  obj.position.copy(flipW(centerC));
+  obj.position.set(0,0,0);
   obj.updateMatrixWorld(true);
-  const tgt = obj.position.clone();
+  const tgt = new THREE.Vector3(0,0,0);
   controls.target.copy(tgt);
   camera.up.set(0,1,0);
   camera.position.set(tgt.x + sceneSize*0.6, tgt.y + sceneSize*0.45, tgt.z + sceneSize*1.2);
@@ -214,17 +246,114 @@ function buildMesh(geo){
   clearMeasure();
 }
 
-function load(src){
-  curSrc = src;
+// ---- multi-format load ----------------------------------------------------- //
+// Everything is normalised to ONE BufferGeometry so the whole toolset (stats,
+// ruler raycast, wireframe, vertex colours) works identically per format. For
+// multi-mesh containers (.obj groups, .glb scenes) the node transforms are baked
+// in and the parts merged; materials/textures are NOT kept — this is a geometry
+// inspector, not a lookdev viewer.
+function collectGeometries(root){
+  const geos = [];
+  root.updateMatrixWorld(true);
+  root.traverse(o => {
+    if (o.isMesh && o.geometry && o.geometry.attributes.position){
+      const g = o.geometry.clone().applyMatrix4(o.matrixWorld);
+      geos.push(g);
+    }
+  });
+  return geos;
+}
+function mergeAsOne(geos){
+  if (!geos.length) throw new Error('檔案裡沒有任何 mesh 幾何');
+  if (geos.length === 1) return geos[0];
+  // mergeGeometries needs identical attribute sets + uniform indexing: strip to
+  // the common attributes and de-index everything first.
+  const keep = ['position', 'normal', 'color'].filter(n => geos.every(g => g.attributes[n]));
+  const prepped = geos.map(g => {
+    const ni = g.index ? g.toNonIndexed() : g;
+    for (const n of Object.keys(ni.attributes)) if (!keep.includes(n)) ni.deleteAttribute(n);
+    ni.morphAttributes = {};
+    return ni;
+  });
+  const merged = mergeGeometries(prepped, false);
+  if (!merged) throw new Error('多個子 mesh 屬性不一致,無法合併');
+  return merged;
+}
+
+// overlay doubles as the error surface: any failure re-opens it with the reason,
+// so a bad path / unsupported file / dead blob always offers 選擇本機檔案 as a way out.
+function showOverlay(errMsg){
+  document.getElementById('loading').style.display = 'none';
+  const e = document.getElementById('pick-err');
+  e.style.display = errMsg ? 'block' : 'none';
+  e.textContent = errMsg || '';
+  document.getElementById('pickov').style.display = 'flex';
+}
+function setHeader(name, pathText){
+  document.title = `Viewer · ${name}`;
+  document.getElementById('hd-name').textContent = `🧩 ${name}`;
+  document.getElementById('pathbar').textContent = pathText || name;
+}
+
+// parse an ArrayBuffer by extension -> ok(BufferGeometry) / fail(message).
+// Loader parse errors (corrupt file, wrong actual format behind the extension)
+// surface as a readable message instead of a blank canvas.
+function parseBuffer(buf, ext, ok, fail){
+  try {
+    if (ext === '.ply')      ok(new PLYLoader().parse(buf));
+    else if (ext === '.stl') ok(new STLLoader().parse(buf));
+    else if (ext === '.obj')
+      ok(mergeAsOne(collectGeometries(new OBJLoader().parse(new TextDecoder().decode(buf)))));
+    else if (ext === '.glb')
+      new GLTFLoader().parse(buf, '',
+        g => { try { ok(mergeAsOne(collectGeometries(g.scene))); } catch (e) { fail(e.message); } },
+        e => fail(e.message || 'glb 解析失敗'));
+    else fail(`不支援的格式「${ext || '(無副檔名)'}」,支援:${SUPPORTED.join(' / ')}`);
+  } catch (e) {
+    fail(`檔案無法解析(內容可能損毀,或不是有效的 ${ext}):${e.message}`);
+  }
+}
+
+function applyBuffer(buf, name, pathText){
+  const ext = extOf(name);
+  parseBuffer(buf, ext,
+    geo => {
+      // loaders don't always throw on garbage (PLYLoader parses junk into an
+      // EMPTY geometry) — an empty result is a failed load, not a blank model.
+      if (!geo.attributes.position || !geo.attributes.position.count)
+        return showOverlay(`載入「${name}」失敗:解析不出任何幾何— 檔案可能損毀,或內容不是有效的 ${ext}`);
+      curExt = ext;
+      document.getElementById('pickov').style.display = 'none';
+      document.getElementById('loading').style.display = 'none';
+      const f = flipDefault(ext);
+      document.getElementById('flipy').checked = f; setFlip(f);
+      setHeader(name, pathText);
+      buildMesh(geo); fitView(geo);
+    },
+    msg => showOverlay(`載入「${name}」失敗:${msg}`));
+}
+
+async function loadFromUrl(url, name, pathText){
   document.getElementById('loading').style.display = 'flex';
-  const done = geo => { document.getElementById('loading').style.display = 'none'; buildMesh(geo); fitView(geo); };
-  if (geoCache[src]) { done(geoCache[src]); return; }
-  new PLYLoader().load(SOURCES[src].url,
-    geo => { geoCache[src] = geo; done(geo); },
-    undefined,
-    () => { document.getElementById('loading').style.display = 'none';
-            const e = document.getElementById('err'); e.style.display = 'flex';
-            e.textContent = `載入失敗:${SOURCES[src].url}`; });
+  try {
+    const r = await fetch(url);
+    if (!r.ok){
+      let detail = `HTTP ${r.status}`;
+      try { detail += `:${(await r.json()).detail}`; } catch (_e) { /* non-JSON body */ }
+      showOverlay(`讀取「${name}」失敗(${detail})`);
+      return;
+    }
+    applyBuffer(await r.arrayBuffer(), name, pathText);
+  } catch (_e) {
+    showOverlay(`讀取「${name}」失敗(連線錯誤)`);
+  }
+}
+
+function openLocalFile(file){
+  document.getElementById('pickov').style.display = 'none';
+  document.getElementById('loading').style.display = 'flex';
+  file.arrayBuffer().then(buf => applyBuffer(buf, file.name, `本機檔案 · ${file.name}`))
+      .catch(e => showOverlay(`讀取本機檔案失敗:${e.message}`));
 }
 
 // ---- measure tool (ruler) ------------------------------------------------- //
@@ -258,6 +387,11 @@ function updateMarkerScales(){
     m.scale.setScalar(Math.max(_mv.distanceTo(camera.position) * perPx * MARKER_PX, 1e-12));
   }
 }
+function showMeasure(){
+  if (measPts.length !== 2) return;
+  const d = measPts[0].distanceTo(measPts[1]);   // file's native units (no scale in graph)
+  document.getElementById('measval').innerHTML = `${d.toFixed(2)} <small>${unit()}</small>`;
+}
 function addMeasurePoint(worldPt){
   const lp = inner.worldToLocal(worldPt.clone());
   if (measPts.length === 2) clearMeasure();          // 3rd click -> start over
@@ -265,8 +399,7 @@ function addMeasurePoint(worldPt){
   if (measPts.length === 2){
     const g = new THREE.BufferGeometry().setFromPoints(measPts);
     measGroup.add(new THREE.Line(g, new THREE.LineBasicMaterial({color:measColor()})));
-    const d = measPts[0].distanceTo(measPts[1]);   // current file's native units (no scale in graph)
-    document.getElementById('measval').innerHTML = `${d.toFixed(2)} <small>${unit()}</small>`;
+    showMeasure();
   }
 }
 renderer.domElement.addEventListener('pointerdown', e => { downXY = [e.clientX, e.clientY]; });
@@ -283,12 +416,12 @@ renderer.domElement.addEventListener('pointerup', e => {
 });
 
 // ---- UI wiring ------------------------------------------------------------ //
-{% if has_scaled %}
-document.querySelectorAll('#src button').forEach(b => b.onclick = () => {
-  document.querySelectorAll('#src button').forEach(x => x.classList.remove('on'));
-  b.classList.add('on'); load(b.dataset.src);
+document.querySelectorAll('#unitseg button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#unitseg button').forEach(x => x.classList.remove('on'));
+  b.classList.add('on'); unitLabel = b.dataset.u;
+  if (mesh) setStats(mesh.geometry);
+  showMeasure();
 });
-{% endif %}
 document.getElementById('wire').onchange = e => { if (material) material.wireframe = e.target.checked; };
 document.getElementById('vcol').onchange = applyColorMode;
 document.getElementById('lit').oninput = e => {
@@ -298,6 +431,7 @@ document.getElementById('whitebg').onchange = e => {
   scene.background = new THREE.Color(whiteBg ? 0xf2f2f2 : 0x0b0d11);
   measGroup.traverse(o => { if (o.material && o.material.color) o.material.color.setHex(measColor()); });
 };
+document.getElementById('flipy').onchange = e => { setFlip(e.target.checked); };
 document.getElementById('rot-obj').onchange = e => { gizmo.enabled = gizmo.visible = e.target.checked; };
 document.getElementById('meas').onchange = e => {
   document.getElementById('meas-hint').textContent = e.target.checked ? '單擊面上兩點 → 顯示距離(第三點重新量)' : '開啟後點兩個面上的點量距離'; };
@@ -330,7 +464,26 @@ const mid = new THREE.Vector3();
   viewHelper.render(renderer);
 })();
 
-load(curSrc);
+// ---- open-file plumbing (picker button + drag & drop, usable anytime) ------ //
+const filein = document.getElementById('filein');
+document.getElementById('pick-btn').onclick = () => filein.click();
+document.getElementById('open-file').onclick = () => filein.click();
+filein.onchange = () => { if (filein.files[0]) openLocalFile(filein.files[0]); filein.value = ''; };
+addEventListener('dragover', e => { e.preventDefault();
+  document.getElementById('pickov').classList.add('drag'); });
+addEventListener('dragleave', () => document.getElementById('pickov').classList.remove('drag'));
+addEventListener('drop', e => {
+  e.preventDefault();
+  document.getElementById('pickov').classList.remove('drag');
+  if (e.dataTransfer.files[0]) openLocalFile(e.dataTransfer.files[0]);
+});
+
+// ---- boot: server path, else the local file picker -------------------------- //
+if (PATH)
+  loadFromUrl(`/api/viewer/meshfile?path=${encodeURIComponent(PATH)}`,
+              {{ fname | tojson }}, PATH);
+else
+  showOverlay(null);
 </script>
 </body>
 </html>

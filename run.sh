@@ -48,5 +48,24 @@ ENVPY="$CONDA_ROOT/envs/$CONDA_ENV/bin/python"
                        echo "set CONDA_ROOT/CONDA_ENV in local.env" >&2; exit 1; }
 export PYTHONNOUSERSITE=1   # keep ~/.local out of the env
 
+# --- SuperSplat auto-update: sync to the newest upstream release at startup --- #
+# Runs in the BACKGROUND so the server starts immediately; the build script swaps
+# the bundle atomically when done, so the current version keeps serving meanwhile.
+# Fail-soft: offline / node missing / patch conflict on a new release just keeps
+# the existing bundle (details in the log). Up-to-date check costs one ls-remote.
+# Disable with SUPERSPLAT_AUTOUPDATE=0 (e.g. in local.env), or pin SUPERSPLAT_VER.
+: "${SUPERSPLAT_AUTOUPDATE:=1}"
+if [[ "$SUPERSPLAT_AUTOUPDATE" == "1" ]]; then
+  SS_LOG="$RECON_STUDIO_DATA/supersplat_build.log"
+  (
+    flock -n 9 || exit 0          # another startup is already syncing
+    if SUPERSPLAT_VER="${SUPERSPLAT_VER:-latest}" ./tools/build_supersplat.sh >>"$SS_LOG" 2>&1; then
+      echo "supersplat: $(cat static/supersplat/.version 2>/dev/null || echo '?') (synced)"
+    else
+      echo "supersplat: update failed — keeping current bundle (see $SS_LOG)" >&2
+    fi
+  ) 9>"$RECON_STUDIO_DATA/supersplat_build.lock" &
+fi
+
 echo "Recon Studio -> http://$HOST:$PORT  (env=$CONDA_ENV, ffmpeg=$FFMPEG_BIN, colmap=$COLMAP_BIN)"
 exec "$ENVPY" -m uvicorn app:app --host "$HOST" --port "$PORT"
