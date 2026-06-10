@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from jobs import manager
 from pipeline import get_backend
+from pipeline.colmap._scale_check import scale_check
 from pipeline.config import settings
 from pipeline.model import (
     count_points,
@@ -54,8 +55,14 @@ async def viz(request: Request, job_id: str, m: str | None = None):
         clean_dir = str(root)
         ds = root / "dataset"
         clean_dataset = str(ds) if (ds / "sparse" / "cameras.bin").is_file() else ""
+    # GPS scale check is offered only when the model has a metric frame to verify:
+    # GPS_ALIGN was on, and the pipeline aborts pre-mapper unless EVERY input had
+    # EXIF GPS — so "aligned job + model exists" implies GPS coverage. The endpoint
+    # re-validates against the actual files when clicked.
+    scale_ok = bool(md) and bool((job.params or {}).get("gps_align"))
     return _page(request, "viz.html", job=job.to_dict(), has_model=bool(md),
-                 model_sub=(m or ""), clean_dir=clean_dir, clean_dataset=clean_dataset)
+                 model_sub=(m or ""), clean_dir=clean_dir, clean_dataset=clean_dataset,
+                 scale_ok=scale_ok)
 
 
 @router.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
@@ -93,6 +100,30 @@ async def image_detail_ep(job_id: str, idx: int, m: str | None = None):
     if not md:
         raise HTTPException(404, "no sparse model for this job")
     return JSONResponse(await asyncio.to_thread(image_detail, md, idx))
+
+
+@router.get("/api/jobs/{job_id}/scale_check")
+async def scale_check_ep(job_id: str, m: str | None = None):
+    """Verify the map's metric scale + position residuals against the EXIF GPS.
+    Only meaningful for GPS-aligned models (the viz page hides the button otherwise);
+    GPS is re-read from the ORIGINAL images, so this also re-validates coverage."""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    md = resolve_model(job, m)
+    if not md:
+        raise HTTPException(404, "no sparse model for this job")
+    if not (job.params or {}).get("gps_align"):
+        raise HTTPException(400, "此 job 未開啟 GPS 對齊（GPS_ALIGN），模型沒有公制尺度可驗。")
+    meta = job.meta or {}
+    roots = [Path(meta.get("image_root", "")),
+             Path(meta.get("workspace", "")) / "staging"]   # NESTED staging fallback
+    try:
+        return JSONResponse(await asyncio.to_thread(scale_check, md, roots))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    except FileNotFoundError as e:
+        raise HTTPException(404, "sparse 模型不完整（缺 images.bin）。") from e
 
 
 # formats a browser's <img> can render directly; anything else (TIFF) is transcoded.
