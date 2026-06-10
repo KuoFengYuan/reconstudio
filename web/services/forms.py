@@ -71,7 +71,10 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "vocab_tree_url": (form.get("VOCAB_TREE_URL") or "").strip() or None,
         "force": bool(form.get("FORCE")),
         "layout": form.get("layout") or "auto",
-        "resize": form.get("resize") or "fullhd",
+        # 影像解析度 is ONE dropdown carrying "keep" or a numeric longest-side cap; it's
+        # split into the pipeline's two params (mode + cap) just after this dict is built.
+        "resize": form.get("resize") or "1920",
+        "resize_max": "1920",
         # spatial_matcher (MATCHER=spatial)
         "spatial_max_neighbors": g("SPATIAL_MAX_NEIGHBORS", "50"),
         "spatial_max_distance": g("SPATIAL_MAX_DISTANCE", "100"),
@@ -91,6 +94,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "cm_n_loop": g("CM_N_LOOP", "5"), "cm_n_gps": g("CM_N_GPS", "25"),
         "cm_loop_matches": (form.get("CM_LOOP_MATCHES") or "").strip(),
         "focal_factor": (form.get("FOCAL_FACTOR") or "").strip(),
+        "sift_max_image_size": (form.get("SIFT_MAX_IMAGE_SIZE") or "").strip(),
         "max_image_size": (form.get("MAX_IMAGE_SIZE") or "").strip(),
         "masks_dir": (form.get("MASKS_DIR") or "").strip().rstrip("/"),
         "simplify": bool(form.get("SIMPLIFY")),
@@ -103,6 +107,14 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "hm_image_overlap": (form.get("HM_IMAGE_OVERLAP") or "").strip(),
         "hm_num_workers": (form.get("HM_NUM_WORKERS") or "").strip(),
     }
+    # Split the single 影像解析度 selection into the pipeline's mode + cap. "keep" = no
+    # resize; a number = downscale to that longest side. "fullhd" is the pre-merge legacy
+    # value -> treat as the 1920 default. The digit/enum checks below then validate both.
+    sel = "1920" if params["resize"] == "fullhd" else params["resize"]
+    if sel == "keep":
+        params["resize"], params["resize_max"] = "keep", "1920"
+    else:
+        params["resize"], params["resize_max"] = "fullhd", sel
     for key, allowed in (("camera_mode", ENUMS["CAMERA_MODE"]),
                          ("matcher", ENUMS["MATCHER"]), ("mapper", ENUMS["MAPPER"]),
                          ("layout", ["auto", "single", "multi", "nested"]),
@@ -111,7 +123,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         if params[key] not in allowed:
             raise ValueError(f"{key} must be one of {allowed}")
     for key in ("max_features", "seq_overlap", "num_matches", "spatial_max_neighbors",
-                "cm_n_seq", "cm_n_quad", "cm_n_loop", "cm_n_gps"):
+                "cm_n_seq", "cm_n_quad", "cm_n_loop", "cm_n_gps", "resize_max"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
     for key in ("spatial_max_distance", "prior_std_x", "prior_std_y", "prior_std_z",
@@ -123,6 +135,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
             raise ValueError(f"{key} must be a number") from None
     # optional numerics: validated only when provided (blank = "use COLMAP default")
     for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
+                       ("sift_max_image_size", "SIFT_MAX_IMAGE_SIZE"),
                        ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),
                        ("hm_image_overlap", "HM_IMAGE_OVERLAP")):
         if params[key] and not params[key].isdigit():
