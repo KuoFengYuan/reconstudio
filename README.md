@@ -1,27 +1,31 @@
 # Recon Studio
 
-本機網頁面板,一條龍跑完整 3D 重建流程:**影片 → 清晰幀 → COLMAP → 3DGS 訓練 → Mesh**。
-面板本身 **不含 torch** —— `ffmpeg` / `colmap` / 訓練器(GS-2M…)都以**子行程**呼叫,所以即時
-log、取消、瀏覽器內 3D / Mesh 檢視器(含 mm 量尺)、Mesh 下載都是內建。單機工具,預設綁
-`127.0.0.1`,同時最多跑 `MAX_JOBS`(預設 4)個 job,GPU 每個 job 手動指定。
+把**影片或照片變成 3D 模型**的本機網頁面板,一條龍跑完:
 
 ```
- ① 抽幀                  ② COLMAP                ③ 訓練                  ④ Mesh
- video ──run_frames──► images ──run_colmap──► sparse + 去畸變dense ──run_train──► 3DGS model ──run_mesh──► tsdf_post.ply
- (NVDEC, 並行)         (+FullHD等比縮放)        (GS-2M, 自家 conda env)            (render.py)   ⬇ 可下載
+影片 ──抽幀──► 清晰照片 ──COLMAP──► 相機位姿+點雲 ──訓練──► 3DGS 模型 ──Mesh──► 三角網格(.ply)
 ```
 
-> 三大段:**[一、環境設定](#一環境設定)**(第一次部署看這)→ **[二、使用教學](#二使用教學)**
-> (每天操作看這)→ **[三、參考](#三環境變數)**(環境變數 / 架構 / 開發)。
+打開瀏覽器就能操作:每一步都有表單、即時 log、可取消、跑完有「接著跑下一步」按鈕自動帶路徑。
+也內建瀏覽器 3D 檢視器(點雲 / Mesh / 量尺)、去背編輯器、GCS 雲端搬檔。
+
+**讀這份文件的方式**:
+
+| 你是誰 | 看哪裡 |
+|--------|--------|
+| 第一次裝機 | [一、安裝](#一安裝第一次部署) |
+| 每天操作的人 | [二、使用](#二使用) |
+| 要調效能 / 接雲端 / 用 GPS 航拍 | [三、進階](#三進階) |
+| 要改 code | [四、開發者](#四開發者) |
 
 ---
 
-# 一、環境設定
+# 一、安裝(第一次部署)
 
-> 面板很輕(純 Python,不含 torch);重的是 **GPU 訓練環境**,那是每台機器各自要裝的前置。
-> 裝完跑 `/doctor` 會逐項幫你檢查。最小可動 = 步驟 1 + 2 + 3(GS-2M)。
+> 面板本身很輕(純 Python、不含 torch);重的是 GPU 訓練環境。裝完開 **`/doctor`** 頁面,
+> 它會逐項檢查、紅燈變綠燈再開始用。
 
-## 1. 安裝面板
+## 1. 面板本體
 
 ```bash
 git clone https://github.com/KuoFengYuan/reconstudio.git
@@ -30,279 +34,267 @@ conda create -n rec python=3.10 -y
 conda run -n rec pip install -r requirements.txt
 ```
 
-## 2. 外部工具(系統層)
+## 2. 外部工具
 
-| 工具 | 用途 | 備註 |
+| 工具 | 用途 | 注意 |
 |------|------|------|
-| **colmap** (3.x / 4.x) | 重建核心 | 不在 `PATH` 就設 `COLMAP_BIN` |
-| **ffmpeg** | 抽幀去模糊 + FullHD 縮圖 | **需含 `blurdetect` filter**;NVDEC build 可 GPU 解碼。不在 `PATH` 就設 `FFMPEG_BIN` |
+| **colmap**(3.x / 4.x) | 重建核心 | 不在 `PATH` 就在 `local.env` 設 `COLMAP_BIN` |
+| **ffmpeg** | 抽幀去模糊、縮圖 | **必須含 `blurdetect` filter**;有 NVDEC build 可 GPU 解碼 |
 
 ## 3. 訓練後端(需要 GPU,每台機器各自編譯)
 
-後端是**資料不是程式**:加一個訓練器是改 `backends.json`,不是改 code。內建預設是 GS-2M。
+後端是「設定」不是「程式」:加一個訓練器 = 改 `backends.json`,不用改 code。內建預設 GS-2M。
 
-### GS-2M(內建,訓練 + mesh)
-放在面板的**兄弟目錄** `../GS-2M`、conda env 名 **`gs2m`**:
+**GS-2M(預設,訓練 + mesh 都有)** — 放在面板的兄弟目錄 `../GS-2M`、conda env 名 `gs2m`,
+名字路徑都對就零設定:
 
 ```bash
-cd ..                       # 面板 repo 的上一層
+cd ..                                    # 面板 repo 的上一層
 git clone https://github.com/ndming/GS-2M.git
 cd GS-2M
-conda env create --file environment.yml          # 建 env "gs2m"(python 3.10 / pytorch / cuda-toolkit)
+conda env create --file environment.yml  # 建 env "gs2m"
 conda activate gs2m
-pip install -r requirements.txt                  # 編 5 個 CUDA submodule(GPU/arch-specific)
+pip install -r requirements.txt          # 編 CUDA submodule(依顯卡,要跑一陣子)
 ```
 
-env 名與兄弟路徑對得上就 **zero-config**;不同才在 `backends.json` 覆寫 `conda_env` / `repo` / `python`。
-> 要量**實際尺寸 (mm)** 才需補:`conda run -n gs2m pip install opencv-contrib-python plyfile`。
+> 要量**實際尺寸 (mm)** 再補:`conda run -n gs2m pip install opencv-contrib-python plyfile`
 
-### LichtFeld Studio(選用;MR-NF / iGS+,只訓練、不 mesh)
-編譯型 C++/CUDA binary(無 conda),需 CUDA Toolkit 12.8+ 與 vcpkg:
+**LichtFeld Studio(選用,只訓練、不 mesh)** — C++/CUDA binary,需 CUDA 12.8+ 與 vcpkg:
 
 ```bash
-cd ..
-git clone https://github.com/MrNeRF/LichtFeld-Studio.git
-cd LichtFeld-Studio
-cmake -B build && cmake --build build -j"$(nproc)"   # binary 在 build/LichtFeld-Studio
+cd .. && git clone https://github.com/MrNeRF/LichtFeld-Studio.git && cd LichtFeld-Studio
+cmake -B build && cmake --build build -j"$(nproc)"
 ```
 
-在 `backends.json` 把 `exec` 指到 `…/LichtFeld-Studio/build/LichtFeld-Studio`(範本見
-`backends.example.json`);找不到 shared libs 時在 `local.env` 設 `LD_LIBRARY_PATH`。
+然後在 `backends.json` 把 `exec` 指到 `build/LichtFeld-Studio`(範本見 `backends.example.json`)。
 
 ## 4. 選用元件
 
-- **☁️ GCS 上傳 / 下載**:需 Google Cloud SDK + 登入 + 設定 project — 見下方 [☁️ GCS](#-gcs-上傳--下載選用)。
-- **🧹 SuperSplat 去背編輯器**:`./tools/build_supersplat.sh`(需 node ≥18 + npm + git;產物在
-  `static/supersplat/`,已 gitignore)。
+- **☁️ GCS 雲端搬檔**:需 Google Cloud SDK + 登入,見[三、進階 — GCS 設定](#gcs-設定一次性)。
+- **🧹 SuperSplat(去背 + 點雲檢視)**:**免裝** — `run.sh` 啟動時自動同步到最新版
+  (背景跑、不擋啟動;離線就沿用現有版本)。詳見[三、進階](#supersplat-自動更新)。
 
-## 5. per-machine 設定(選用 — 名字 / 路徑都對就免)
+## 5. 這台機器的設定(選用)
 
 ```bash
 cp local.env.example local.env          # 路徑 / port / 非標準 binary 位置
 cp backends.example.json backends.json  # 後端 env / repo / exec
 ```
 
-所有設定集中在 `pipeline/config.py`(一個 typed `Settings`,讀環境變數;見 [三、環境變數](#三環境變數))。
+兩個檔都有逐行註解,名字路徑都是預設值的話可以跳過這步。
 
-## 6. 啟動 + 自我檢查
+## 6. 啟動
 
 ```bash
-./run.sh                  # → 開瀏覽器 http://127.0.0.1:8077
+./run.sh        # → 開瀏覽器 http://127.0.0.1:8077
 ```
 
-第一次先開 **`/doctor`**:它會檢查 colmap、每個後端的 env python / CUDA / repo,把紅燈修成綠燈
-再開始用。遠端機器:`ssh -L 8077:127.0.0.1:8077 user@host`,或 `HOST=0.0.0.0 ./run.sh`。
+第一次先開 **`http://127.0.0.1:8077/doctor`** 做健檢。遠端機器用
+`ssh -L 8077:127.0.0.1:8077 user@host`,或 `HOST=0.0.0.0 ./run.sh`。
 
 ---
 
-# 二、使用教學
+# 二、使用
 
-照 **①→②→③→④** 順序,每個階段完成後都有「接著跑下一步」的按鈕,會自動帶入路徑。(左側設定面板可用左上角 **◀** 收合 / 展開,預設展開。)
+## 介面總覽
 
-## ① 抽幀(影片 → 清晰幀)
+左側分兩排:**功能**(重建流程的五站)和**工具**(獨立小工具,跟流程無關)。
+各分頁互相獨立,**不強制照順序**——但每站跑完都有「接著跑下一步」按鈕幫你帶好路徑。
 
-選影片資料夾 → `out_dir` 自動帶出 → 設 `fps` 與去模糊(百分位 `keep%` 或固定閾值)→
-**▶ 抽幀 + 去模糊**。GPU(NVDEC)自動解碼,失敗則該支影片退回 CPU。輸出鏡射輸入結構、每支
-影片一個資料夾、只留最清晰的幀;完成後按 **▶ 接著跑 COLMAP**。
+| 分頁 | 做什麼 | 輸入 → 輸出 |
+|------|--------|------------|
+| ☁️ 資料 | GCS 雲端 ⇄ 本機搬檔 | gs:// ⇄ 本機資料夾 |
+| 抽幀 | 影片抽成清晰照片(去模糊) | 影片資料夾 → 每支影片一夾 .jpg |
+| COLMAP | 照片算相機位姿 + 稀疏點雲 | 照片 → workspace(sparse + 去畸變 dense) |
+| 訓練 | 3DGS 訓練 | COLMAP workspace → 3DGS 模型 |
+| Mesh | 模型抽三角網格,可量實際尺寸 | 3DGS 模型 → `tsdf_post.ply`(+mm 版) |
+| 👁 Mesh Viewer | 看任意 mesh 檔(不綁 job) | `.ply/.obj/.stl/.glb`,server 或本機檔 |
+| ✨ SuperSplat | 看任意點雲 / 3DGS(不綁 job) | `.ply/.splat/.ksplat/.spz/.sog` |
+
+右側是**執行 log 與歷史**:即時 log、階段 stepper、可取消;歷史可篩選 / 搜尋 / 刪除。
+
+## 抽幀(影片 → 清晰照片)
+
+選影片資料夾 → `out_dir` 自動帶出 → 設每秒抽幾張(`fps`)和去模糊強度(留前 `keep%` 最清晰的,
+或固定閾值)→ **▶ 抽幀 + 去模糊**。GPU 解碼自動啟用,失敗的影片自動退回 CPU。
 
 ```
 輸入  <root>/<group>/<video>.MOV          例  FY115/FY115_0518/A/IMG_3600.MOV
 輸出  <out>/<group>/frames_<video>/*.jpg  例  FY115/0518_colmap/A/frames_IMG_3600/*.jpg
 ```
 
-## ② COLMAP(影像 → 重建)
+## COLMAP(照片 → 重建)
 
-設 `image_root` / `workspace`。版面(layout)自動偵測,也可手動指定:
+設 `image_root`(照片)和 `workspace`(輸出)。兩個常用選項:
 
-```
-single  XXX/*.jpg                -> 共用 1 台相機(根目錄直接放圖也算)
-multi   ROOT/<group>/*.jpg       -> 每個子資料夾 1 台相機
-nested  ROOT/<group>/<vid>/*.jpg -> 先 stage 再每群 1 台相機(① 的輸出就是這種)
-```
+- **影像解析度**:預設把每張縮成長邊 ≤1920 的實體副本(`workspace/images_1920/`)再跑整條
+  COLMAP——4K / 航拍原圖直接跑又慢又容易出問題。要高解析訓練圖可選 2560 / 4096;
+  「保持原樣」用原始檔(髒的航測 TIFF 可能在 undistort 階段崩潰,縮圖重編碼順便修掉這個)。
+- **版面(layout)**:自動偵測;`single` = 一夾照片一台相機、`multi` = 每個子資料夾一台相機、
+  `nested` = 抽幀輸出的兩層結構。
 
-**影像解析度預設 FullHD**:把每張輸入**實體**等比縮成長邊 ≤1920 的副本(存 `workspace/images_fullhd/`),
-整條 COLMAP 跑這些縮圖;Lanczos + 高品質編碼讓 4K→FullHD 仍銳利,可續跑 / 可取消。選「保持原樣」則不縮。
+**▶ 啟動 COLMAP** → log 會顯示偵測到的 layout 和各階段進度。跑完按 **🧊 檢視 3D 結果**
+檢查品質,或 **🧠 接著訓練**。
 
-**▶ 啟動 COLMAP** → log 顯示 layout、各階段 banner 與 stepper。完成後可 **🧊 檢視 3D 結果** 或
-**🧠 接著訓練**。輸出在 workspace:`database.db`、`sparse/0/{cameras,images,points3D}.bin`、
-`<dataset>_<mapper>_mapper/`(**去畸變 PINHOLE** dense,訓練吃這個)、`sparse/points.ply`(檢視快取)。
+> 航拍 / RTK 有 GPS 的資料,展開「GPS 對齊 + 大場景」可以更快更穩,見
+> [三、進階 — GPS](#gps--大場景航拍-rtk)。有「RTK 大場景」一鍵預設可直接套。
 
-**GPS / 大場景(進階)** — 輸入若每張都有 EXIF GPS(影片幀沒有),可解鎖更快更穩的比對 / 對齊
-(勾選時開跑前會檢查 100% 覆蓋;FullHD 縮圖會把原圖 GPS 接回):
+## 訓練(重建 → 3DGS 模型)
+
+選 backend(環境沒裝好會灰掉,旁邊有 /doctor 連結)、`source`(COLMAP workspace)、
+`model_path`(輸出位置)、**GPU 編號**。參數依 backend 動態顯示,每個欄位都有說明。
+右側狀態列會顯示 `iter N/total` 和 loss。
+
+> 訓練只吃**去畸變(PINHOLE)**模型——接錯會在開跑前直接報錯,不會白跑。
+> 原 COLMAP workspace 完全不動(symlink 進去)。
+
+## 🧹 去背(選用)
+
+訓練完按 **🧹 在 SuperSplat 去背景** → 內嵌編輯器載入訓練好的點雲:
+
+1. 框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景(**Ctrl+Z** 還原)
+2. 按 **✅ 送回去背點雲**
+
+原模型不動。GS-2M 會衍生 `_edited_<時間>` 目錄並自動帶入 Mesh 表單(用乾淨點雲重抽 mesh);
+LichtFeld 則直接下載乾淨點雲。
+
+## Mesh(模型 → 三角網格)
+
+選 `model_path`、GPU、TSDF 參數(預設值通常夠用)。要**實際尺寸 (mm)** 就勾「提供 marker」
+(拍攝時放 ChArUco 板,板規格已寫在 `backends.json`,免手填)。完成後可下載原始版和 mm 版,
+或 **🧊 檢視 Mesh**。
+
+## 檢視器
+
+- **🧊 3D 結果**(COLMAP 後):拖曳旋轉 · 滾輪縮放 · 右鍵平移 · WASD 飛行;雙擊相機看該張
+  影像與品質分數。可**框選壞相機移除**、**框選 / 筆刷刪雜點**(先標紅預覽再確認)——都是
+  非破壞性,寫到 `cleaned/<時間>/` 新資料夾,可直接拿去重新訓練。
+- **🧊 Mesh 檢視**(Mesh job 後):實體打光、mm / recon 切換、**📏 量尺**點兩點量距離、
+  線框 / 頂點色 / 白底。
+- **👁 Mesh Viewer(工具)**:不綁 job,看任何 mesh 檔。填 server 路徑(「瀏覽」逐層挑檔),
+  或**留空直接開**,進去選這台電腦的檔案 / 直接拖放(瀏覽器內解析,不上傳)。
+  格式不符或檔案壞掉會直接顯示原因。
+- **✨ SuperSplat(工具)**:同樣兩種開法,專看點雲 / 3DGS(訓練輸出的 `point_cloud.ply`、
+  `.splat` 等)。看 mesh 用 Mesh Viewer,看點雲用這個。
+
+---
+
+# 三、進階
+
+## GPS / 大場景(航拍 RTK)
+
+輸入若**每張**都有 EXIF GPS(JPEG、TIFF 都支援;影片幀沒有 GPS),可解鎖:
 
 | 選項 | 作用 | 主要參數 |
 |------|------|---------|
-| `MATCHER=spatial` | 用 GPS 鄰近度限制比對候選,大場景比 vocab/sequential 快且穩 | `SPATIAL_MAX_NEIGHBORS` · `SPATIAL_MAX_DISTANCE`(m) · `SPATIAL_IGNORE_Z` |
-| `MAPPER=pose_prior` | GPS 先驗進 BA,抗漂移、輸出**直接公制 + 地理對齊** | `PRIOR_STD_X/Y/Z`(GPS 精度 m;消費級 3~5、RTK ~0.02) |
-| `GPS_ALIGN`(選填) | 事後把稀疏模型對齊到 ENU 公尺 | `GPS_ALIGN_MAX_ERROR`(m) |
+| `MATCHER=spatial` | 只比對 GPS 鄰近的影像,大場景快且穩 | `SPATIAL_MAX_NEIGHBORS` · `SPATIAL_MAX_DISTANCE`(m) |
+| `MAPPER=pose_prior` | GPS 先驗進 BA,抗漂移、輸出直接公制 | `PRIOR_STD_X/Y/Z`(GPS 精度 m;消費級 3~5、RTK ~0.02) |
+| `GPS_ALIGN` | 事後把模型對齊到 ENU 公尺座標 | `GPS_ALIGN_MAX_ERROR`(m) |
 
-> **reorient × GPS**:`REORIENT` 沒開 GPS 時走 PCA 猜重力 + 等比縮放(`REORIENT_TARGET_MED_DIST` /
-> `REORIENT_UPSCALE` 生效);開 GPS 時自動切換成固定 Z-up→Y-up 軸轉,**不猜重力、不縮放、保留 GPS
-> 公尺尺度**,讓 ENU 上(+Z)落到 viewer 的 -Y、整個場景正立。想要「真實公尺 + viewer 正立」就把
-> `GPS_ALIGN` 跟 `REORIENT` 兩個都勾。
+- 勾任一 GPS 選項時,開跑前會檢查 **100% GPS 覆蓋**,不足直接中斷(缺 GPS 的那張無法定位)。
+- 縮圖不會弄丟 GPS:JPEG 會把 EXIF 接回縮圖;TIFF 的 GPS 由面板直接寫進 COLMAP 資料庫
+  (COLMAP 自己讀不到 TIFF GPS)。
+- **`REORIENT` × GPS**:沒開 GPS 時用 PCA 猜重力轉正 + 縮放;開了 GPS 則只做 Z-up→Y-up
+  軸轉、**保留公尺尺度**。要「真實公尺 + 檢視器裡正立」就 `GPS_ALIGN` 和 `REORIENT` 都勾。
 
-## ③ 訓練(重建 → 3DGS 模型)
+## 環境變數
 
-選 backend(環境未就緒會灰掉,旁邊有 `/doctor` 連結)、`source`(COLMAP workspace)、
-`model_path`(輸出)、**GPU**(手動選 #0 / #1)。可調參數依 backend schema 動態顯示(迭代數、
-解析度、`--material` PBR 材質、法線正則、前景遮罩…每個欄位都有 hint),另有自由 `extra` 欄位。
-**▶ 啟動訓練** → 右側狀態列顯示階段(載入相機 / 訓練中 / 存檔)與 `iter N/total`、loss。
-完成後 **🧩 接著抽 Mesh**,或先 **🧹 在 SuperSplat 去背景**。
+> **幾乎都有預設,留空即可。** 唯一必填的是用 GCS 時的 `CLOUDSDK_CORE_PROJECT`。
+> 全部寫在 `local.env`(`run.sh` 會載入並傳給 ffmpeg / colmap / gsutil)。
 
-> 非破壞性:COLMAP workspace 以 `<model>_scene/`(symlink)給訓練器,原始不動;只吃去畸變的
-> **PINHOLE** 模型,遇到 OPENCV(distorted)會在開跑前直接報錯(最常見的接錯點)。
+| env | default | 什麼時候設 |
+|-----|---------|-----------|
+| `CLOUDSDK_CORE_PROJECT` | — | **用 GCS 必填**(GCP project id) |
+| `COLMAP_BIN` / `FFMPEG_BIN` / `GSUTIL_BIN` | PATH | binary 不在 PATH 時 |
+| `RECON_STUDIO_DATA` | `/mnt/ssd1/recon_studio/data` 或 `~/.recon_studio` | job 狀態 + log 的落地磁碟(建議放大碟) |
+| `RECON_STUDIO_BROWSE_ROOT` | `/mnt/ssd1` 或 `/` | 「瀏覽」按鈕的根目錄 |
+| `RECON_STUDIO_DEST_ROOT` | `/` | GCS 下載落地根目錄 |
+| `RECON_STUDIO_GCS_ROOT` | 空(列全部 bucket) | GCS 瀏覽器起始 `gs://` 前綴 |
+| `CONDA_ROOT` / `CONDA_ENV` | 自動偵測 / `rec` | conda 不在標準位置時 |
+| `FFMPEG_HWACCEL` | `cuda` | 設 `none` 強制 CPU 解碼 |
+| `COLMAP_PANEL_MAX_JOBS` | `4` | 同時跑幾個 job |
+| `COLMAP_PANEL_RESIZE_WORKERS` | CPU 數(≤32) | 縮圖並行 ffmpeg 數 |
+| `HOST` / `PORT` | `127.0.0.1` / `8077` | 綁定位址 |
+| `SUPERSPLAT_AUTOUPDATE` | `1` | 設 `0` 關掉 SuperSplat 啟動自動更新 |
+| `SUPERSPLAT_VER` | latest | 釘住 SuperSplat 版本(`vX.Y.Z`) |
 
-## 🧹 去背(選用,SuperSplat)
-
-訓練完按 **🧹 在 SuperSplat 去背景** → 右側內嵌編輯器載入訓練雲。**滾輪縮放、左鍵旋轉、右鍵平移**;
-框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景(**Ctrl+Z** 還原)→ **✅ 送回去背點雲**。
-**原模型完全不動**,依後端分流輸出:
-
-| 後端 | 送回後 | 去背雲輸出 |
-|------|-------|-----------|
-| **GS-2M**(有 mesh) | 衍生兄弟目錄 + 自動帶入 Mesh 表單 | `<model>_edited_<時間>/…/point_cloud.ply`(可用乾淨雲重抽 mesh) |
-| **LichtFeld**(無 mesh) | 存檔 + 瀏覽器下載 | `<model>/edited/cleaned_<時間>.ply` |
-
-> 去背只改點雲;要乾淨 mesh 需重跑 Mesh 階段(僅 GS-2M)。靠兄弟目錄 + symlink,trainer 零修改。
-
-## ④ Mesh(模型 → 三角網格)
-
-選 backend(僅宣告 `mesh_args` 的後端,如 GS-2M)、`model_path`、GPU、TSDF 參數
-(`voxel_size` 預設 `0.006`、可勾「自動體素大小」、`sdf_trunc` / `max_depth` / `num_clusters` …)。
-要**實際尺寸 (mm)** 就勾 **提供 marker**(ChArUco 板規格已寫在 `backends.json` 的 `marker_defaults`,
-免手填)。**▶ 抽取 Mesh** → 完成後 **🧊 檢視 Mesh**、**⬇ 非實際尺寸 mesh**、**⬇ 實際尺寸 mesh (mm)**。
-
-## 檢視與歷史
-
-- **🧊 3D 結果**(COLMAP 後):**拖曳旋轉 · 滾輪縮放 · 右鍵平移 · WASD 飛行 · Q/E 上下 · R 重置**(飛行速度可調);**雙擊相機**看影像名、分數、縮圖;品質指標 `reproj err`、`track len`。面板以 **顯示 / 工具** 分區。
-  - **挑壞相機**:勾「🗑 挑選要移除的相機」→ 框/點選壞相機 → 寫出**非破壞性**的 `cleaned/<時間>/` 副本(可選同時清掉對應 3D 點)。
-  - **✂️ 刪點**:**框選或筆刷**標記要刪的點 —— 會先**標紅預覽**(不會直接消失),按 **🗑 刪除標選** 才真的刪;另有**復原全部**、**匯出清理後 .ply**。純前端、只刪點不動相機、非破壞性。
-- **🧊 Mesh 檢視器**:打光實體 mesh,切 **mm / recon**、**📏 量尺**點兩點量距離、亮度 / 白底 / 線框 / 頂點色。
-- **歷史**:狀態變動時即時刷新(每分頁一條 **WebSocket** 多工承載 joblist 刷新 + log,故不會耗盡瀏覽器每網域連線數;閒置零事件,另有 30s 後備輪詢);可依**類型 / 狀態**兩軸篩選(點了即時反應)、**搜尋**標題或 id、分頁「載入更多」(篩選條件存 localStorage);勾選 → **🗑 刪除**(進行中的會先取消)。
-
----
-
-# 三、環境變數
-
-> **絕大多數變數都會自動偵測或有可用預設,留空即可。** 真正**必須手動設定**(沒有可用預設)的
-> 只有一個:用到 **GCS bucket 瀏覽**時的 `CLOUDSDK_CORE_PROJECT`。其餘只在**非標準安裝**或想
-> **調效能 / 換落地磁碟**時才需要動。`run.sh` 用 `set -a` 載入 `local.env`,所以每個變數都會匯出到
-> 面板、並被它呼叫的外部工具(`ffmpeg` / `colmap` / `gsutil`)繼承。
-
-| env | default | 手動? | 用途 |
-|-----|---------|------|-----|
-| `CLOUDSDK_CORE_PROJECT` | —(無預設) | **用 GCS 時必填** | GCS 瀏覽器 `gsutil ls` 的預設 GCP project(`gcloud config set project …` 亦可) |
-| `COLMAP_BIN` | `colmap` (PATH) | 不在 PATH 才設 | colmap binary |
-| `FFMPEG_BIN` | NVDEC build 否則 PATH `ffmpeg` | 不在 PATH / 缺 `blurdetect` 才設 | 需 `blurdetect`;NVDEC = GPU 解碼;也用於 FullHD resize |
-| `CONDA_ROOT` / `CONDA_ENV` | `conda info --base` / `rec` | 偵測不到才設 | 面板自己跑在哪個 conda env |
-| `RECON_STUDIO_DATA` | `/mnt/ssd1/recon_studio/data` 否則 `~/.recon_studio` | 建議設 | job 狀態 + log(放大磁碟、別放小的 root fs) |
-| `RECON_STUDIO_DEST_ROOT` | `/` | 建議設 | GCS 下載落地的本機根目錄 |
-| `GSUTIL_BIN` | `gsutil` (PATH) | 不在 PATH 才設 | gsutil binary(GCS 瀏覽 / 下載) |
-| `RECON_STUDIO_GCS_ROOT` | (空 = 列全部 bucket) | 選填 | GCS 瀏覽器起始 `gs://` 前綴 |
-| `RECON_STUDIO_BROWSE_ROOT` | 有 `/mnt/ssd1` 用它,否則 `/` | 選填 | 本機資料夾選擇器根目錄 |
-| `FFMPEG_HWACCEL` | `cuda` | 選填 | 設 `none` 強制 CPU 解碼 |
-| `TMPDIR` | `$RECON_STUDIO_DATA/tmp` | 自動 | ffmpeg/colmap scratch(避開 root `/tmp`) |
-| `COLMAP_PANEL_MAX_JOBS` | `4` | 選填(調效能) | 同時跑幾個 job(跨階段共用) |
-| `COLMAP_PANEL_RESIZE_WORKERS` | CPU 數(≤32) | 選填(調效能) | FullHD resize 的並行 ffmpeg 數 |
-| `COLMAP_PANEL_BACKENDS` | `./backends.json` | 選填 | per-machine 後端設定檔路徑 |
-| `HOST` / `PORT` | `127.0.0.1` / `8077` | 選填 | 綁定位址 |
-
----
-
-# ☁️ GCS 上傳 / 下載(選用)
-
-面板內建 **☁️ 資料** 分頁,在本機與 Google Cloud Storage 之間搬資料。它**與重建流程解耦**
-—— 只搬 bytes;搬完到任一分頁用「瀏覽」選那個資料夾即可,**不會自動帶你去下一步**。底層都走 `gsutil -m`(平行)。
-
-**從 GCS 下載到本機**
-- **來源**:填 `gs://bucket/path`,或按 **☁️ 瀏覽** 點選 bucket / 資料夾(可勾多個、一個任務一次下載)。
-- **下載到**:本機路徑;留空 = 自動放到 `RECON_STUDIO_DEST_ROOT` 底下的 `<bucket>/<路徑>`。
-- 底層 `gsutil -m rsync -r`:**可續傳、只補差異**。
-
-**上傳到 GCS**
-- **來源**:按 **瀏覽** 從 server 上挑**檔案或資料夾**(可多選、可跨層累積;單一檔案如 `.ply` / `.sog` / `.jpg` 也行),或手動輸入路徑。
-- **目的地**:填 `gs://bucket/path`。
-- 單一資料夾用 `gsutil -m rsync -r`(只補差異);檔案 / 多選 / 混合用 `gsutil -m cp -r` 落到該 `gs://` 前綴下。
-
-**設定 GCS 帳號(一次性)** — 需本機裝好 Google Cloud SDK(提供 `gcloud` + `gsutil`)並登入:
+## GCS 設定(一次性)
 
 ```bash
-# 1) 安裝 Google Cloud SDK：https://cloud.google.com/sdk/docs/install
-
-# 2) 登入 Google 帳號（會開瀏覽器；遠端無頭機改用 --no-launch-browser）
+# 1) 裝 Google Cloud SDK:https://cloud.google.com/sdk/docs/install
+# 2) 登入(遠端無頭機加 --no-launch-browser;無人值守可用 service account)
 gcloud auth login
-#    無人值守 server 也可用 service account：gcloud auth activate-service-account --key-file=KEY.json
-
-# 3) 設定預設 GCP project（⚠ 列 bucket 必需，不設 gsutil ls 會報 "requires a project id"）—— 二選一：
-gcloud config set project <YOUR_PROJECT_ID>     # 全域預設
-#    或只給面板用，寫進 local.env：CLOUDSDK_CORE_PROJECT=<YOUR_PROJECT_ID>
-
-# 4) 驗證（應列出 buckets）
+# 3) 設定預設 project(不設的話列 bucket 會報錯)——二選一:
+gcloud config set project <YOUR_PROJECT_ID>
+#    或寫進 local.env:CLOUDSDK_CORE_PROJECT=<YOUR_PROJECT_ID>
+# 4) 驗證(應列出 buckets)
 gsutil ls
 ```
 
-> 找 `PROJECT_ID`:`gcloud projects list`。
+「☁️ 資料」分頁與重建流程**解耦**:下載用 `gsutil -m rsync`(可續傳、只補差異),
+上傳支援多選檔案 / 資料夾。搬完到其他分頁用「瀏覽」選那個資料夾即可。
+
+## SuperSplat 自動更新
+
+`run.sh` 每次啟動會在**背景**檢查 SuperSplat 上游最新版(一次 `git ls-remote`,有新版才重建):
+
+- 換版是**原子的**——建好才瞬間切換,期間舊版照常服務
+- **失敗無害**——離線、缺 node、或新版與面板 patch 衝突時,沿用現有版本,
+  細節在 `$RECON_STUDIO_DATA/supersplat_build.log`
+- 手動重建:`FORCE=1 SUPERSPLAT_VER=latest ./tools/build_supersplat.sh`(需 node ≥18 + npm + git)
 
 ---
 
-# 四、架構與開發
+# 四、開發者
 
-三層,依賴單向(`app → web/ → pipeline/`,無循環):
+三層架構,依賴單向(`app → web/ → pipeline/`,無循環):
 
 ```
-app.py        app factory:建 FastAPI、mount static、include routers（~30 行)
+app.py        app factory:建 FastAPI、mount static、include routers(~30 行)
 └─ web/       HTTP 層
-   ├─ routers/  pages · browse · create · jobs · viz · doctor（APIRouter）
-   ├─ services/ models（job→路徑解析）· forms（表單→參數驗證）
+   ├─ routers/  pages · browse · create · jobs · viz · viewer · doctor(APIRouter)
+   ├─ services/ models(job→路徑解析)· forms(表單→參數驗證)
    └─ shared.py templates / _page / UI 常數
 jobs.py       JobManager:asyncio 佇列、N=MAX_JOBS workers、狀態存檔 + log 解析
-pipeline/     領域層（torch-free,shell out 到外部工具）
-   config.py    Settings:所有設定的單一來源
+pipeline/     領域層(torch-free,shell out 到外部工具)
+   config.py    Settings:所有設定的單一來源(pydantic-settings)
    runner.py    子行程執行 + 取消        backends.py  後端登錄 + /doctor preflight
    frames / colmap/ / train / gcs       model.py     解析 COLMAP 稀疏模型(讀取快取)
 ```
 
-請求流程:`form ─POST /ui/*─► JobManager(asyncio 佇列)─► run_* 在 thread 內 shell out
-─► console.log ─► 瀏覽器`。即時更新走**每分頁一條 WebSocket**(`/ws`):多工承載 joblist 刷新訊號 +
-被監看 job 的 log tail,取代舊的雙 SSE(避免多分頁/多 log 把瀏覽器每網域 ~6 連線上限耗盡而卡在
-「Loading…」)。Job 狀態存在 `RECON_STUDIO_DATA/jobs/<id>/`;取消會 `SIGTERM` 整個子行程群組;
-COLMAP / resize 用 sentinel 做 idempotent(勾 `FORCE` 重跑)。
+請求流程:`form ─POST /ui/*─► JobManager(asyncio 佇列)─► run_* 在 thread 內 shell out ─► log ─► 瀏覽器`。
+即時更新走每分頁一條 WebSocket(joblist 刷新 + log tail 多工)。job 狀態存
+`RECON_STUDIO_DATA/jobs/<id>/`;取消 = `SIGTERM` 子行程群組;COLMAP / 縮圖用 sentinel
+做 idempotent(勾 `FORCE` 重跑)。
 
 ## 主要檔案
 
 | path | 角色 |
 |------|------|
-| `app.py` | app factory:建 FastAPI、mount static、include routers、啟動 job manager |
-| `web/routers/` | APIRouter:`pages` · `browse` · `create`(建 job 表單)· `jobs`(查詢/取消/SSE log + 篩選分頁 joblist + 狀態變動 SSE)· `viz`(3D/mesh 檢視 + 下載 + cull + 去背)· `doctor` |
-| `web/services/` | `models.py`(job→路徑解析、去背模型衍生)· `forms.py`(表單→參數驗證) |
-| `web/shared.py` | Jinja templates、`_page` render helper、UI 表單常數 |
-| `jobs.py` | `JobManager`(佇列、N workers、cancel/delete)+ 各類 log 解析 + `MAX_JOBS` |
-| `pipeline/config.py` | `Settings`:所有設定的單一來源(pydantic-settings) |
-| `pipeline/runner.py` | log emitter + 子行程串流 + 取消(multi-child) |
-| `pipeline/frames.py` | `run_frames`:抽幀(NVDEC + CPU fallback)、去模糊、並行、flatten |
-| `pipeline/colmap/` | COLMAP 子套件:`_run`(`run_colmap` orchestrator:stages、sentinels、NESTED staging)· `_layout`(版面偵測)· `_resize`(並行 Lanczos FullHD)· `_gps`(EXIF GPS 覆蓋 / 鄰近配對) |
-| `pipeline/train.py` | `run_train`(COLMAP→trainer scene + PINHOLE guard)、`run_mesh`(mesh + 選用 ChArUco mm 縮放) |
-| `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor` preflight |
-| `pipeline/gcs.py` | GCS 瀏覽(`gsutil ls`)+ 下載(`gsutil -m rsync -r`) |
-| `pipeline/model.py` | 解析 COLMAP 稀疏模型(poses/cameras/points/分數)+ PLY 匯出;讀取結果以 `(path, mtime)` 做 LRU 快取,檢視器重複請求(scene / 縮圖)只解析一次 |
-| `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器 + `doctor.html` |
-| `tools/` | trainer-env 腳本:`estimate_marker_scale.py`、`scale_mesh.py`、vendored `colmap_read_write_model.py` |
-| `tests/` · `pyproject.toml` · `.github/` | 離線單元測試(log 解析器 · 模型二進位 I/O + 快取 · 表單驗證 · 路徑解析 / 防穿越 · layout 偵測 · runner 子行程 · frames · gcs)· 工具設定(ruff/mypy/pytest)· CI |
-| `backends.example.json` · `local.env.example` | per-machine 設定範本(實檔 gitignored) |
+| `web/routers/` | `pages` · `browse`(資料夾/檔案 picker)· `create`(建 job)· `jobs`(查詢/取消/log)· `viz`(3D/mesh 檢視+下載+cull+去背)· `viewer`(獨立 mesh viewer)· `doctor` |
+| `web/services/` | `models.py`(job→路徑解析)· `forms.py`(表單→參數驗證) |
+| `jobs.py` | `JobManager`(佇列、workers、cancel/delete)+ log 解析 |
+| `pipeline/colmap/` | `_run`(orchestrator:stages、sentinels)· `_layout`(版面偵測)· `_resize`(並行縮圖)· `_gps`(EXIF GPS 讀取 JPEG+TIFF、pose prior 注入) |
+| `pipeline/frames.py` / `train.py` | 抽幀去模糊 / 訓練 + mesh(+ChArUco mm 縮放) |
+| `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、doctor preflight |
+| `pipeline/model.py` | COLMAP 稀疏模型解析 + PLY 匯出(LRU 快取) |
+| `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器(`viz` / `mesh_viz` / `mesh_view`) |
+| `tools/` | `build_supersplat.sh`(自動更新也走這)· marker 量尺 / 縮放腳本 |
+| `tests/` | 離線單元測試(無需 colmap/ffmpeg/GPU/網路) |
 
 ## 開發
 
 ```bash
 pip install -e ".[dev]"   # 面板 + ruff / mypy / pytest
-pytest                    # 離線單元測試(無需 colmap/ffmpeg/GPU/網路)
+pytest                    # 離線單元測試
 ruff check .              # lint
-mypy pipeline/config.py   # 型別檢查（目前嚴格守住 config.py）
+mypy pipeline/config.py   # 型別檢查(目前嚴格守住 config.py)
 ```
 
-CI(`.github/workflows/ci.yml`)在每次 push / PR 跑 ruff + mypy + pytest。**擴充慣例**:加 endpoint →
-在 `web/routers/` 加 handler;加訓練後端 → 改 `backends.json`(不必動 code);加設定 → `pipeline/config.py` 加一個欄位。
+CI 在每次 push / PR 跑 ruff + mypy + pytest。**擴充慣例**:加 endpoint → `web/routers/` 加
+handler;加訓練後端 → 改 `backends.json`(不動 code);加設定 → `pipeline/config.py` 加欄位。
 
-> 改任何 `.py`(`app` / `jobs` / `web/` / `pipeline/`)需重啟;改 `templates/` 只需重整頁面。
+> 改 `.py` 需重啟;改 `templates/` 重整頁面即可。
 
 ---
 

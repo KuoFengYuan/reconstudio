@@ -28,6 +28,31 @@
     {% if not dirs and not files %}<span class="hint">（此層是空的）</span>{% endif %}
   </div>
 </div>
+{% elif pick == 'file' %}
+<div>
+  <div style="margin-bottom:8px">
+    <code style="color:var(--mut);word-break:break-all">{{ path }}</code>
+    <div class="hint">點一個{% if exts == 'splat' %}點雲檔（.ply / .splat / .ksplat / .spz / .sog）{% else %} mesh 檔（.ply / .obj / .stl / .glb）{% endif %}選取;點資料夾進入下一層。</div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:3px">
+    {% if parent %}
+    <button class="ghost" style="text-align:left"
+            hx-get="/ui/browse?path={{ parent|urlencode }}&target={{ target }}&root={{ root }}&pick=file&exts={{ exts }}"
+            hx-target="#picker-body" hx-swap="innerHTML">⬆ ..</button>
+    {% endif %}
+    {% for d in dirs %}
+    <button class="ghost" style="text-align:left"
+            hx-get="/ui/browse?path={{ (path ~ '/' ~ d)|urlencode }}&target={{ target }}&root={{ root }}&pick=file&exts={{ exts }}"
+            hx-target="#picker-body" hx-swap="innerHTML">📁 {{ d }}</button>
+    {% endfor %}
+    {% for f in files %}
+    <button class="ghost" style="text-align:left"
+            onclick="pickFile('{{ target }}','{{ path }}/{{ f }}')">{% if exts == 'splat' %}✨{% else %}🧩{% endif %} {{ f }}</button>
+    {% endfor %}
+    {% if truncated %}<span class="hint">檔案過多,只顯示前 {{ files|length }} 個。</span>{% endif %}
+    {% if not dirs and not files %}<span class="hint">（此層沒有子資料夾或可開啟的檔案）</span>{% endif %}
+  </div>
+</div>
 {% else %}
 <div>
   <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">

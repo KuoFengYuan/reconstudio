@@ -100,11 +100,21 @@
   .checks input { width:auto; accent-color:var(--accent); }
   .submit { width:100%; padding:11px; font-weight:650; margin-top:6px; font-size:14px;
             background:linear-gradient(180deg,var(--accent),var(--accent-d)); box-shadow:0 2px 10px rgba(0,0,0,.3); }
-  .tabs { display:flex; gap:4px; margin-bottom:14px; background:var(--panel); padding:4px;
-          border-radius:10px; border:1px solid var(--line); }
-  .tabs button { flex:1; min-width:0; white-space:nowrap; background:transparent; color:var(--mut);
+  /* min-width:fit-content + wrap: a button never gets squeezed narrower than its
+     label (text used to overflow the pill on narrow screens); extras wrap instead. */
+  .tabs { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:14px; background:var(--panel);
+          padding:4px; border-radius:10px; border:1px solid var(--line); }
+  .tabs button { flex:1; min-width:fit-content; white-space:nowrap; background:transparent; color:var(--mut);
                  border:0; border-radius:7px; padding:7px 8px; font-size:13px; font-weight:550; }
   .tabs button.active { color:#0a0c10; background:var(--accent); }
+  /* left nav = two labeled rows (free navigation, no implied order): the pipeline
+     features and a 工具 row for things outside the pipeline (viewer). */
+  .tabs.steps { flex-direction:column; align-items:stretch; gap:3px; }
+  .tabs.steps .tabrow { display:flex; align-items:center; gap:3px; flex-wrap:wrap; }
+  .tabs.steps .tabrow + .tabrow { border-top:1px dashed var(--line); padding-top:4px; }
+  .tabs.steps .lbl { flex:none; color:var(--mut); font-size:11px; padding:0 7px 0 5px;
+                     letter-spacing:2px; user-select:none; }
+  .tabs.steps .tabrow.tools button { flex:0 1 auto; padding:6px 16px; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
@@ -124,12 +134,20 @@
 <div class="wrap">
   <!-- ============================= left: forms ============================= -->
   <div class="col left">
-    <div class="tabs">
-      <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
-      <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
-      <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
-      <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
-      <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
+    <div class="tabs steps">
+      <div class="tabrow">
+        <span class="lbl">功能</span>
+        <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
+        <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
+        <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
+        <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
+        <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
+      </div>
+      <div class="tabrow tools">
+        <span class="lbl">工具</span>
+        <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
+        <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat（點雲）</button>
+      </div>
     </div>
 
     <!-- ----- frames form ----- -->
@@ -611,6 +629,36 @@
       </fieldset>
       <button class="submit" type="submit">⬆ 上傳到 GCS</button>
     </form>
+
+    <!-- ----- standalone mesh viewer (open any local mesh file) ----- -->
+    <form id="form-viewer" style="display:none" onsubmit="openViewer(); return false;">
+      <fieldset>
+        <legend>Mesh Viewer（看任意檔案）</legend>
+        <div class="hint" style="margin-bottom:8px">不綁 job:直接挑 server 上任何一個 mesh 檔開檢視器（軌道旋轉、量尺、線框、頂點色）。支援 <code>.ply / .obj / .stl / .glb</code>。量尺顯示檔案原生數值,單位標示在檢視器裡自選。</div>
+        <label>server 檔案路徑（留空 = 進去再選本機檔案）</label>
+        <div class="row">
+          <input id="viewer_path" placeholder="{{ browse_root }}/…/tsdf_post_scaled_mm.ply">
+          <button type="button" class="ghost" onclick="openFilePicker('viewer_path')">瀏覽</button>
+        </div>
+        <div class="hint">「瀏覽」從 <code>{{ browse_root }}</code> 起逐層挑檔(只列 mesh 檔),也可直接貼完整路徑。<b>留空直接按開啟</b>:檢視器裡選這台電腦的檔案或直接拖放(瀏覽器內解析,不上傳)。格式不符或檔案壞掉會顯示原因。.obj/.glb 會把多個子 mesh 合併顯示(不含材質貼圖)。</div>
+      </fieldset>
+      <button class="submit" type="submit">👁 開啟 Viewer</button>
+    </form>
+
+    <!-- ----- SuperSplat point-cloud viewer (self-hosted editor as a viewer) ----- -->
+    <form id="form-supersplat" style="display:none" onsubmit="openSplatViewer(); return false;">
+      <fieldset>
+        <legend>SuperSplat（看點雲 / 3DGS）</legend>
+        <div class="hint" style="margin-bottom:8px">用自架的 SuperSplat 開<b>點雲</b>:訓練出的 3DGS（<code>point_cloud.ply</code>）、COLMAP 稀疏點雲或 <code>.splat / .ksplat / .spz / .sog</code>。看 mesh 請用 Mesh Viewer。</div>
+        <label>server 檔案路徑（留空 = 進去再開檔/拖放）</label>
+        <div class="row">
+          <input id="splat_path" placeholder="{{ browse_root }}/…/point_cloud.ply">
+          <button type="button" class="ghost" onclick="openFilePicker('splat_path','splat')">瀏覽</button>
+        </div>
+        <div class="hint">「瀏覽」從 <code>{{ browse_root }}</code> 起逐層挑檔(只列點雲檔),也可直接貼完整路徑。<b>留空直接按開啟</b>:在 SuperSplat 裡開這台電腦的檔案或直接拖放。</div>
+      </fieldset>
+      <button class="submit" type="submit">✨ 開啟 SuperSplat</button>
+    </form>
   </div>
 
   <!-- ============================ right: output ============================ -->
@@ -675,7 +723,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','train','mesh','gcs'].forEach(function(k){
+    ['frames','colmap','train','mesh','gcs','viewer','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -844,6 +892,40 @@
     document.getElementById('picker-body').innerHTML = '<p class="hint">載入中…</p>';
     htmx.ajax('GET', '/ui/browse?target=' + target + (root ? '&root=' + root : ''),
               {target:'#picker-body', swap:'innerHTML'});
+  }
+  // Single-FILE picker for the standalone viewers: navigates folders, lists only the
+  // openable extensions (exts: 'mesh' = mesh viewer, 'splat' = SuperSplat point clouds),
+  // one click on a file fills the target input.
+  function openFilePicker(target, exts){
+    window._pickerMode = 'file';
+    var t1 = document.getElementById('gcs-tray'); if (t1) t1.style.display = 'none';
+    var t2 = document.getElementById('local-tray'); if (t2) t2.style.display = 'none';
+    document.getElementById('picker').classList.add('open');
+    document.getElementById('picker-body').innerHTML = '<p class="hint">載入中…</p>';
+    htmx.ajax('GET', '/ui/browse?target=' + target + '&pick=file&exts=' + (exts || 'mesh'),
+              {target:'#picker-body', swap:'innerHTML'});
+  }
+  function pickFile(target, path){
+    var el = document.getElementById(target);
+    if (el) el.value = path;
+    document.getElementById('picker').classList.remove('open');
+  }
+  // One button, two modes: a filled path opens that server file; an empty path opens
+  // the viewer's local mode (pick a file from this computer / drag & drop in there).
+  function openViewer(){
+    var p = (document.getElementById('viewer_path').value || '').trim();
+    window.open(p ? '/viewer?path=' + encodeURIComponent(p) : '/viewer', '_blank');
+  }
+  // Same two modes for SuperSplat: filled path -> preload via ?load= (it streams from
+  // the meshfile endpoint; &filename= tells it the format); empty -> plain editor,
+  // open/drag-drop a local file inside.
+  function openSplatViewer(){
+    var p = (document.getElementById('splat_path').value || '').trim();
+    if (!p){ window.open('/static/supersplat/index.html', '_blank'); return; }
+    var fileUrl = location.origin + '/api/viewer/meshfile?path=' + encodeURIComponent(p);
+    var leaf = p.replace(/\/+$/, '').split('/').pop() || 'point_cloud.ply';
+    window.open('/static/supersplat/index.html?load=' + encodeURIComponent(fileUrl) +
+                '&filename=' + encodeURIComponent(leaf), '_blank');
   }
   // Local MULTI-select picker (files + folders) for the GCS-upload source. Mirrors
   // the GCS cloud cart: selection lives in localSel so it survives folder nav, and
