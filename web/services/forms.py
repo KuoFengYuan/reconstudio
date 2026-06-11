@@ -61,7 +61,7 @@ def build_blocksplit_params(source: str, out_dir: str, form: dict) -> dict:
         "block_size": g("block_size", "500"), "buffer": g("buffer", "120"),
         "region": (form.get("region") or "").strip(),
         "tile": bool(form.get("tile")),
-        "max_tile_px": g("max_tile_px", "4096"),
+        "max_tile_px": g("max_tile_px", "8192"),
         "jpeg_quality": g("jpeg_quality", "95"),
         "min_obs": g("min_obs", "30"), "min_tile_obs": g("min_tile_obs", "8"),
         "min_images": g("min_images", "15"), "workers": g("workers", "4"),
