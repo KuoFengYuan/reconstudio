@@ -418,7 +418,9 @@ renderer.domElement.addEventListener('dblclick', async (e) => {
     `<img src="/api/jobs/${JOB}/imagefile/${idx}${MQ}" onerror="this.style.display='none'">`;
   try {
     const d = await (await fetch(`/api/jobs/${JOB}/image/${idx}${MQ}`)).json();
-    document.getElementById('sel-txt').innerHTML = `<b>${d.name}</b><br>影像 #${idx} · cam ${d.camera_id}<br>` +
+    const dims = d.width ? ` · ${d.width}×${d.height}` : '';
+    const mb = d.file_size ? ` · ${(d.file_size / 1048576).toFixed(1)} MB` : '';
+    document.getElementById('sel-txt').innerHTML = `<b>${d.name}</b><br>影像 #${idx} · cam ${d.camera_id}${dims}${mb}<br>` +
       `<span class="hint">registered pts</span> <b>${d.n_registered.toLocaleString()}</b> / ${d.n_features.toLocaleString()} feats`;
   } catch(_){}
 });

@@ -103,7 +103,11 @@ async def image_detail_ep(job_id: str, idx: int, m: str | None = None):
     md = resolve_model(job, m)
     if not md:
         raise HTTPException(404, "no sparse model for this job")
-    return JSONResponse(await asyncio.to_thread(image_detail, md, idx))
+    detail = await asyncio.to_thread(image_detail, md, idx)
+    # size of the file the preview serves (resolved the same way as /imagefile)
+    src, _ = _source_image(job, md, detail["name"])
+    detail["file_size"] = src.stat().st_size if src else None
+    return JSONResponse(detail)
 
 
 @router.get("/api/jobs/{job_id}/scale_check")
@@ -132,6 +136,30 @@ async def scale_check_ep(job_id: str, m: str | None = None):
 
 # formats a browser's <img> can render directly; anything else (TIFF) is transcoded.
 _WEB_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+
+
+def _source_image(job, md: Path, name: str) -> tuple[Path | None, Path]:
+    """Resolve image `name` to its file on disk, checked across the model's own
+    images dir, the undistorted output, the resize copy, the original image_root,
+    and the NESTED staging dir. Also returns the preview-cache root (the workspace,
+    or out_dir for blocksplit jobs which have no workspace)."""
+    meta = job.meta or {}
+    ws = Path(meta.get("workspace") or meta.get("out_dir") or "")
+    p = job.params or {}
+    dense = ws / f"{p.get('dataset_name', 'training_dataset')}_{p.get('mapper', 'global')}_mapper"
+    # prefer already-downscaled sources (undistorted output, the resize copy) over the raw
+    # original — for TIFF that makes the JPEG transcode read ~6 MB instead of ~300 MB. The
+    # resize folder is images_<resize_max> (images_fullhd is the pre-rename legacy name).
+    rmax = str(p.get("resize_max", "1920")).strip() or "1920"
+    # md.parent/images covers flat-dense layouts: a blocksplit block dir's symlink
+    # farm (tiles or originals) sits next to its sparse/.
+    for cand in (md.parent / "images" / name,
+                 dense / "images" / name, ws / f"images_{rmax}" / name,
+                 ws / "images_fullhd" / name,
+                 Path(meta.get("image_root", "")) / name, ws / "staging" / name):
+        if cand.is_file():
+            return cand, ws
+    return None, ws
 
 
 def _preview_jpeg(src: Path, ws: Path, name: str) -> Path | None:
@@ -165,9 +193,9 @@ def _preview_jpeg(src: Path, ws: Path, name: str) -> Path | None:
 
 @router.get("/api/jobs/{job_id}/imagefile/{idx}")
 async def image_file(job_id: str, idx: int, m: str | None = None):
-    """Serve the source photo for image #idx (checked across the undistorted output,
-    the original image_root, and the NESTED staging dir). TIFF inputs are transcoded to a
-    cached JPEG preview — browsers can't render TIFF, so the raw file would fail to load."""
+    """Serve the source photo for image #idx (see _source_image for the lookup).
+    TIFF inputs are transcoded to a cached JPEG preview — browsers can't render
+    TIFF, so the raw file would fail to load."""
     job = manager.get(job_id)
     md = resolve_model(job, m) if job else None
     if not md:
@@ -176,24 +204,15 @@ async def image_file(job_id: str, idx: int, m: str | None = None):
     if idx < 0 or idx >= len(imgs):
         raise HTTPException(404, "bad index")
     name = imgs[idx]["name"]
-    ws = Path(job.meta.get("workspace", ""))
-    p = job.params or {}
-    dense = ws / f"{p.get('dataset_name', 'training_dataset')}_{p.get('mapper', 'global')}_mapper"
-    # prefer already-downscaled sources (undistorted output, the resize copy) over the raw
-    # original — for TIFF that makes the JPEG transcode read ~6 MB instead of ~300 MB. The
-    # resize folder is images_<resize_max> (images_fullhd is the pre-rename legacy name).
-    rmax = str(p.get("resize_max", "1920")).strip() or "1920"
-    for cand in (dense / "images" / name, ws / f"images_{rmax}" / name,
-                 ws / "images_fullhd" / name,
-                 Path(job.meta.get("image_root", "")) / name, ws / "staging" / name):
-        if cand.is_file():
-            if cand.suffix.lower() in _WEB_IMAGE_EXTS:
-                return FileResponse(cand)
-            jpg = await asyncio.to_thread(_preview_jpeg, cand, ws, name)
-            if jpg:
-                return FileResponse(jpg, media_type="image/jpeg")
-            raise HTTPException(415, f"cannot preview {cand.suffix} image (transcode failed)")
-    raise HTTPException(404, f"image file not found: {name}")
+    src, ws = _source_image(job, md, name)
+    if not src:
+        raise HTTPException(404, f"image file not found: {name}")
+    if src.suffix.lower() in _WEB_IMAGE_EXTS:
+        return FileResponse(src)
+    jpg = await asyncio.to_thread(_preview_jpeg, src, ws, name)
+    if jpg:
+        return FileResponse(jpg, media_type="image/jpeg")
+    raise HTTPException(415, f"cannot preview {src.suffix} image (transcode failed)")
 
 
 @router.get("/api/jobs/{job_id}/mesh.ply")
