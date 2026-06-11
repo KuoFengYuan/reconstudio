@@ -16,6 +16,7 @@ from pipeline.blocksplit import (  # noqa: E402
     grid_cells,
     parse_region,
     run_blocksplit,
+    select_tiles,
     shift_principal_point,
     tile_bounds,
     tile_layout,
@@ -107,6 +108,16 @@ def test_grid_cells_cover_region():
 def test_tile_name_keeps_subfolder():
     assert tile_name("nadir/N-1_0.jpg", 2, 3) == "nadir/N-1_0_r2c3.jpg"
     assert tile_name("img.png", 0, 0) == "img_r0c0.jpg"
+
+
+def test_select_tiles_threshold_and_top1_fallback():
+    # 2x2 grid over 64x48: 10 obs in tile (0,0), 3 in tile (1,1)
+    xy = np.array([[1.0, 1.0]] * 10 + [[60.0, 40.0]] * 3)
+    assert select_tiles(xy, 64, 48, 2, 2, 5) == [(0, 0)]      # (1,1) under threshold
+    assert select_tiles(xy, 64, 48, 2, 2, 2) == [(0, 0), (1, 1)]
+    # nothing reaches the threshold -> only the busiest tile, NOT all touched
+    assert select_tiles(xy, 64, 48, 2, 2, 50) == [(0, 0)]
+    assert select_tiles(np.empty((0, 2)), 64, 48, 2, 2, 1) == []
 
 
 # --------------------------------------------------------------------------- #
@@ -230,11 +241,19 @@ def test_run_blocksplit_tiled(tmp_path):
     p0 = tracked[0]
     vid, k = int(p0.image_ids[0]), int(p0.point2D_idxs[0])
     assert int(imgs[vid].point3D_ids[k]) == p0.id
-    # every view's symlink resolves to a real crop in the pool
+    # every view's symlink resolves to a real crop in the pool, via a RELATIVE
+    # target so the whole out_dir can be moved/copied to another machine
+    import os
     for im in imgs.values():
         link = out / "block_0_0" / "images" / im.name
         assert link.is_symlink() and link.resolve().is_file()
         assert link.resolve().is_relative_to(out / "_tiles")
+        assert not os.path.isabs(os.readlink(link))
+    # manifest carries per-block pixel totals + the image -> blocks map
+    b0 = next(b for b in manifest["blocks"] if b["name"] == "block_0_0")
+    assert b0["pixels"] == b0["train_views"] * 32 * 24
+    assert manifest["image_blocks"]
+    assert all(isinstance(v, list) and v for v in manifest["image_blocks"].values())
     # crop pixels match the source region (gradient image → unique columns)
     import cv2
     some = next(iter(imgs.values()))
@@ -318,6 +337,34 @@ def test_run_blocksplit_refuses_existing_output(tmp_path):
     run_blocksplit(_params(ws, out), _Runner())
     with pytest.raises(ValueError, match="已有分塊結果"):
         run_blocksplit(_params(ws, out), _Runner())
+
+
+def test_run_blocksplit_resume_skips_existing_tiles(tmp_path):
+    """An interrupted run (no manifest yet) can be re-run into the same out_dir:
+    already-cropped tiles are reused byte-for-byte, not re-encoded."""
+    ws = _scene(tmp_path)
+    out = tmp_path / "out_resume"
+    run_blocksplit(_params(ws, out), _Runner())
+    (out / "manifest.json").unlink()                  # simulate a cancelled run
+    before = {p: p.stat().st_mtime_ns for p in (out / "_tiles").rglob("*.jpg")}
+    assert before
+    r = _Runner()
+    run_blocksplit(_params(ws, out), r)
+    assert (out / "manifest.json").is_file()
+    after = {p: p.stat().st_mtime_ns for p in (out / "_tiles").rglob("*.jpg")}
+    assert after == before                            # nothing re-encoded
+    assert any("resume" in ln for ln in r.lines)
+
+
+def test_run_blocksplit_refuses_resume_with_changed_params(tmp_path):
+    """Leftover tiles were cut with different params -> same names, different
+    content; refuse instead of silently mixing geometries."""
+    ws = _scene(tmp_path)
+    out = tmp_path / "out_mismatch"
+    run_blocksplit(_params(ws, out), _Runner())
+    (out / "manifest.json").unlink()
+    with pytest.raises(ValueError, match="參數不同"):
+        run_blocksplit(_params(ws, out, jpeg_quality="80"), _Runner())
 
 
 def test_run_blocksplit_no_blocks_raises(tmp_path):

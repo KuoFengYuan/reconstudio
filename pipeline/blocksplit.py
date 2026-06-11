@@ -15,12 +15,19 @@ Output: <out_dir>/block_<ix>_<iy>/   — flat-dense layout, directly trainable:
             images/…                 (symlinks: tile pool, or original files)
         <out_dir>/_tiles/…           (shared crop pool, tiling mode only)
         <out_dir>/manifest.json
+Tile links are RELATIVE (the pool lives inside out_dir), so the whole output
+tree can be moved or copied to another machine. Re-running into a cancelled
+run's out_dir resumes it — already-cropped tiles are skipped; a param stamp
+(.blocksplit_run.json) refuses resume when tile-shaping params changed, and a
+finished run (manifest.json present) still refuses outright.
 
 Block X/Y are the model's X/Y axes. With GPS_ALIGN (enu) those are metres, so
 block_size=500 is a 500 m square; without metric alignment pick sizes in model
 units. Assignment is observation-driven (no footprint geometry): an image joins
 a block when ≥ min_obs of its tracked 3D points fall inside the block(+buffer);
-a tile of that image is kept when ≥ min_tile_obs of those features land in it.
+a tile of that image is kept when ≥ min_tile_obs of those features land in it
+(when no tile reaches that, only the busiest tile is kept — spraying every
+touched tile into the block would add near-empty views).
 A tile is the same camera at the same pose with the principal point shifted by
 the crop origin — geometrically exact, which is why no pose/GPS work is needed.
 Each block is a self-consistent COLMAP model: views carry the 2D observations
@@ -34,6 +41,7 @@ from __future__ import annotations
 import concurrent.futures as futures
 import json
 import math
+import os
 import time
 from pathlib import Path, PurePosixPath
 
@@ -53,7 +61,7 @@ from .vendor.read_write_model import (
 
 BLOCKSPLIT_DEFAULTS = {
     "block_size": "500", "buffer": "120", "region": "",
-    "tile": True, "max_tile_px": "4096", "jpeg_quality": "95",
+    "tile": True, "max_tile_px": "8192", "jpeg_quality": "95",
     "min_obs": "30", "min_tile_obs": "8", "min_images": "15", "workers": "4",
 }
 
@@ -124,6 +132,22 @@ def tile_name(image_name: str, tr: int, tc: int) -> str:
     return str(rel.parent / f"{rel.stem}_r{tr}c{tc}.jpg")
 
 
+def select_tiles(xy: np.ndarray, width: int, height: int, cols: int, rows: int,
+                 min_tile_obs: int) -> list[tuple[int, int]]:
+    """Tiles (tr, tc) holding ≥ min_tile_obs of the observations `xy`. When none
+    reaches the threshold, keep only the busiest tile — the image barely grazes
+    the block, and keeping every touched tile would spray near-empty views."""
+    if xy.size == 0:
+        return []
+    tc = np.clip((xy[:, 0].astype(np.int64) * cols) // width, 0, cols - 1)
+    tr = np.clip((xy[:, 1].astype(np.int64) * rows) // height, 0, rows - 1)
+    counts = np.bincount(tr * cols + tc, minlength=cols * rows)
+    keep = np.nonzero(counts >= min_tile_obs)[0]
+    if keep.size == 0:
+        keep = np.array([counts.argmax()])
+    return [(int(k) // cols, int(k) % cols) for k in keep]
+
+
 # --------------------------------------------------------------------------- #
 # pipeline entry
 # --------------------------------------------------------------------------- #
@@ -142,6 +166,24 @@ def run_blocksplit(p: dict, r: Runner) -> None:
 
     if (out / "manifest.json").is_file():
         raise ValueError(f"輸出目錄已有分塊結果，請換一個 out_dir：{out}")
+    # resume guard: a cancelled run may be re-run into the same out_dir (cropped
+    # tiles are reused), but only when the params that shape tile content match.
+    stamp = out / ".blocksplit_run.json"
+    stamp_params = {"source": str(src), "tile": tile,
+                    "max_tile_px": max_tile_px, "jpeg_quality": jpeg_q}
+    if stamp.is_file():
+        try:
+            prev = json.loads(stamp.read_text())
+        except ValueError:
+            prev = None
+        if prev != stamp_params:
+            raise ValueError(
+                f"輸出目錄殘留參數不同的半成品（{stamp.name} 不符），"
+                f"請清空再跑：{out}")
+        r.log("[blocksplit] resume: out_dir 已有半成品（參數相符），已裁好的切片會跳過")
+    else:
+        out.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(json.dumps(stamp_params, ensure_ascii=False))
 
     sparse_dir, images_dir = _resolve_dense(src)
     r.banner(f"blocksplit start | model={sparse_dir} images={images_dir}")
@@ -211,14 +253,8 @@ def run_blocksplit(p: dict, r: Runner) -> None:
                 continue
             cam = cameras[im.camera_id]
             cols, rows_n = tile_layout(cam.width, cam.height, max_tile_px)
-            xy = xys2[hit]
-            tc = np.clip((xy[:, 0].astype(np.int64) * cols) // cam.width, 0, cols - 1)
-            tr = np.clip((xy[:, 1].astype(np.int64) * rows_n) // cam.height, 0, rows_n - 1)
-            counts = np.bincount(tr * cols + tc, minlength=cols * rows_n)
-            keep = np.nonzero(counts >= min_tile_obs)[0]
-            if keep.size == 0:
-                keep = np.nonzero(counts > 0)[0]
-            tiles = [(int(k) // cols, int(k) % cols) for k in keep]
+            tiles = select_tiles(xys2[hit], cam.width, cam.height,
+                                 cols, rows_n, min_tile_obs)
             for trr, tcc in tiles:
                 key = (im.camera_id, trr, tcc)
                 if key not in tile_cams:
@@ -249,6 +285,18 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         import cv2  # heavy/optional dep, house style: import where used
 
         def _crop_one(name: str, cells_: set[tuple[int, int]]) -> str:
+            # resume: skip tiles already cropped (the param stamp guarantees a
+            # leftover tile has the same geometry/quality); fully-done images
+            # never even decode the source.
+            def _done(p: Path) -> bool:
+                try:
+                    return p.stat().st_size > 0
+                except OSError:
+                    return False
+            todo = [t for t in sorted(cells_)
+                    if not _done(pool / tile_name(name, *t))]
+            if not todo:
+                return name
             img = cv2.imread(str(images_dir / name), cv2.IMREAD_COLOR)
             if img is None:
                 raise ValueError(f"影像讀取失敗：{images_dir / name}")
@@ -259,7 +307,7 @@ def run_blocksplit(p: dict, r: Runner) -> None:
                     f"{name} 的實際尺寸 {w}x{h} 與模型登記的 {cam.width}x{cam.height} 不符 —"
                     " 影像與 sparse 模型不是同一套，請確認 source。")
             cols, rows_n = tile_layout(w, h, max_tile_px)
-            for trr, tcc in sorted(cells_):
+            for trr, tcc in todo:
                 x0, y0, x1, y1 = tile_bounds(w, h, cols, rows_n, tcc, trr)
                 dst = pool / tile_name(name, trr, tcc)
                 dst.parent.mkdir(parents=True, exist_ok=True)
@@ -338,7 +386,10 @@ def run_blocksplit(p: dict, r: Runner) -> None:
                 link = bdir / "images" / nm
                 link.parent.mkdir(parents=True, exist_ok=True)
                 if not link.is_symlink():
-                    link.symlink_to((pool / nm).resolve())
+                    # relative: the pool lives inside out_dir, so the whole
+                    # output tree stays valid when moved/copied elsewhere
+                    link.symlink_to(os.path.relpath((pool / nm).resolve(),
+                                                    link.parent.resolve()))
 
         rows = np.nonzero(b["pmask"])[0]
         b_pts = {}
@@ -352,19 +403,30 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         write_images_binary(b_imgs, str(bdir / "sparse" / "images.bin"))
         write_points3D_binary(b_pts, str(bdir / "sparse" / "points3D.bin"))
 
+        # total training pixels: the per-block VRAM/wall-clock driver — the
+        # number users need when tuning block_size.
+        px = sum(b_cams[v.camera_id].width * b_cams[v.camera_id].height
+                 for v in b_imgs.values())
         info = {"name": bdir.name, "bounds": b["bounds"],
                 "src_images": len(b["members"]), "train_views": len(b_imgs),
-                "points": len(b_pts)}
+                "points": len(b_pts), "pixels": px}
         summary.append(info)
         r.log(f"[blocksplit] {bdir.name}: {info['src_images']} src images → "
-              f"{info['train_views']} views, {info['points']} pts"
+              f"{info['train_views']} views, {info['points']} pts, "
+              f"{px / 1e6:.1f} MP"
               + (f" ({n_tiles} tiles)" if tile else ""))
 
+    # which blocks each source image landed in — debugging aid for coverage
+    # questions ("why is this photo missing from block X?")
+    img_blocks: dict[str, list[str]] = {}
+    for b in blocks:
+        for im, _tiles in b["members"]:
+            img_blocks.setdefault(im.name, []).append(f"block_{b['ix']}_{b['iy']}")
     manifest = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": str(src), "sparse": str(sparse_dir), "images": str(images_dir),
         "params": {k: p.get(k) for k in BLOCKSPLIT_DEFAULTS} | {"region": list(region)},
-        "blocks": summary, "skipped": skipped,
+        "blocks": summary, "skipped": skipped, "image_blocks": img_blocks,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
 

@@ -242,8 +242,8 @@ def scene(model_dir: Path) -> dict:
 
 
 def image_detail(model_dir: Path, idx: int) -> dict:
-    """Per-image info for click-inspection: name, camera, #features, #registered
-    3D points (2D observations linked to a point3D)."""
+    """Per-image info for click-inspection: name, camera, pixel dims, #features,
+    #registered 3D points (2D observations linked to a point3D)."""
     path = Path(model_dir) / "images.bin"
     with open(path, "rb") as f:
         n = struct.unpack("<Q", f.read(8))[0]
@@ -263,6 +263,11 @@ def image_detail(model_dir: Path, idx: int) -> dict:
             if i == idx:
                 registered = sum(1 for (_x, _y, pid) in struct.iter_unpack("<ddq", block)
                                  if pid != -1)
+                try:
+                    c = read_cameras(Path(model_dir) / "cameras.bin").get(cam, {})
+                except OSError:
+                    c = {}
                 return {"index": idx, "name": name.decode(errors="replace"),
-                        "camera_id": cam, "n_features": npts, "n_registered": registered}
+                        "camera_id": cam, "n_features": npts, "n_registered": registered,
+                        "width": c.get("width"), "height": c.get("height")}
     raise IndexError(idx)
