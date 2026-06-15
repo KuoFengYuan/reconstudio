@@ -7,9 +7,17 @@
 <script src="/static/htmx.min.js"></script>
 <script src="/static/js/joblist.js" defer></script>
 <style>
-  :root { --bg:#0e1014; --panel:#161922; --panel2:#1b1f29; --line:#2a3038; --line2:#363d49;
-          --fg:#e6e9ef; --mut:#8b93a3; --accent:#c9d1d9; --accent-d:#aeb6c0;
-          --ok:#3fb950; --warn:#d29922; --err:#f85149; --radius:9px; }
+  /* 墨流し SUMINAGASHI — 和紙(washi paper) + 墨/藍(sumi & aizome ink) palette.
+     Variable NAMES are kept identical to the old dark theme so every inline
+     var(--x) in the markup/JS and the htmx partials re-skin automatically;
+     only the values change. New names (--paper/--field/--on-accent/--seal/
+     --serif) are additive and used by the appended #suminagashi-skin sheet. */
+  :root { --bg:#ece3cf; --paper:#efe7d6; --panel:#f6efdd; --panel2:#efe6d0;
+          --line:#d8cbac; --line2:#c6b487; --field:#f8f2e3;
+          --fg:#211d17; --mut:#6d6453; --accent:#21466e; --accent-d:#173049;
+          --on-accent:#f7f1e2; --seal:#b23020;
+          --ok:#4f6f3a; --warn:#a9781f; --err:#b23020; --radius:10px;
+          --serif:"Hiragino Mincho ProN","Yu Mincho","Shippori Mincho","Noto Serif CJK TC","Noto Serif TC","Songti TC",serif; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif;
          background:var(--bg); color:var(--fg); -webkit-font-smoothing:antialiased; }
@@ -123,8 +131,107 @@
   .empty { color:var(--mut); padding:30px; text-align:center; border:1px dashed var(--line2);
            border-radius:12px; background:var(--panel); }
 </style>
+<style id="suminagashi-skin">
+  /* ===========================================================================
+     墨流し SKIN — appended after the base sheet so these rules win on source
+     order. The base block is left intact (only its :root values changed); this
+     layer adds the washi paper ground, the interactive ink canvas, calligraphic
+     headings, the 朱印 seal, and flips the few hard-coded dark values that the
+     theme variables couldn't reach (button text, input fields, the select arrow,
+     autofill, the modal scrim and scrollbars).
+     =========================================================================== */
+
+  /* warm washi ground + faint paper fibre (layered gradients, fully offline) */
+  body{
+    background:
+      radial-gradient(120% 80% at 16% -5%, #f4eedc 0%, rgba(244,238,220,0) 58%),
+      radial-gradient(110% 95% at 105% 108%, #e6dabd 0%, rgba(230,218,189,0) 55%),
+      repeating-linear-gradient(93deg, rgba(120,98,55,.030) 0 2px, rgba(0,0,0,0) 2px 6px),
+      repeating-linear-gradient(7deg, rgba(120,98,55,.022) 0 3px, rgba(0,0,0,0) 3px 7px),
+      var(--bg);
+    font-family:ui-sans-serif,system-ui,"Noto Sans CJK TC","Hiragino Sans",sans-serif;
+  }
+
+  /* the interactive ink-marbling canvas — fixed behind the whole UI */
+  #suminagashi{ position:fixed; inset:0; width:100%; height:100%;
+                z-index:0; pointer-events:none; display:block; }
+  header, .wrap{ position:relative; z-index:1; }
+  .modal{ z-index:60; }
+
+  /* ---- header: a brushed title band the ink shimmers through ---- */
+  header{
+    background:linear-gradient(180deg, rgba(245,239,223,.82), rgba(235,226,203,.60));
+    border-bottom:1px solid var(--line2);
+    backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); gap:12px;
+  }
+  header h1{
+    font-family:var(--serif); font-weight:600; font-size:21px; letter-spacing:.16em;
+    color:var(--fg); display:flex; align-items:baseline; gap:10px; line-height:1;
+  }
+  header .sub{ margin-left:auto; color:var(--mut); font-size:12px; letter-spacing:.05em; }
+
+  /* ---- calligraphic section headings ---- */
+  legend{ font-family:var(--serif); color:var(--accent); text-transform:none; letter-spacing:.12em; font-size:12px; }
+  details.grp > summary{ font-family:var(--serif); text-transform:none; letter-spacing:.10em; font-size:12px; }
+  details.grp > summary::before{ color:var(--seal); }
+
+  /* ---- panels: frosted washi, so the ink reads faintly behind them ---- */
+  .col.left{ background:rgba(244,238,222,.90); border-right:1px solid var(--line2);
+             backdrop-filter:blur(3px); -webkit-backdrop-filter:blur(3px); }
+  fieldset, details.grp{ background:rgba(247,240,223,.96); border-color:var(--line);
+             box-shadow:0 1px 0 rgba(255,255,255,.55) inset; }
+  .tabs{ background:rgba(244,238,222,.92); border-color:var(--line); }
+
+  /* ---- inputs: inset washi + an indigo ink-bleed on focus ---- */
+  input,select,textarea{ background-color:var(--field); border-color:var(--line2); color:var(--fg); }
+  input:focus,select:focus,textarea:focus{ border-color:var(--accent); box-shadow:0 0 0 3px rgba(33,70,110,.16); }
+  input:-webkit-autofill, input:-webkit-autofill:hover, input:-webkit-autofill:focus,
+  select:-webkit-autofill, textarea:-webkit-autofill{
+       -webkit-text-fill-color:var(--fg); caret-color:var(--fg);
+       -webkit-box-shadow:0 0 0 1000px var(--field) inset; box-shadow:0 0 0 1000px var(--field) inset;
+       border:1px solid var(--line2); }
+  /* NB: keep these as longhands — a `background:` shorthand here would reset repeat/
+     position and tile the arrow across the whole field. */
+  select{ background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%2321466e'/%3E%3C/svg%3E");
+          background-repeat:no-repeat; background-position:right 10px center; }
+
+  /* ---- buttons: an indigo "ink stamp"; washi-white text ---- */
+  button{ color:var(--on-accent); background:var(--accent); }
+  button.ghost{ background:rgba(247,240,223,.90); color:var(--fg); border:1px solid var(--line2); }
+  button.ghost:hover{ border-color:var(--accent); color:var(--accent); filter:none; }
+  .submit{ background:linear-gradient(180deg,var(--accent),var(--accent-d)); color:var(--on-accent);
+           box-shadow:0 2px 10px rgba(23,48,73,.26); letter-spacing:.06em; }
+  .jf.active, .tabs button.active{ color:var(--on-accent); background:var(--accent); border-color:var(--accent); }
+
+  /* ---- chips / badges / steps / download pills on paper ---- */
+  .chip{ background:rgba(247,240,223,.85); border-color:var(--line2); }
+  .chip.accent{ color:var(--on-accent); background:var(--accent); border-color:var(--accent); }
+  .badge{ color:var(--on-accent); }
+  .dl{ background:rgba(247,240,223,.90); border-color:var(--line2); }
+  .dl:hover{ border-color:var(--accent); color:var(--accent); }
+  .dl.primary{ color:var(--on-accent); background:var(--accent); border-color:var(--accent); }
+
+  /* ---- the hero empty-state: let the marbling show vividly through ---- */
+  .empty{ background:rgba(245,239,224,.50); border:1px dashed var(--line2); color:var(--mut);
+          backdrop-filter:blur(1px); -webkit-backdrop-filter:blur(1px);
+          font-family:var(--serif); letter-spacing:.06em; }
+  /* text-bearing output surfaces (a loaded job view + the history table) sit on
+     near-opaque washi so the bold ink can't bleed under the text; the ink stays a
+     backdrop in the header, the margins and the empty-state hero only. */
+  .rs-panel, #joblist{ background:rgba(246,240,225,.95); border:1px solid var(--line);
+          border-radius:12px; padding:14px 16px; box-shadow:0 1px 0 rgba(255,255,255,.5) inset; }
+
+  /* ---- modal scrim = a soft wash of ink-water; box on paper ---- */
+  .modal{ background:rgba(33,29,23,.42); }
+  .modal .box{ background:var(--panel); border-color:var(--line2); box-shadow:0 16px 50px rgba(40,30,18,.34); }
+
+  /* ---- scrollbars as faded paper ---- */
+  ::-webkit-scrollbar-thumb{ background:#cdbf9f; border:2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover{ background:#b9a87f; }
+</style>
 </head>
 <body>
+<canvas id="suminagashi" aria-hidden="true"></canvas>
 <header>
   <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示左側設定面板">◀</button>
   <h1>Recon Studio</h1>
@@ -1267,6 +1374,166 @@
       else if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // left the job view → stop tailing
     }
   });
+</script>
+
+<!-- ============================ 墨流し ink-in-water backdrop ============================
+  Billowing sumi / indigo / vermilion ink diffusing through water. Thousands of dye
+  particles are advected by a divergence-free CURL-NOISE flow field — velocity =
+  (∂ψ/∂y, −∂ψ/∂x), the curl of an animated streamfunction ψ — which is exactly what
+  gives a fluid its swirling, curling filaments. Each particle deposits soft colour
+  into a persistent ink buffer that slowly dissipates, so stains bloom, billow and
+  fade like real ink. The pointer injects ink (move = trailing wisps, click = a
+  burst); two drifting sources keep it alive when idle. Paper is the CSS <body> wash
+  behind us; this canvas is fixed, pointer-events:none and holds only the ink. -->
+<script>
+(function(){
+  var cv = document.getElementById('suminagashi');
+  if(!cv || !cv.getContext){ return; }
+  var ctx = cv.getContext('2d');
+  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- tunables (all safe to tweak live) ----
+  var MAXP=6000, SPR=34, FLOW=30, SWELL=0.05, DEPOSIT=0.11, FADE=0.009,
+      STRETCH=1.6, NF1=0.0024, NF2=0.0130, NW2=0.95, LIFE=280, LIFEJ=200;
+  var SUMI='#17120d', SUMI2='#231c14', AI='#21466e', AI2='#1b3a5c', SHU='#b23020';
+  var BAG=[SUMI,SUMI,SUMI2,AI,AI,AI2,SHU];   // mostly 墨(sumi)+藍(indigo), a little 朱(vermilion)
+
+  var W=0,H=0,DPR=1, ink=null, ictx=null, sprites={};
+
+  function hexA(hex,a){
+    var n=parseInt(hex.slice(1),16);
+    return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')';
+  }
+  // soft radial-alpha ink blob, pre-rendered once per colour
+  function sprite(color){
+    if(sprites[color]) return sprites[color];
+    var r=SPR, c=document.createElement('canvas'); c.width=c.height=r*2;
+    var g=c.getContext('2d');
+    var rad=g.createRadialGradient(r,r,0, r,r,r);
+    rad.addColorStop(0, hexA(color,0.92)); rad.addColorStop(0.45, hexA(color,0.4)); rad.addColorStop(1, hexA(color,0));
+    g.fillStyle=rad; g.beginPath(); g.arc(r,r,r,0,6.2832); g.fill();
+    return (sprites[color]=c);
+  }
+
+  function resize(){
+    DPR=Math.min(window.devicePixelRatio||1, 1.75);
+    W=window.innerWidth; H=window.innerHeight;
+    cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
+    cv.style.width=W+'px'; cv.style.height=H+'px';
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+    ink=document.createElement('canvas'); ink.width=cv.width; ink.height=cv.height;
+    ictx=ink.getContext('2d'); ictx.setTransform(DPR,0,0,DPR,0,0);
+  }
+
+  // 32-bit hash → smooth value-noise → animated streamfunction → curl (the flow)
+  function hash(x,y){
+    var h=Math.imul(x|0,374761393) ^ Math.imul(y|0,668265263);
+    h^=h>>13; h=Math.imul(h,1274126177); h^=h>>16;
+    return (h>>>0)/4294967295;
+  }
+  function sm(t){ return t*t*(3-2*t); }
+  function vn(x,y){
+    var x0=Math.floor(x), y0=Math.floor(y), fx=sm(x-x0), fy=sm(y-y0);
+    var a=hash(x0,y0)   + (hash(x0+1,y0)  -hash(x0,y0))  *fx;
+    var b=hash(x0,y0+1) + (hash(x0+1,y0+1)-hash(x0,y0+1))*fx;
+    return a+(b-a)*fy;
+  }
+  var T=0;
+  function pot(x,y){ return vn(x*NF1+T*0.6, y*NF1-T*0.3) + NW2*vn(x*NF2-T*0.8, y*NF2+T*0.5); }
+  var _vx=0,_vy=0;
+  function flow(x,y){ var e=1.2; _vx=(pot(x,y+e)-pot(x,y-e)); _vy=-(pot(x+e,y)-pot(x-e,y)); }
+
+  // particles — flat arrays + ring buffer (no per-frame allocation)
+  var X=new Float32Array(MAXP), Y=new Float32Array(MAXP),
+      BX=new Float32Array(MAXP), BY=new Float32Array(MAXP),
+      AGE=new Int16Array(MAXP), LIF=new Int16Array(MAXP), SZ=new Float32Array(MAXP),
+      SPRf=new Array(MAXP), head=0;
+  function emit(cx,cy,n,spread,color){
+    for(var i=0;i<n;i++){
+      var k=head; head=(head+1)%MAXP;
+      var a=Math.random()*6.2832, rr=Math.random()*spread;
+      X[k]=cx+Math.cos(a)*rr; Y[k]=cy+Math.sin(a)*rr; BX[k]=cx; BY[k]=cy;
+      AGE[k]=0; LIF[k]=(LIFE+Math.random()*LIFEJ)|0; SZ[k]=0.45+Math.random()*0.6;
+      SPRf[k]=sprite(color || BAG[(Math.random()*BAG.length)|0]);
+    }
+  }
+
+  function step(){
+    // diffuse the accumulated ink each frame (self-blur) so blobs spread & merge into
+    // continuous, silky smoke — this is what real ink does as it soaks through water
+    ictx.globalCompositeOperation='copy'; ictx.filter='blur(0.4px)';
+    ictx.drawImage(ink, 0, 0, W, H); ictx.filter='none';
+    ictx.globalCompositeOperation='destination-out';      // slow dissipation of old ink
+    ictx.globalAlpha=FADE; ictx.fillStyle='#000'; ictx.fillRect(0,0,W,H);
+    ictx.globalCompositeOperation='source-over';
+    for(var k=0;k<MAXP;k++){
+      var lif=LIF[k]; if(lif<=0) continue;
+      var age=AGE[k]; if(age>=lif){ LIF[k]=0; continue; }
+      var x=X[k], y=Y[k];
+      flow(x,y);
+      var vx=_vx*FLOW, vy=_vy*FLOW;                                     // curl-noise velocity
+      var dbx=x-BX[k], dby=y-BY[k], db=Math.sqrt(dbx*dbx+dby*dby)||1;
+      x += vx + (dbx/db)*SWELL + (Math.random()-0.5)*0.25;
+      y += vy + (dby/db)*SWELL - 0.04;                                  // faint upward float
+      X[k]=x; Y[k]=y; AGE[k]=age+1;
+      var t=age/lif, env = t<0.14 ? t/0.14 : (1-t)/0.86; if(env<0) env=0;  // fade in then out
+      var s=SZ[k]*(0.75+t*0.7), spr=SPRf[k], R=spr.width*s;             // gentle swell with age
+      var sp=Math.sqrt(vx*vx+vy*vy), el=1.5+(sp*STRETCH<2.6?sp*STRETCH:2.6);  // elongate along flow
+      ictx.globalAlpha=DEPOSIT*env;
+      ictx.save(); ictx.translate(x,y); ictx.rotate(Math.atan2(vy,vx));
+      ictx.drawImage(spr, -R*el*0.5, -R*0.5, R*el, R);                  // silky directional wisp
+      ictx.restore();
+    }
+    ictx.globalAlpha=1;
+  }
+  // a light blur melts the discrete blobs into continuous, silky smoke (paper = CSS body bg)
+  function paint(){ ctx.clearRect(0,0,W,H); ctx.filter='blur(1.2px)'; ctx.drawImage(ink, 0,0, W, H); ctx.filter='none'; }
+
+  // ambient drifting ink sources + pointer interaction
+  var src=null, lastAmb=0, lastPtr=0, lx=0, ly=0;
+  function seed(){
+    src=[{x:W*0.50,y:H*0.58,ax:W*0.50,ay:H*0.58,c:SUMI},
+         {x:W*0.64,y:H*0.40,ax:W*0.64,ay:H*0.40,c:AI},
+         {x:W*0.74,y:H*0.56,ax:W*0.74,ay:H*0.56,c:SHU}];
+    emit(W*0.50,H*0.58, 460, 56, SUMI);
+    emit(W*0.64,H*0.40, 400, 50, AI);
+    emit(W*0.74,H*0.56, 220, 40, SHU);
+  }
+  function frame(ts){
+    if(!document.hidden){
+      T=ts*0.00006;
+      for(var s=0;s<src.length;s++){
+        var o=src[s];
+        flow(o.x, o.y);
+        o.x += _vx*FLOW + (o.ax-o.x)*0.018;   // ride the flow but stay near the anchor -> a contained, churning mass
+        o.y += _vy*FLOW + (o.ay-o.y)*0.018;
+        emit(o.x, o.y, o.c===SHU?3:6, 7, o.c);              // dense ink stream
+      }
+      step(); paint();
+    }
+    requestAnimationFrame(frame);
+  }
+  function onMove(e){
+    var now=e.timeStamp||0; if(now-lastPtr<16) return;
+    var x=e.clientX, y=e.clientY, dx=x-lx, dy=y-ly, sp=Math.sqrt(dx*dx+dy*dy);
+    lastPtr=now;
+    if(sp>0.5){                               // emit densely along the path so the stroke is continuous, not beaded
+      var n=Math.min(Math.ceil(sp/3),18);
+      for(var i=1;i<=n;i++){ var f=i/n; emit(lx+dx*f, ly+dy*f, 2, 7); }
+    }
+    lx=x; ly=y;
+  }
+  function onDown(e){ emit(e.clientX, e.clientY, 220, 24); }  // a burst of ink
+
+  window.addEventListener('resize', function(){ resize(); seed(); });
+  window.addEventListener('pointermove', onMove, {passive:true});
+  window.addEventListener('pointerdown', onDown, {passive:true});
+
+  resize(); seed();
+  for(var i=0;i<120;i++){ step(); }             // develop an initial bloom before first paint
+  if(reduce){ paint(); }                        // honour reduced-motion: one frame, no loop
+  else requestAnimationFrame(frame);
+})();
 </script>
 </body>
 </html>
