@@ -25,7 +25,7 @@ from .backends import env_python, get_backend, repo_path
 from .model import read_cameras
 from .runner import Cancelled, Runner
 
-TRAIN_DEFAULTS = {"backend": "gs2m", "gpu": "0", "extra": "", "force": False}
+TRAIN_DEFAULTS = {"backend": "lichtfeld-mrnf", "gpu": "0", "extra": "", "force": False}
 
 # Panel repo root (configs/ live here; resolved for backends that ship a config).
 PANEL_BASE = Path(__file__).resolve().parent.parent

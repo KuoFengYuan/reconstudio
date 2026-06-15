@@ -183,6 +183,36 @@ async def create_frames(request: Request):
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
 
+@router.post("/ui/depth", response_class=HTMLResponse)
+async def create_depth(request: Request):
+    """Depth Anything → a LichtFeld-style depth/ folder next to images/.
+    Non-destructive: only creates the depth folder; originals are untouched."""
+    form = dict(await request.form())
+    images = (form.get("images") or "").strip().rstrip("/")
+    out = (form.get("out_dir") or "").strip().rstrip("/")
+    model = (form.get("model") or "").strip()
+    gpu = (form.get("gpu") or "").strip()
+    try:
+        if not Path(images).is_dir():
+            raise ValueError(f"images 不是資料夾: {images!r}")
+        if not model:
+            raise ValueError("需要指定深度模型 id（model）")
+        params = {"images": images, "out_dir": out, "model": model, "gpu": gpu,
+                  "recurse": bool(form.get("recurse")),
+                  "invert": bool(form.get("invert")),
+                  "overwrite": bool(form.get("overwrite"))}
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    dest = out or str(Path(images).parent / "depth")
+    job = Job(id=new_id(), kind="depth",
+              title=f"🌊 深度 · {Path(images).name}",
+              subtitle=f"{images}  →  {dest}",
+              params=params, meta={"images": images, "out_dir": dest})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
 @router.post("/ui/jobs", response_class=HTMLResponse)
 async def create_colmap(request: Request):
     raw = await request.form()

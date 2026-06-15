@@ -16,6 +16,7 @@ from jobs import (
     PARSERS,
     Job,
     _parse_colmap,
+    _parse_depth,
     _parse_frames,
     _parse_gcs,
     _parse_mesh,
@@ -348,6 +349,46 @@ def test_gcs_full_flow():
 
 
 # --------------------------------------------------------------------------- #
+# _parse_depth
+# --------------------------------------------------------------------------- #
+def test_depth_header_sets_total_and_out():
+    job = _job("depth")
+    _parse_depth(job, "[depth] model=depth-anything/X device=cuda images=42 out=/data/scene/depth")
+    assert job.meta["total"] == 42
+    assert job.meta["device"] == "cuda"
+    assert job.meta["out_dir"] == "/data/scene/depth"
+    assert job.meta["phase"] == "推論中"
+    assert job.current_stage == "depth"
+
+
+def test_depth_progress_updates_cur_total():
+    job = _job("depth")
+    _feed(_parse_depth, job, [
+        "[depth] 1/3 a.jpg",
+        "[depth] 2/3 sub/b.jpg",
+    ])
+    assert job.meta["cur"] == 2
+    assert job.meta["total"] == 3
+
+
+def test_depth_done_parses_counts_and_marks_done():
+    job = _job("depth")
+    _parse_depth(job, "[depth] done: /data/scene/depth (40 written, 1 skipped, 1 failed)")
+    assert job.meta["out_dir"] == "/data/scene/depth"
+    assert job.meta["written"] == 40
+    assert job.meta["skipped"] == 1
+    assert job.meta["failed"] == 1
+    assert job.meta["phase"] == "完成"
+    assert job.current_stage == "done"
+
+
+def test_depth_unrelated_line_is_ignored():
+    job = _job("depth")
+    _parse_depth(job, "Some unrelated chatter from torch")
+    assert job.meta == {}
+
+
+# --------------------------------------------------------------------------- #
 # PARSERS registry
 # --------------------------------------------------------------------------- #
 def test_parsers_registry_maps_to_correct_callables():
@@ -356,10 +397,11 @@ def test_parsers_registry_maps_to_correct_callables():
     assert PARSERS["train"] is _parse_train
     assert PARSERS["mesh"] is _parse_mesh
     assert PARSERS["gcs"] is _parse_gcs
+    assert PARSERS["depth"] is _parse_depth
 
 
 def test_parsers_registry_has_exactly_the_known_kinds():
-    assert set(PARSERS) == {"colmap", "frames", "train", "mesh", "gcs", "blocksplit"}
+    assert set(PARSERS) == {"colmap", "frames", "train", "mesh", "gcs", "blocksplit", "depth"}
 
 
 def test_parsers_registry_dispatch_round_trips():

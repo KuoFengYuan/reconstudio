@@ -75,6 +75,19 @@
     <div class="hint">到 COLMAP / 訓練 / Mesh 分頁，用「瀏覽」選這個資料夾即可（不會自動帶入，流程由你決定）。</div>
     {% endif %}
 
+  {% elif job.kind == 'depth' %}
+    <div class="chips">
+      {% if job.meta.get('phase') %}<span class="chip accent">{{ job.meta.phase }}</span>{% endif %}
+      {% if job.meta.get('total') %}<span class="chip">{{ job.meta.get('cur', 0) }} / {{ job.meta.total }}</span>{% endif %}
+      {% if job.meta.get('written') is not none %}<span class="chip ok">已產生 {{ job.meta.get('written', 0) }}</span>{% endif %}
+      {% if job.meta.get('skipped') %}<span class="chip" style="color:var(--mut)">略過 {{ job.meta.skipped }}</span>{% endif %}
+      {% if job.meta.get('failed') %}<span class="chip" style="color:var(--err)">失敗 {{ job.meta.failed }}</span>{% endif %}
+    </div>
+    {% if job.status == 'done' %}
+    <div class="hint pathline" style="margin-top:12px">✅ depth/ 輸出：<code>{{ job.meta.get('out_dir','') }}</code></div>
+    <div class="hint">在 LichtFeld-Studio 訓練時加 <code>--use-depth-loss</code> 即會自動讀取此資料夾（需與 images/ 同層）。</div>
+    {% endif %}
+
   {% elif job.kind == 'blocksplit' %}
     <div class="chips">
       {% if job.meta.get('blocks') %}<span class="chip ok">{{ job.meta.blocks | length }} 塊</span>{% endif %}

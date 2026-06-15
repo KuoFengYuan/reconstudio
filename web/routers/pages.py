@@ -5,7 +5,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from jobs import COLMAP_STAGES
-from pipeline import TRAIN_DEFAULTS, available_backends, list_gpus
+from pipeline import (
+    DEPTH_DEFAULTS,
+    TRAIN_DEFAULTS,
+    available_backends,
+    depth_ready,
+    list_gpus,
+)
 from web.shared import (
     BROWSE_ROOT,
     COLMAP_DEFAULTS,
@@ -24,4 +30,5 @@ async def index(request: Request):
                  frames_defaults=FRAMES_DEFAULTS, enums=ENUMS,
                  stages=COLMAP_STAGES, browse_root=str(BROWSE_ROOT),
                  train_defaults=TRAIN_DEFAULTS, backends=available_backends(),
-                 gpus=list_gpus(), gcs_root=GCS_ROOT)
+                 gpus=list_gpus(), gcs_root=GCS_ROOT,
+                 depth_defaults=DEPTH_DEFAULTS, depth_ready=depth_ready())
