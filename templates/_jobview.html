@@ -1,4 +1,4 @@
-<div>
+<div class="rs-panel">
   <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
     <strong>{{ {'frames':'🎬','train':'🧠','mesh':'🧩','gcs':'☁️'}.get(job.kind,'📐') }} {{ job.title }}</strong>
     <code class="hint">{{ job.kind }} · {{ job.id }}</code>
@@ -13,8 +13,9 @@
 
   <!-- log stream is started by startLogStream() in index.html on htmx:afterSwap
        (htmx doesn't reliably execute inline <script> in swapped fragments). -->
+  <!-- 硯 (inkstone) — a warm-charcoal slab so the live log stays legible against washi -->
   <pre id="log" data-log-job="{{ job.id }}"
-       style="background:#0a0c10;border:1px solid var(--line);border-radius:8px;
+       style="background:#1c1812;border:1px solid var(--line2);border-radius:8px;
        padding:12px;margin-top:12px;height:55vh;overflow:auto;white-space:pre-wrap;
-       font:12px/1.45 ui-monospace,monospace;color:#c9d1d9"></pre>
+       font:12px/1.45 ui-monospace,monospace;color:#ece3d1"></pre>
 </div>
