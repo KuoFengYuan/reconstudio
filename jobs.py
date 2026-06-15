@@ -24,6 +24,7 @@ from pipeline import (
     Cancelled,
     Runner,
     run_colmap,
+    run_depth,
     run_frames,
     run_gcs_sync,
     run_gcs_upload,
@@ -61,6 +62,7 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "train": run_train,
     "mesh": run_mesh,
     "gcs": _run_gcs,
+    "depth": run_depth,
 }
 
 # --- COLMAP stage parsing --------------------------------------------------- #
@@ -285,6 +287,35 @@ def _parse_gcs(job: Job, line: str) -> None:
         job.current_stage = "done"
 
 
+# --- depth parsing ---------------------------------------------------------- #
+# The infer script prints a header "[depth] model=… images=N out=…", one
+# "[depth] i/N <rel>" per image, and a final "[depth] done: <out> (k written, …)".
+_DE_HEAD = re.compile(r"\[depth\] model=\S+ device=(\S+) images=(\d+) out=(.+)")
+_DE_CUR = re.compile(r"\[depth\] (\d+)/(\d+)\s")
+_DE_DONE = re.compile(r"\[depth\] done: (.+?) \((\d+) written, (\d+) skipped, (\d+) failed\)")
+
+
+def _parse_depth(job: Job, line: str) -> None:
+    m = _DE_HEAD.search(line)
+    if m:
+        job.meta["device"] = m.group(1)
+        job.meta["total"] = int(m.group(2))
+        job.meta["out_dir"] = m.group(3).strip()
+        job.meta["phase"] = "推論中"
+        job.current_stage = "depth"
+    m = _DE_CUR.search(line)
+    if m:
+        job.meta["cur"], job.meta["total"] = int(m.group(1)), int(m.group(2))
+    m = _DE_DONE.search(line)
+    if m:
+        job.meta["out_dir"] = m.group(1).strip()
+        job.meta["written"] = int(m.group(2))
+        job.meta["skipped"] = int(m.group(3))
+        job.meta["failed"] = int(m.group(4))
+        job.meta["phase"] = "完成"
+        job.current_stage = "done"
+
+
 # blocksplit: collect the per-block summary lines so the job view can offer a
 # block picker (檢視/帶入訓練) once the split is done.
 _BLOCKSPLIT_LINE = re.compile(r"^\[blocksplit\] (block_\d+_\d+): .*?→ (\d+) views")
@@ -306,6 +337,7 @@ PARSERS: dict[str, Callable[[Job, str], None]] = {
     "mesh": _parse_mesh,
     "gcs": _parse_gcs,
     "blocksplit": _parse_blocksplit,
+    "depth": _parse_depth,
 }
 
 

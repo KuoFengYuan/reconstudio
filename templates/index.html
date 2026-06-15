@@ -115,14 +115,18 @@
   .tabs button { flex:1; min-width:fit-content; white-space:nowrap; background:transparent; color:var(--mut);
                  border:0; border-radius:7px; padding:7px 8px; font-size:13px; font-weight:550; }
   .tabs button.active { color:#0a0c10; background:var(--accent); }
-  /* left nav = two labeled rows (free navigation, no implied order): the pipeline
-     features and a 工具 row for things outside the pipeline (viewer). */
+  /* left nav = three labeled rows (free navigation, no implied order): the pipeline
+     features (功能), standalone 工具, and 檢視 viewers (Mesh Viewer / SuperSplat). */
   .tabs.steps { flex-direction:column; align-items:stretch; gap:3px; }
-  .tabs.steps .tabrow { display:flex; align-items:center; gap:3px; flex-wrap:wrap; }
+  /* label | buttons; buttons live in their own wrapping flex box so a wrapped
+     row aligns under the first button, not back under the label. */
+  .tabs.steps .tabrow { display:flex; align-items:flex-start; gap:3px; }
+  .tabs.steps .tabbtns { display:flex; flex:1; flex-wrap:wrap; gap:3px; min-width:0; }
   .tabs.steps .tabrow + .tabrow { border-top:1px dashed var(--line); padding-top:4px; }
-  .tabs.steps .lbl { flex:none; color:var(--mut); font-size:11px; padding:0 7px 0 5px;
+  .tabs.steps .lbl { flex:none; color:var(--mut); font-size:11px; padding:6px 7px 0 5px;
                      letter-spacing:2px; user-select:none; }
-  .tabs.steps .tabrow.tools button { flex:0 1 auto; padding:6px 10px; }
+  .tabs.steps .tabrow.tools button,
+  .tabs.steps .tabrow.viewer button { flex:0 1 auto; padding:6px 10px; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
@@ -244,17 +248,27 @@
     <div class="tabs steps">
       <div class="tabrow">
         <span class="lbl">功能</span>
-        <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
-        <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
-        <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
-        <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
-        <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
+        <div class="tabbtns">
+          <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
+          <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
+          <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
+          <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
+          <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
+        </div>
       </div>
       <div class="tabrow tools">
         <span class="lbl">工具</span>
-        <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
-        <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
-        <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
+        <div class="tabbtns">
+          <button class="ghost" id="t-depth" onclick="showForm('depth')">🌊 深度</button>
+          <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
+        </div>
+      </div>
+      <div class="tabrow viewer">
+        <span class="lbl">檢視</span>
+        <div class="tabbtns">
+          <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
+          <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
+        </div>
       </div>
     </div>
 
@@ -543,6 +557,54 @@
     {% endmacro %}
 
     <!-- ----- blocksplit form ----- -->
+    <!-- ----- depth form (Depth Anything -> LichtFeld depth/ folder) ----- -->
+    <form id="form-depth" style="display:none" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>深度生成（Depth Anything）</legend>
+        <div class="hint">為每張照片產生深度圖,輸出成 LichtFeld-Studio 格式的 <code>depth/</code> 資料夾
+          （8-bit 灰階 PNG、同名同尺寸）。訓練時加 <code>--use-depth-loss</code> 會自動讀取。</div>
+        {% if not depth_ready %}
+        <div class="hint" style="color:var(--err)">⚠ 深度環境未就緒:需要名為
+          <code>{{ depth_defaults.conda_env }}</code> 的 conda env(裝 torch + transformers + pillow)。
+          可在 <code>local.env</code> 設 <code>DEPTH_CONDA_ENV</code> / <code>DEPTH_MODEL</code>,
+          或開 <a href="/doctor" target="_blank" style="color:var(--accent)">/doctor</a> 檢查。</div>
+        {% endif %}
+        <label>images（照片資料夾,或含 images/ 的 COLMAP workspace）</label>
+        <div class="row">
+          <input name="images" id="depth_images" placeholder="{{ browse_root }}" required>
+          <button type="button" class="ghost" onclick="openPicker('depth_images')">瀏覽</button>
+        </div>
+        <label>out_dir（留空 = images 的同層 <code>depth/</code>,讓 LichtFeld 自動找到）</label>
+        <div class="row">
+          <input name="out_dir" id="depth_out" placeholder="留空自動(建議)">
+          <button type="button" class="ghost" onclick="openPicker('depth_out')">瀏覽</button>
+        </div>
+        <label>model（深度模型:HF hub id、DA3 名稱或本地路徑）</label>
+        <input name="model" value="{{ depth_defaults.model }}" {{ '' if depth_ready else 'disabled' }}>
+        <div class="hint">預設 <code>depth-anything/Depth-Anything-V2-Large-hf</code>（V2,走 transformers）。
+          若已裝 Depth Anything 3 本體,可改用 <code>da3mono-large</code>（相對）/ <code>da3metric-large</code>（公制）。</div>
+        <label>GPU</label>
+        <select name="gpu" {{ '' if depth_ready else 'disabled' }}>
+          {% if gpus %}{% for g in gpus %}
+          <option value="{{ g.index }}">#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
+          {% endfor %}{% else %}
+          <option value="0">0（預設;未偵測到 nvidia-smi）</option>
+          {% endif %}
+        </select>
+      </fieldset>
+      <details class="grp">
+        <summary>進階</summary>
+        <div class="gbody">
+          <label class="checks"><input type="checkbox" name="recurse" value="1" checked> 遞迴子資料夾（含子資料夾）</label>
+          <div class="hint">多相機 / 巢狀資料集（如 nadir、oblique 分資料夾）需要;會保留相對路徑。</div>
+          <label class="checks" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> 覆蓋已存在的深度圖（預設略過,可續跑）</label>
+          <label class="checks" style="margin-top:8px"><input type="checkbox" name="invert" value="1"> 反轉（存 1-正規化,近處較暗）</label>
+          <div class="hint">深度損失為尺度/方向不變,反轉通常不影響結果;不確定就不要勾。</div>
+        </div>
+      </details>
+      <button class="submit" type="submit" {{ '' if depth_ready else 'disabled' }}>▶ 產生深度圖</button>
+    </form>
+
     <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>分塊（大場景 → 每塊獨立訓練）</legend>
@@ -594,7 +656,8 @@
         <label>backend（訓練器；環境由 backends.json 解析）</label>
         <select name="backend" id="train_backend" onchange="syncBackendParams('train')">
           {% for b in backends %}
-          <option value="{{ b.name }}" {{ 'disabled' if not b.ready }}>
+          <option value="{{ b.name }}" {{ 'disabled' if not b.ready }}
+                  {{ 'selected' if b.name == train_defaults.backend and b.ready }}>
             {{ b.label }}{{ '' if b.ready else '（環境未就緒）' }}
           </option>{% endfor %}
         </select>
@@ -624,9 +687,11 @@
         </select>
       </fieldset>
 
-      <!-- per-backend tunable params (rendered from each backend's schema) -->
+      <!-- per-backend tunable params (rendered from each backend's schema). The
+           default backend's block is shown first (matches the selected option);
+           syncBackendParams re-syncs on tab open / change. -->
       {% for b in backends %}
-      <div class="bp" data-backend="{{ b.name }}" data-binary="{{ '1' if b.binary else '' }}" {{ '' if loop.first else 'style=display:none' }}>
+      <div class="bp" data-backend="{{ b.name }}" data-binary="{{ '1' if b.binary else '' }}" {{ '' if b.name == train_defaults.backend else 'style=display:none' }}>
         <fieldset>
           <legend>{{ b.label }} 參數</legend>
           {% for pr in b.params if not pr.group %}{{ field(pr, b.ready) }}{% endfor %}
@@ -876,7 +941,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','blocksplit','train','mesh','gcs','viewer','supersplat'].forEach(function(k){
+    ['frames','colmap','blocksplit','depth','train','mesh','gcs','viewer','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);

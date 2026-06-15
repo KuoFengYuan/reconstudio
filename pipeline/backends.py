@@ -373,4 +373,20 @@ def doctor(deep: bool = True) -> dict:
         if deep and py:
             item["probe"] = _probe_env(py, spec.get("probe_imports", ["torch"]))
         report["backends"][name] = item
+
+    # Depth Anything tool: its own conda env (DEPTH_CONDA_ENV) + panel-owned script.
+    envs = conda_envs_dir()
+    dpy = (envs / settings.depth_conda_env / "bin" / "python") if envs else None
+    dpy = dpy if (dpy and dpy.is_file()) else None
+    script_ok = (BASE / "tools" / "depth_anything_infer.py").is_file()
+    depth = {
+        "conda_env": settings.depth_conda_env,
+        "env_python": str(dpy) if dpy else None,
+        "model": settings.depth_model,
+        "script_ok": script_ok,
+        "ready": bool(dpy) and script_ok,
+    }
+    if deep and dpy:
+        depth["probe"] = _probe_env(dpy, ["torch", "PIL"])
+    report["depth"] = depth
     return report
