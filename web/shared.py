@@ -81,3 +81,8 @@ MESH_EXTS = {".ply", ".obj", ".stl", ".glb"}
 # formats the self-hosted SuperSplat viewer opens (3DGS point clouds; .ply here is
 # a gaussian cloud like point_cloud.ply, not a mesh)
 SPLAT_EXTS = {".ply", ".splat", ".ksplat", ".spz", ".sog"}
+# images the standalone gallery (/gallery) shows. Browsers render these natively...
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+# ...plus TIFF, which has no native browser support -> transcoded to a JPEG preview
+# (the COLMAP/aerial inputs are often TIFF), like the viz photo panel does.
+IMAGE_EXTS_ALL = IMAGE_EXTS | {".tif", ".tiff"}
