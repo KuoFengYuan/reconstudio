@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>圖片檢視器{% if path %} · {{ items|length }} 張{% endif %}</title>
+<style>
+  :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#c9d1d9; --panel:rgba(22,26,33,.92);
+          --err:#f85149; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:#0b0d11; color:var(--fg);
+              font:13px/1.45 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif; }
+  #bar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px;
+         padding:9px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+         backdrop-filter:blur(6px); }
+  #bar .ttl { font-weight:600; }
+  #bar .pth { color:var(--mut); font-size:11px; overflow:hidden; text-overflow:ellipsis;
+              white-space:nowrap; flex:1; min-width:0; }
+  #bar .cnt { color:var(--accent); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  /* per-subfolder section heading — sticky under the top bar so you always know
+     which folder the photos you're scrolling through belong to. */
+  .grp { position:sticky; top:39px; z-index:4; display:flex; align-items:baseline; gap:8px;
+         padding:8px 14px 6px; background:#0b0d11; border-bottom:1px solid var(--line); }
+  .grp b { font-size:13px; color:#dfe4ec; }
+  .grp .root { color:var(--mut); font-weight:600; }
+  .grp small { color:var(--mut); font-variant-numeric:tabular-nums; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+          gap:8px; padding:10px 12px 16px; }
+  .cell { position:relative; aspect-ratio:1/1; background:#11151b; border:1px solid var(--line);
+          border-radius:8px; overflow:hidden; cursor:zoom-in; }
+  .cell img { width:100%; height:100%; object-fit:cover; display:block; background:#11151b; }
+  .cell .nm { position:absolute; left:0; right:0; bottom:0; padding:3px 6px; font-size:10px;
+              color:#dfe4ec; background:linear-gradient(transparent,rgba(0,0,0,.72));
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; pointer-events:none; }
+  .empty,.note { color:var(--mut); padding:40px 14px; text-align:center; }
+  .note { padding:8px 14px; color:var(--mut); font-size:11px; }
+  /* lightbox */
+  #lb { position:fixed; inset:0; z-index:20; display:none; align-items:center; justify-content:center;
+        background:rgba(6,8,12,.93); }
+  #lb.open { display:flex; }
+  #lb img { max-width:94vw; max-height:88vh; object-fit:contain; border-radius:6px;
+            box-shadow:0 10px 50px rgba(0,0,0,.6); }
+  #lb .cap { position:fixed; left:0; right:0; bottom:14px; text-align:center; color:var(--fg);
+             font-size:13px; text-shadow:0 1px 4px #000; pointer-events:none; }
+  #lb .cap .sub { color:var(--accent); } #lb .cap small { color:var(--mut); margin-left:8px; }
+  #lb button { position:fixed; top:50%; transform:translateY(-50%); background:var(--panel);
+               color:var(--fg); border:1px solid var(--line); border-radius:50%; width:46px; height:46px;
+               font-size:22px; cursor:pointer; user-select:none; }
+  #lb button:hover { filter:brightness(1.3); }
+  #lb #prev { left:16px; } #lb #next { right:16px; }
+  #lb #close { top:16px; right:16px; transform:none; width:40px; height:40px; font-size:18px; border-radius:8px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span class="ttl">🖼 圖片檢視器</span>
+  <span class="pth" title="{{ path }}">{{ path or '（未指定資料夾）' }}</span>
+  {% if path %}<span class="cnt">{{ items|length }} 張{% if groups|length > 1 %} · {{ groups|length }} 個資料夾{% endif %}</span>{% endif %}
+</div>
+
+{% if not path %}
+  <div class="empty">沒有指定資料夾。回到面板的「檢視 › 🖼 圖片」,用「瀏覽」挑一個含圖片的資料夾再開啟。</div>
+{% elif not items %}
+  <div class="empty">此資料夾（含子資料夾）沒有可顯示的圖片（支援 .jpg / .png / .webp / .gif / .bmp / .tif）。</div>
+{% else %}
+  {% if truncated %}<div class="note">圖片過多,只顯示前 {{ items|length }} 張。</div>{% endif %}
+  {% set show_heads = groups|length > 1 or groups[0].sub %}
+  {% for g in groups %}
+    {% if show_heads %}
+    <div class="grp">
+      {% if g.sub %}<b>📁 {{ g.sub }}</b>{% else %}<b class="root">📁（根目錄）</b>{% endif %}
+      <small>{{ g.files|length }} 張</small>
+    </div>
+    {% endif %}
+    <div class="grid">
+      {% for it in g.files %}
+      <div class="cell" onclick="openLb({{ it.i }})">
+        <img loading="lazy" src="/api/gallery/imagefile?path={{ (path ~ '/' ~ it.rel)|urlencode }}" alt="{{ it.name }}">
+        <div class="nm">{{ it.name }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+
+  <div id="lb" onclick="if(event.target.id==='lb')closeLb()">
+    <button id="close" onclick="closeLb()" title="關閉 (Esc)">✕</button>
+    <button id="prev" onclick="step(-1)" title="上一張 (←)">‹</button>
+    <img id="lb-img" alt="">
+    <button id="next" onclick="step(1)" title="下一張 (→)">›</button>
+    <div class="cap"><span class="sub" id="lb-sub"></span><span id="lb-name"></span><small id="lb-idx"></small></div>
+  </div>
+
+  <script>
+    var ITEMS = {{ items|tojson }};                 // [{i, rel, sub, name}] in grid order
+    var ROOT = {{ path|tojson }};
+    var cur = 0;
+    function imgUrl(rel){ return "/api/gallery/imagefile?path=" + encodeURIComponent(ROOT + "/" + rel); }
+    function render(){
+      var it = ITEMS[cur];
+      document.getElementById('lb-img').src = imgUrl(it.rel);
+      document.getElementById('lb-sub').textContent = it.sub ? it.sub + " / " : "";
+      document.getElementById('lb-name').textContent = it.name;
+      document.getElementById('lb-idx').textContent = (cur + 1) + " / " + ITEMS.length;
+    }
+    function openLb(i){ cur = i; render(); document.getElementById('lb').classList.add('open'); }
+    function closeLb(){ document.getElementById('lb').classList.remove('open'); }
+    function step(d){ cur = (cur + d + ITEMS.length) % ITEMS.length; render(); }
+    document.addEventListener('keydown', function(e){
+      if (!document.getElementById('lb').classList.contains('open')) return;
+      if (e.key === 'Escape') closeLb();
+      else if (e.key === 'ArrowLeft') step(-1);
+      else if (e.key === 'ArrowRight') step(1);
+    });
+  </script>
+{% endif %}
+</body>
+</html>

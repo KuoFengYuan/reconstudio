@@ -266,6 +266,7 @@
       <div class="tabrow viewer">
         <span class="lbl">檢視</span>
         <div class="tabbtns">
+          <button class="ghost" id="t-gallery" onclick="showForm('gallery')">🖼 圖片</button>
           <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
           <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
         </div>
@@ -848,6 +849,24 @@
       <button class="submit" type="submit">⬆ 上傳到 GCS</button>
     </form>
 
+    <!-- ----- standalone image gallery (browse a server folder's photos) ----- -->
+    <form id="form-gallery" style="display:none" onsubmit="openGallery(); return false;">
+      <fieldset>
+        <legend>圖片檢視器（看 server 資料夾）</legend>
+        <div class="hint" style="margin-bottom:8px">挑 server 上<b>任一資料夾</b>,把裡面（<b>含所有子資料夾</b>）的圖片排成一張縮圖牆,並<b>依子資料夾分組</b>顯示標題,所以像 backward / forward / left / nadir / right 這種多鏡頭結構可以一次全看、又知道每張在哪個子資料夾。點一張可放大、用 ← → 翻頁。支援 <code>.jpg / .png / .webp / .gif / .bmp / .tif</code>（TIFF 自動轉 JPEG 預覽）。</div>
+        <label>server 資料夾路徑</label>
+        <div class="row">
+          <input id="gallery_path" placeholder="{{ browse_root }}/…/images_2560">
+          <button type="button" class="ghost" onclick="openPicker('gallery_path')">瀏覽</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--mut);font-size:12px">
+          <input type="checkbox" id="gallery_recursive" checked style="width:auto">含子資料夾(取消 = 只看這層)
+        </label>
+        <div class="hint">「瀏覽」從 <code>{{ browse_root }}</code> 起逐層挑資料夾,也可直接貼完整路徑。</div>
+      </fieldset>
+      <button class="submit" type="submit">🖼 開啟圖片牆</button>
+    </form>
+
     <!-- ----- standalone mesh viewer (open any local mesh file) ----- -->
     <form id="form-viewer" style="display:none" onsubmit="openViewer(); return false;">
       <fieldset>
@@ -941,7 +960,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','blocksplit','depth','train','mesh','gcs','viewer','supersplat'].forEach(function(k){
+    ['frames','colmap','blocksplit','depth','train','mesh','gcs','gallery','viewer','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -1127,6 +1146,14 @@
     var el = document.getElementById(target);
     if (el) el.value = path;
     document.getElementById('picker').classList.remove('open');
+  }
+  // Open the server-side image gallery for the chosen folder (new tab). Needs a
+  // path — unlike the mesh/splat viewers there's no client-side local mode.
+  function openGallery(){
+    var p = (document.getElementById('gallery_path').value || '').trim();
+    if (!p){ alert('請先選一個含圖片的 server 資料夾。'); return; }
+    var rec = document.getElementById('gallery_recursive').checked ? 1 : 0;
+    window.open('/gallery?path=' + encodeURIComponent(p) + '&recursive=' + rec, '_blank');
   }
   // One button, two modes: a filled path opens that server file; an empty path opens
   // the viewer's local mode (pick a file from this computer / drag & drop in there).
