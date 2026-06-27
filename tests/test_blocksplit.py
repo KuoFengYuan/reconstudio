@@ -1,6 +1,7 @@
 """blocksplit: pure helpers, the form validator, and an end-to-end split of a
 tiny synthetic dense scene (two clusters → two blocks, tiled and non-tiled)."""
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -13,14 +14,19 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("cv2")
 
 from pipeline.blocksplit import (  # noqa: E402
+    AUTO_TARGET_VIEWS,
+    auto_partition_params,
     grid_cells,
+    hull_area,
     parse_region,
+    rebalance_cells,
     run_blocksplit,
     select_tiles,
     shift_principal_point,
     tile_bounds,
     tile_layout,
     tile_name,
+    visibility,
 )
 from pipeline.vendor.read_write_model import (  # noqa: E402
     Camera,
@@ -105,6 +111,54 @@ def test_grid_cells_cover_region():
     assert cells[-1][2:] == (200, 0, 300, 100)
 
 
+def test_rebalance_cells_splits_dense_keeps_sparse():
+    # 200 cameras packed in x<100, 6 in x>300 over a 0..400 strip
+    rng = np.random.default_rng(0)
+    dense = np.column_stack([rng.uniform(0, 100, 200), rng.uniform(0, 100, 200)])
+    sparse = np.column_stack([rng.uniform(300, 400, 6), rng.uniform(0, 100, 6)])
+    cxy = np.vstack([dense, sparse])
+    rects = rebalance_cells(0, 0, 400, 100, cxy, max_images=50,
+                            min_images=2, min_size=25)
+    # disjoint + exact cover of the region area
+    assert sum((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in rects) == pytest.approx(400 * 100)
+    # every partition holds ≤ max_images cameras (or couldn't be split further)
+    for x0, y0, x1, y1 in rects:
+        n = int(((cxy[:, 0] >= x0) & (cxy[:, 0] < x1) &
+                 (cxy[:, 1] >= y0) & (cxy[:, 1] < y1)).sum())
+        assert n <= 50 or min(x1 - x0, y1 - y0) < 2 * 25
+    # dense half ends up with more partitions than the sparse half
+    left = [r for r in rects if (r[0] + r[2]) / 2 < 200]
+    right = [r for r in rects if (r[0] + r[2]) / 2 >= 200]
+    assert len(left) > len(right)
+
+
+def test_rebalance_cells_no_split_when_under_capacity():
+    cxy = np.array([[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]])
+    rects = rebalance_cells(0, 0, 100, 100, cxy, max_images=50,
+                            min_images=1, min_size=10)
+    assert rects == [(0.0, 0.0, 100.0, 100.0)]   # too few cams → single block
+
+
+def test_auto_partition_params_scales_blocks_with_camera_count():
+    region = (0.0, 0.0, 1000.0, 1000.0)
+    # N just over the target → 2 blocks worth of capacity
+    n = 2 * AUTO_TARGET_VIEWS + 10
+    cxy = np.zeros((n, 2))
+    max_images, min_images, min_size, buffer = auto_partition_params(cxy, region)
+    k = round(n / AUTO_TARGET_VIEWS)
+    assert max_images == math.ceil(n / k)            # ~target per block
+    assert 0 < min_images < max_images
+    assert min_size > 0 and buffer > 0
+    # fewer cameras → a single block (no over-splitting)
+    few = auto_partition_params(np.zeros((20, 2)), region)
+    assert few[0] == 20                              # max_images == N → one block
+
+
+def test_auto_partition_params_handles_empty():
+    mi, _, ms, buf = auto_partition_params(np.empty((0, 2)), (0.0, 0.0, 10.0, 10.0))
+    assert mi >= 1 and ms > 0 and buf > 0
+
+
 def test_tile_name_keeps_subfolder():
     assert tile_name("nadir/N-1_0.jpg", 2, 3) == "nadir/N-1_0_r2c3.jpg"
     assert tile_name("img.png", 0, 0) == "img_r0c0.jpg"
@@ -118,6 +172,26 @@ def test_select_tiles_threshold_and_top1_fallback():
     # nothing reaches the threshold -> only the busiest tile, NOT all touched
     assert select_tiles(xy, 64, 48, 2, 2, 50) == [(0, 0)]
     assert select_tiles(np.empty((0, 2)), 64, 48, 2, 2, 1) == []
+
+
+def test_hull_area_square_triangle_and_degenerate():
+    sq = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])
+    assert hull_area(sq) == pytest.approx(100.0)
+    # interior points don't change the hull
+    assert hull_area(np.vstack([sq, [[5.0, 5.0], [3.0, 7.0]]])) == pytest.approx(100.0)
+    assert hull_area(np.array([[0.0, 0.0], [4.0, 0.0], [0.0, 3.0]])) == pytest.approx(6.0)
+    assert hull_area(np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])) == 0.0  # collinear
+    assert hull_area(np.array([[0.0, 0.0], [1.0, 1.0]])) == 0.0              # < 3 pts
+    assert hull_area(np.empty((0, 2))) == 0.0
+
+
+def test_visibility_ratio():
+    allpts = np.array([[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]])   # area 100
+    half = np.array([[0.0, 0.0], [5.0, 0.0], [5.0, 10.0], [0.0, 10.0]])       # area 50
+    assert visibility(half, allpts) == pytest.approx(0.5)
+    assert visibility(allpts, allpts) == pytest.approx(1.0)
+    assert visibility(np.empty((0, 2)), allpts) == 0.0
+    assert visibility(half, np.array([[0.0, 0.0], [1.0, 1.0]])) == 0.0        # degenerate V_i
 
 
 # --------------------------------------------------------------------------- #
@@ -135,10 +209,20 @@ def test_build_blocksplit_params_defaults_and_tile_bool():
     ("block_size", "abc"), ("block_size", "0"), ("buffer", "-1"),
     ("max_tile_px", "100"), ("jpeg_quality", "101"), ("workers", "0"),
     ("region", "1,2,3"),
+    ("vis_thresh", "0"), ("vis_thresh", "1.5"), ("vis_thresh", "abc"),
+    ("max_images", "abc"),
 ])
 def test_build_blocksplit_params_rejects(field, value):
     with pytest.raises(ValueError):
         build_blocksplit_params("/src", "/out", {field: value})
+
+
+def test_build_blocksplit_params_rebalance_and_max_images():
+    p = build_blocksplit_params("/src", "/out", {"rebalance": "1"})
+    assert p["rebalance"] is True and p["max_images"] == "200"
+    assert build_blocksplit_params("/src", "/out", {})["rebalance"] is False
+    with pytest.raises(ValueError, match="max_images"):   # max_images < min_images
+        build_blocksplit_params("/src", "/out", {"max_images": "5", "min_images": "15"})
 
 
 # --------------------------------------------------------------------------- #
@@ -156,8 +240,8 @@ def _project(c, pts):
                      _F * xc[:, 1] / xc[:, 2] + _H / 2], axis=1)
 
 
-def _scene(tmp_path):
-    """Flat dense layout: two point clusters 150 apart, 3 nadir cams each."""
+def _scene(tmp_path, cams_per_cluster=3):
+    """Flat dense layout: two point clusters 150 apart, N nadir cams each."""
     import cv2
 
     rng = np.random.default_rng(7)
@@ -176,7 +260,10 @@ def _scene(tmp_path):
         ids = np.arange(pid, pid + 60)
         pid += 60
         cluster_pts = np.column_stack([xy, np.zeros(60)])
-        cam_centers = [(cx - 2, cy, 50.0), (cx + 2, cy, 50.0), (cx, cy - 2, 50.0)]
+        base = [(cx - 2, cy, 50.0), (cx + 2, cy, 50.0), (cx, cy - 2, 50.0)]
+        extra = [(cx + float(dx), cy + float(dy), 50.0)
+                 for dx, dy in rng.uniform(-3, 3, size=(max(0, cams_per_cluster - 3), 2))]
+        cam_centers = (base + extra)[:cams_per_cluster]
         cam_iids = []
         for cc in cam_centers:
             c = np.array(cc)
@@ -192,7 +279,7 @@ def _scene(tmp_path):
         for k, p3 in zip(ids, cluster_pts, strict=True):
             pts[int(k)] = Point3D(id=int(k), xyz=p3, rgb=np.array([10, 20, 30]),
                                   error=1.0, image_ids=np.array(cam_iids),
-                                  point2D_idxs=np.array([0, 0, 0]))
+                                  point2D_idxs=np.zeros(len(cam_iids), dtype=np.int64))
     write_cameras_binary(cameras, str(ws / "sparse" / "cameras.bin"))
     write_images_binary(images, str(ws / "sparse" / "images.bin"))
     write_points3D_binary(pts, str(ws / "sparse" / "points3D.bin"))
@@ -202,8 +289,9 @@ def _scene(tmp_path):
 def _params(ws, out, **over):
     p = {"source": str(ws), "out_dir": str(out), "block_size": "100",
          "buffer": "5", "region": "0,0,200,10", "tile": True,
-         "max_tile_px": "32", "jpeg_quality": "90", "min_obs": "10",
-         "min_tile_obs": "1", "min_images": "2", "workers": "2"}
+         "max_tile_px": "32", "jpeg_quality": "90",
+         "min_tile_obs": "1", "min_images": "2", "workers": "2",
+         "auto": False, "rebalance": False}   # pin the fixed-grid path for these tests
     p.update(over)
     return p
 
@@ -259,6 +347,42 @@ def test_run_blocksplit_tiled(tmp_path):
     some = next(iter(imgs.values()))
     crop = cv2.imread(str(out / "block_0_0" / "images" / some.name))
     assert crop.shape[:2] == (24, 32)
+
+
+def test_run_blocksplit_rebalance_splits_two_clusters(tmp_path):
+    """Adaptive rebalance (no fixed grid): the two camera clusters land in two
+    capacity-split partitions, each carrying only its own cluster's views."""
+    ws = _scene(tmp_path)
+    out = tmp_path / "out_rebal"
+    r = _Runner()
+    run_blocksplit(_params(ws, out, rebalance=True, max_images="2",
+                           min_images="1"), r)
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert {b["name"] for b in manifest["blocks"]} == {"block_0_0", "block_1_0"}
+    assert any("rebalance" in ln for ln in r.lines)
+
+    _, imgs0, _ = read_model(str(out / "block_0_0" / "sparse"))
+    _, imgs1, _ = read_model(str(out / "block_1_0" / "sparse"))
+    assert all(Path(im.name).name.startswith("camA") for im in imgs0.values())
+    assert all(Path(im.name).name.startswith("camB") for im in imgs1.values())
+
+
+def test_run_blocksplit_auto_needs_no_tuning(tmp_path):
+    """auto mode: with only block-geometry params left unset, it derives the
+    partition from the camera layout and still produces a valid trainable scene."""
+    ws = _scene(tmp_path, cams_per_cluster=8)      # 16 cams → auto keeps 1 block
+    out = tmp_path / "out_auto"
+    r = _Runner()
+    # only source/out_dir/region/tile — no block_size/buffer/max_images/min_images
+    run_blocksplit({"source": str(ws), "out_dir": str(out), "region": "0,0,200,10",
+                    "tile": False, "auto": True, "max_tile_px": "32"}, r)
+
+    assert any("auto:" in ln for ln in r.lines)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert len(manifest["blocks"]) >= 1
+    cams, imgs, pts = read_model(str(out / manifest["blocks"][0]["name"] / "sparse"))
+    assert imgs and pts and cams
 
 
 def test_run_blocksplit_no_tile_links_originals(tmp_path):

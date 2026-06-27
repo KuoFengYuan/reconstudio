@@ -136,7 +136,7 @@ def test_build_colmap_params_minimal_form_applies_defaults():
     assert p["mapper"] == "global"
     assert p["camera_mode"] == "per_folder"
     assert p["max_features"] == "4096"
-    assert p["camera_model"] == "OPENCV"
+    assert p["camera_model"] == "SIMPLE_RADIAL"
     assert p["layout"] == "auto"
     assert p["resize"] == "fullhd"
     assert p["gps_align_type"] == "enu"
