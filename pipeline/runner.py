@@ -36,6 +36,9 @@ class Runner:
         self._cancelled = False
         self._procs: set[subprocess.Popen] = set()   # concurrent children
         self._lock = threading.Lock()                # serialize log writes
+        # extra env applied to every child process (e.g. CUDA_VISIBLE_DEVICES for a
+        # whole stage); per-call run(env=...) still takes precedence over this.
+        self.default_env: dict[str, str] = {}
 
     # -- lifecycle ---------------------------------------------------------- #
     def close(self) -> None:
@@ -96,7 +99,7 @@ class Runner:
         ffmpeg's verbose output, which the shell script kept out of the console.
         """
         self.check_cancel()
-        run_env = {**os.environ, **(env or {})}
+        run_env = {**os.environ, **self.default_env, **(env or {})}
         if stderr_to:
             errfh = open(stderr_to, "w")
             try:

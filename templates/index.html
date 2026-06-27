@@ -106,6 +106,10 @@
   .checks { display:flex; flex-wrap:wrap; gap:8px 14px; }
   .checks label { display:flex; align-items:center; gap:5px; margin:0; color:var(--fg); font-size:13px; }
   .checks input { width:auto; accent-color:var(--accent); }
+  /* checkbox + long wrapping label kept inline (box left, text beside it) */
+  .chk { display:flex; align-items:flex-start; gap:6px; margin-top:8px; color:var(--fg); font-size:13px; }
+  .chk input { width:auto; flex:none; margin-top:2px; accent-color:var(--accent); }
+  .chk > span { flex:1; }
   .submit { width:100%; padding:11px; font-weight:650; margin-top:6px; font-size:14px;
             background:linear-gradient(180deg,var(--accent),var(--accent-d)); box-shadow:0 2px 10px rgba(0,0,0,.3); }
   /* min-width:fit-content + wrap: a button never gets squeezed narrower than its
@@ -343,9 +347,18 @@
           <option value="1920" selected>等比縮小 — 長邊 ≤ 1920（FullHD,傾斜攝影甜蜜點）</option>
           <option value="2560">等比縮小 — 長邊 ≤ 2560</option>
           <option value="4096">等比縮小 — 長邊 ≤ 4096（高解析訓練）</option>
+          <option value="7680">等比縮小 — 長邊 ≤ 7680（8K,接近原圖、避開 TIFF undistort 崩)</option>
           <option value="keep">保持原樣（用原始檔）</option>
         </select>
-        <div class="hint">縮成實體檔跑整條 COLMAP(存到 <code>workspace/images_&lt;長邊&gt;</code>)。預設 1920(傾斜攝影甜蜜點);要高解析訓練圖選 4096(再大 3DGS 吃不消)。「保持原樣」= 用原始檔(髒航測 TIFF 可能在 undistort 崩)。</div>
+        <div class="hint">縮成實體檔跑整條 COLMAP(存到 <code>workspace/images_&lt;長邊&gt;</code>)。預設 1920(傾斜攝影甜蜜點);要高解析訓練圖選 4096(再大 3DGS 吃不消)。7680（8K）= 接近原圖(11664)又先轉成乾淨 JPG,避開髒航測 TIFF 在 undistort 崩的坑。「保持原樣」= 用原始檔。</div>
+        <label>GPU（COLMAP 所有階段共用)</label>
+        <select name="COLMAP_GPU">
+          <option value="" {{ 'selected' if not colmap_defaults.COLMAP_GPU }}>全部 GPU（預設）</option>
+          {% if gpus %}{% for g in gpus %}
+          <option value="{{ g.index }}" {{ 'selected' if colmap_defaults.COLMAP_GPU == g.index|string }}>#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
+          {% endfor %}{% endif %}
+        </select>
+        <div class="hint">透過 CUDA_VISIBLE_DEVICES 套用到<b>所有 COLMAP 階段</b>（抽特徵 / 匹配 / mapper / BA / Caspar / 對齊）。「全部 GPU」= COLMAP 預設(-1)。</div>
       </fieldset>
 
       <details class="grp" id="fmt-grp">
@@ -474,6 +487,15 @@
             <input type="checkbox" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}>
             GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）
           </label>
+          <!-- BA backend:incremental / pose_prior 適用 -->
+          <div class="pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
+            <label>BA 後端（BA_BACKEND）</label>
+            <select name="BA_BACKEND">
+              <option value="ceres" {{ 'selected' if colmap_defaults.BA_BACKEND=='ceres' }}>ceres（預設;搭配上方 GPU BA 用 cuDSS）</option>
+              <option value="caspar" {{ 'selected' if colmap_defaults.BA_BACKEND=='caspar' }}>caspar（GPU,快約 1~2 個數量級;需 SIMPLE_RADIAL/PINHOLE 相機）</option>
+            </select>
+            <div class="hint">caspar = COLMAP 4.1.0 的 SymForce GPU 解算器,接管 local+global BA。<b>相機模型必須是 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過所有影像、不做 BA。選 caspar 時上方 GPU BA 勾選會被忽略。</div>
+          </div>
         </div>
       </details>
 
@@ -620,14 +642,20 @@
           <input name="out_dir" id="bs_out" placeholder="留空自動">
           <button type="button" class="ghost" onclick="openPicker('bs_out')">瀏覽</button>
         </div>
-        <label>block_size（模型單位;GPS 對齊後 = 公尺）</label>
+        <label>block_size（自適應分塊時 = 最小塊邊長;固定網格時 = 格子邊長。GPS 對齊後 = 公尺）</label>
         <input name="block_size" value="500">
         <label>buffer（邊界外擴;訓練後裁掉避免接縫）</label>
         <input name="buffer" value="120">
         <label>region（minx,miny,maxx,maxy;留空 = 全範圍）</label>
         <input name="region" placeholder="只要市區就填市區範圍">
-        <label class="checks" style="margin-top:8px"><input type="checkbox" name="tile" value="1" checked>
-          影像切片（保原生解析度;關閉 = 連結原圖）</label>
+        <label class="chk"><input type="checkbox" name="auto" value="1" checked>
+          <span>✨ 自動分塊（從相機分佈自動算要切幾塊/塊多大/buffer,下面參數免調）</span></label>
+        <div class="hint">開啟時 block_size / buffer / max_images / min_images 全自動推導（目標每塊約 120 張）。要手動調再關掉它。</div>
+        <label class="chk"><input type="checkbox" name="rebalance" value="1" checked>
+          <span>自適應分塊平衡（REUrbanGS;依相機密度切,密處多/疏處併。關閉 = 固定網格;自動分塊開啟時由系統接管）</span></label>
+        <div class="hint">手動模式:每塊相機數 ≤ max_images、≥ min_images,block_size 當最小塊邊。</div>
+        <label class="chk"><input type="checkbox" name="tile" value="1" checked>
+          <span>影像切片（保原生解析度;關閉 = 連結原圖）</span></label>
         <div class="hint">切片 = 原圖裁成小張、主點跟著平移,訓練吃到原生 GSD。</div>
       </fieldset>
       <details class="grp">
@@ -635,8 +663,10 @@
         <div class="gbody">
           <label>max_tile_px（切片最長邊）</label>
           <input name="max_tile_px" value="8192">
-          <label>min_obs（影像進塊門檻:塊內 3D 點觀測數）</label>
-          <input name="min_obs" value="30">
+          <label>vis_thresh（影像進塊門檻:可見度 V_ij/V_i;REUrbanGS,1/6≈0.1667）</label>
+          <input name="vis_thresh" value="0.1667">
+          <label>max_images（自適應分塊:每塊相機數上限,超過就再切;越小塊越多）</label>
+          <input name="max_images" value="200">
           <label>min_tile_obs（切片保留門檻）</label>
           <input name="min_tile_obs" value="8">
           <label>min_images（影像數不足的塊跳過）</label>

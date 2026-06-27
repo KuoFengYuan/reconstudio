@@ -21,13 +21,26 @@ run's out_dir resumes it — already-cropped tiles are skipped; a param stamp
 (.blocksplit_run.json) refuses resume when tile-shaping params changed, and a
 finished run (manifest.json present) still refuses outright.
 
-Block X/Y are the model's X/Y axes. With GPS_ALIGN (enu) those are metres, so
-block_size=500 is a 500 m square; without metric alignment pick sizes in model
-units. Assignment is observation-driven (no footprint geometry): an image joins
-a block when ≥ min_obs of its tracked 3D points fall inside the block(+buffer);
-a tile of that image is kept when ≥ min_tile_obs of those features land in it
-(when no tile reaches that, only the busiest tile is kept — spraying every
-touched tile into the block would add near-empty views).
+Block X/Y are the model's X/Y axes. With GPS_ALIGN (enu) those are metres.
+Partitioning has three modes. Default is `auto`: derive everything from the
+camera layout (no tuning) — aim for ~AUTO_TARGET_VIEWS cameras per block, so
+k = round(N/target) blocks, and size min-partition-side and buffer from the
+resulting block footprint. Turn auto off for manual control: `rebalance` does
+the same REUrbanGS adaptive split but with your max_images/min_images/block_size
+(block_size = minimum partition side); turning rebalance off too falls back to a
+fixed grid (block_size square per cell). Adaptive split recursively cuts the
+longer axis at the camera median while never creating a block below min_images
+cameras or the min side, so dense areas get more/smaller blocks and sparse areas
+stay merged. Assignment follows REUrbanGS (arXiv:2507.23006) two-phase visibility
+selection: an image joins a block when its camera centre falls inside the block,
+OR when its visibility of the block ≥ vis_thresh — visibility = V_ij/V_i, the
+convex-hull area of the image's features that hit the block over the hull area
+of all the image's features (so a few stray points can't pull an image in; it
+must *see* a real area of the block; an image observing < 3 of the block's
+points can't form a hull, so its visibility is 0 and it's dropped). A tile of a
+kept image is kept when ≥ min_tile_obs of those features land in it (when no tile reaches
+that, only the busiest tile is kept — spraying every touched tile into the block
+would add near-empty views).
 A tile is the same camera at the same pose with the principal point shifted by
 the crop origin — geometrically exact, which is why no pose/GPS work is needed.
 Each block is a self-consistent COLMAP model: views carry the 2D observations
@@ -53,6 +66,8 @@ from .vendor.read_write_model import (
     Camera,
     Image,
     Point3D,
+    qvec2rotmat,
+    read_images_binary,
     read_model,
     write_cameras_binary,
     write_images_binary,
@@ -62,7 +77,11 @@ from .vendor.read_write_model import (
 BLOCKSPLIT_DEFAULTS = {
     "block_size": "500", "buffer": "120", "region": "",
     "tile": True, "max_tile_px": "8192", "jpeg_quality": "95",
-    "min_obs": "30", "min_tile_obs": "8", "min_images": "15", "workers": "4",
+    "min_tile_obs": "8", "min_images": "15", "workers": "4",
+    "vis_thresh": "0.1667",   # REUrbanGS visibility V_ij/V_i ≥ 1/6 (arXiv:2507.23006)
+    "rebalance": True,        # adaptive image-count-balanced partition vs fixed grid
+    "max_images": "200",      # rebalance: split a partition above this many cameras
+    "auto": True,             # derive block_size/buffer/max_images/min_images from the data
 }
 
 _PINHOLE = {"PINHOLE", "SIMPLE_PINHOLE"}
@@ -126,6 +145,66 @@ def grid_cells(minx: float, miny: float, maxx: float, maxy: float,
             for iy in range(ny) for ix in range(nx)]
 
 
+def rebalance_cells(minx: float, miny: float, maxx: float, maxy: float,
+                    centers_xy: np.ndarray, max_images: int, min_images: int,
+                    min_size: float) -> list[tuple[float, float, float, float]]:
+    """REUrbanGS-style adaptive partition (arXiv:2507.23006 §3.2.2): instead of a
+    fixed grid, recursively split the region so each partition holds ≤ max_images
+    cameras, cutting the longer axis at the camera-centre median (so the two halves
+    get balanced counts). A split is rejected when it would leave either side with
+    < min_images cameras or a side < min_size — so dense areas end up with more,
+    smaller partitions ('subdivide too-many') while sparse areas stay merged
+    ('merge too-few', i.e. never split into under-full blocks). Returns disjoint
+    rectangles (x0,y0,x1,y1) covering the region, sorted for determinism.
+
+    Balance is on camera centres (capture density), the cheap, standard proxy for
+    'images assigned' — the same signal VastGaussian/REUrbanGS partition on."""
+    cx, cy = centers_xy[:, 0], centers_xy[:, 1]
+    out: list[tuple[float, float, float, float]] = []
+    stack = [(minx, miny, maxx, maxy)]
+    while stack:
+        x0, y0, x1, y1 = stack.pop()
+        inr = (cx >= x0) & (cx < x1) & (cy >= y0) & (cy < y1)
+        n = int(inr.sum())
+        w, h = x1 - x0, y1 - y0
+        if n > max_images and max(w, h) >= 2 * min_size:
+            if w >= h:
+                s = min(max(float(np.median(cx[inr])), x0 + min_size), x1 - min_size)
+                a, b = (x0, y0, s, y1), (s, y0, x1, y1)
+            else:
+                s = min(max(float(np.median(cy[inr])), y0 + min_size), y1 - min_size)
+                a, b = (x0, y0, x1, s), (x0, s, x1, y1)
+            na = int(((cx >= a[0]) & (cx < a[2]) & (cy >= a[1]) & (cy < a[3])).sum())
+            if na >= min_images and (n - na) >= min_images:
+                stack.extend((a, b))
+                continue
+        out.append((x0, y0, x1, y1))
+    return sorted(out)
+
+
+# auto-mode heuristics — chosen so the user sets nothing; tuned for per-block 3DGS
+AUTO_TARGET_VIEWS = 120     # sweet-spot cameras per block (enough multi-view, not bloated)
+AUTO_MIN_IMAGES_FRAC = 0.3  # a block may shrink to ~30% of capacity before it's too thin
+AUTO_MIN_SIZE_FRAC = 0.35   # min partition side as a fraction of the nominal block side
+AUTO_BUFFER_FRAC = 0.10     # overlap buffer as a fraction of the nominal block side
+
+
+def auto_partition_params(centers_xy: np.ndarray,
+                          region: tuple[float, float, float, float]
+                          ) -> tuple[int, int, float, float]:
+    """Derive (max_images, min_images, min_size, buffer) purely from the camera
+    layout so the user tunes nothing. Targets ~AUTO_TARGET_VIEWS cameras per block
+    (k = round(N / target) blocks), then sizes the geometry from the resulting
+    nominal block footprint side = sqrt(region_area / k)."""
+    n = max(1, len(centers_xy))
+    minx, miny, maxx, maxy = region
+    k = max(1, round(n / AUTO_TARGET_VIEWS))
+    max_images = max(1, math.ceil(n / k))
+    min_images = max(8, round(max_images * AUTO_MIN_IMAGES_FRAC))
+    side = math.sqrt(max((maxx - minx) * (maxy - miny), 1e-9) / k)
+    return max_images, min_images, AUTO_MIN_SIZE_FRAC * side, AUTO_BUFFER_FRAC * side
+
+
 def tile_name(image_name: str, tr: int, tc: int) -> str:
     """Pool-relative tile path: keep the source subfolder, swap ext for .jpg."""
     rel = PurePosixPath(image_name)
@@ -148,6 +227,80 @@ def select_tiles(xy: np.ndarray, width: int, height: int, cols: int, rows: int,
     return [(int(k) // cols, int(k) % cols) for k in keep]
 
 
+def hull_area(xy: np.ndarray) -> float:
+    """Convex-hull area of 2D points `xy` (N×2); 0 for <3 distinct points or a
+    degenerate (collinear) hull. Pure numpy — Andrew's monotone chain + the
+    shoelace formula — so it needs no cv2/scipy and stays unit-testable."""
+    if xy is None or len(xy) < 3:
+        return 0.0
+    pts = np.unique(np.asarray(xy, dtype=np.float64), axis=0)
+    if len(pts) < 3:
+        return 0.0
+    pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
+
+    def _cross(o: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
+        # 2D scalar cross (o→a) × (o→b); np.cross on 2-vectors is deprecated in NumPy 2.0
+        return float((a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]))
+
+    def _half(points: np.ndarray) -> list:
+        h: list = []
+        for p in points:
+            while len(h) >= 2 and _cross(h[-2], h[-1], p) <= 0:
+                h.pop()
+            h.append(p)
+        return h
+
+    hull = np.array(_half(pts)[:-1] + _half(pts[::-1])[:-1])
+    if len(hull) < 3:
+        return 0.0
+    x, y = hull[:, 0], hull[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
+def visibility(xy_in: np.ndarray, xy_all: np.ndarray) -> float:
+    """REUrbanGS visibility V_ij/V_i: hull area of the image's features that fall
+    in the block over the hull area of all the image's features. 0 when the
+    image's own hull is degenerate (can't be 'seen')."""
+    vi = hull_area(xy_all)
+    if vi <= 0.0:
+        return 0.0
+    return hull_area(xy_in) / vi
+
+
+def _up_axis(sparse_dir: Path) -> int | None:
+    """World axis (0=X,1=Y,2=Z) with the smallest camera-centre spread — i.e.
+    the vertical/up axis (cameras sit at ~constant height, so the up axis varies
+    least). None when the model can't be read or has <3 views."""
+    try:
+        imgs = read_images_binary(str(sparse_dir / "images.bin"))
+    except Exception:
+        return None
+    if len(imgs) < 3:
+        return None
+    C = np.array([-qvec2rotmat(im.qvec).T @ im.tvec for im in imgs.values()])
+    return int(np.argmin(C.max(0) - C.min(0)))
+
+
+def _resolve_zup(src: Path, r: Runner) -> tuple[Path, Path]:
+    """blocksplit grids on the X–Y plane, so it must read a *Z-up* model. The
+    undistort/align step often emits both a reoriented model (…/sparse, Y-up
+    after REORIENT) and the pre-reorient …/sparse_unaligned (Z-up). _resolve_dense
+    returns the former; here we auto-swap to a Z-up sibling when the resolved one
+    isn't Z-up — so source can just be the workspace / *_mapper, no hand-picking.
+    Image names match across siblings (same reconstruction), so images_dir stays."""
+    sparse_dir, images_dir = _resolve_dense(src)
+    if _up_axis(sparse_dir) == 2:
+        return sparse_dir, images_dir                       # already Z-up
+    for sib in sorted(sparse_dir.parent.glob("sparse*")):
+        if sib != sparse_dir and (sib / "cameras.bin").is_file() and _up_axis(sib) == 2:
+            r.log(f"[blocksplit] 自動改用 Z-up 模型 {sib.name}"
+                  f"（{sparse_dir.name} 非 Z-up,X-Y 切格會塌成一格）")
+            return sib, images_dir
+    r.log(f"[blocksplit] ⚠️ 找不到 Z-up 模型,沿用 {sparse_dir.name};"
+          " 若切格塌成 1 格請改餵未 reorient 的模型。")
+    return sparse_dir, images_dir
+
+
 # --------------------------------------------------------------------------- #
 # pipeline entry
 # --------------------------------------------------------------------------- #
@@ -158,10 +311,13 @@ def run_blocksplit(p: dict, r: Runner) -> None:
     tile = bool(p.get("tile", True))
     max_tile_px = int(p.get("max_tile_px") or BLOCKSPLIT_DEFAULTS["max_tile_px"])
     jpeg_q = int(p.get("jpeg_quality") or BLOCKSPLIT_DEFAULTS["jpeg_quality"])
-    min_obs = int(p.get("min_obs") or BLOCKSPLIT_DEFAULTS["min_obs"])
     min_tile_obs = int(p.get("min_tile_obs") or BLOCKSPLIT_DEFAULTS["min_tile_obs"])
     min_images = int(p.get("min_images") or BLOCKSPLIT_DEFAULTS["min_images"])
     workers = int(p.get("workers") or BLOCKSPLIT_DEFAULTS["workers"])
+    vis_thresh = float(p.get("vis_thresh") or BLOCKSPLIT_DEFAULTS["vis_thresh"])
+    rebalance = bool(p.get("rebalance", BLOCKSPLIT_DEFAULTS["rebalance"]))
+    max_images = int(p.get("max_images") or BLOCKSPLIT_DEFAULTS["max_images"])
+    auto = bool(p.get("auto", BLOCKSPLIT_DEFAULTS["auto"]))
     region = parse_region(p.get("region") or "")
 
     if (out / "manifest.json").is_file():
@@ -185,7 +341,7 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         out.mkdir(parents=True, exist_ok=True)
         stamp.write_text(json.dumps(stamp_params, ensure_ascii=False))
 
-    sparse_dir, images_dir = _resolve_dense(src)
+    sparse_dir, images_dir = _resolve_zup(src, r)
     r.banner(f"blocksplit start | model={sparse_dir} images={images_dir}")
     t0 = time.time()
     cameras, images, points3D = read_model(str(sparse_dir))
@@ -218,15 +374,42 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         ok = (pos < pid.size) & (pid[np.minimum(pos, pid.size - 1)] == ids3)
         obs[iid] = (pos[ok], np.asarray(im.xys, np.float64)[m][ok])
 
+    # camera centres C = -R^T t (world frame) for the visibility phase-1 test
+    centers = {iid: (-qvec2rotmat(im.qvec).T @ im.tvec)
+               for iid, im in images.items()}
+    # V_i (hull area of ALL the image's features) is block-independent — compute
+    # it once and reuse; the per-block work is then just the in-block hull.
+    vi_area = {iid: hull_area(xys2) for iid, (_rows, xys2) in obs.items()}
+
     if region is None:
         minx, maxx = np.percentile(X, [1, 99])
         miny, maxy = np.percentile(Y, [1, 99])
         region = (float(minx), float(miny), float(maxx), float(maxy))
         r.log(f"[blocksplit] region auto (1–99% of points): "
               f"{region[0]:.1f},{region[1]:.1f} → {region[2]:.1f},{region[3]:.1f}")
-    cells = grid_cells(*region, block_size)
-    r.log(f"[blocksplit] grid: block_size={block_size:g} buffer={buffer:g} "
-          f"→ {len(cells)} candidate cells")
+    if auto or rebalance:
+        # adaptive partition balanced on camera-centre density (REUrbanGS §3.2.2):
+        # dense areas → more/smaller blocks, sparse → fewer/larger.
+        cxy = np.array([centers[iid][:2] for iid in images], dtype=np.float64)
+        if auto:
+            # derive everything from the camera layout — user tunes nothing
+            max_images, min_images, min_size, buffer = auto_partition_params(cxy, region)
+            r.log(f"[blocksplit] auto: {len(cxy)} cams → target ~{AUTO_TARGET_VIEWS}/block "
+                  f"⇒ max_images={max_images}, min_images={min_images}, "
+                  f"min side={min_size:.1f}, buffer={buffer:.1f}")
+        else:
+            min_size = block_size            # manual rebalance: block_size = min side
+        rects = rebalance_cells(*region, cxy, max_images, min_images, min_size)
+        cells = [(k, 0, *rc) for k, rc in enumerate(rects)]
+        r.log(f"[blocksplit] {'auto' if auto else 'rebalance'}: adaptive partition "
+              f"(≤{max_images} cams/block, ≥{min_images}, min side {min_size:g}, "
+              f"buffer={buffer:g}) → {len(cells)} partitions")
+    else:
+        cells = grid_cells(*region, block_size)
+        r.log(f"[blocksplit] grid: block_size={block_size:g} buffer={buffer:g} "
+              f"→ {len(cells)} candidate cells")
+    r.log(f"[blocksplit] image selection: REUrbanGS visibility "
+          f"(camera-in-block OR V_ij/V_i ≥ {vis_thresh:g})")
 
     # -- assignment ----------------------------------------------------------- #
     # blocks: per kept cell → list of (image, [(tr,tc), …] or None when not tiling)
@@ -245,8 +428,15 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         members: list[tuple[Image, list[tuple[int, int]] | None]] = []
         for iid, (rows, xys2) in obs.items():
             hit = inb[rows]
-            if int(hit.sum()) < min_obs:
-                continue
+            # REUrbanGS two-phase: camera centre inside the block (core bounds,
+            # no buffer) → keep; else the visibility ratio V_ij/V_i ≥ vis_thresh
+            # (V_i precomputed; an image seeing < 3 block points gets a 0 hull → 0).
+            cx, cy = centers[iid][0], centers[iid][1]
+            cam_in = (bx0 <= cx < bx1) and (by0 <= cy < by1)
+            if not cam_in:
+                vi = vi_area[iid]
+                if vi <= 0.0 or hull_area(xys2[hit]) / vi < vis_thresh:
+                    continue
             im = images[iid]
             if not tile:
                 members.append((im, None))

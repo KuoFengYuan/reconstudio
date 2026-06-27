@@ -45,7 +45,7 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
 
 # --- form pre-fill defaults / enums (mirror the pipeline module defaults) --- #
 COLMAP_DEFAULTS = {
-    "CAMERA_MODEL": "OPENCV", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
+    "CAMERA_MODEL": "SIMPLE_RADIAL", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
     "MATCHER": "both", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
     "GUIDED_MATCHING": "1", "MAPPER": "global", "DATASET_NAME": "training_dataset",
     "FORCE": "0", "NESTED_LAYOUT": "1", "VOCAB_TREE": "", "VOCAB_TREE_URL": "",
@@ -57,6 +57,12 @@ COLMAP_DEFAULTS = {
     "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
     # GPU bundle adjustment (incremental / pose_prior) — on by default
     "MAPPER_BA_GPU": "1",
+    # BA solver backend (incremental / pose_prior): "ceres" or "caspar" (GPU, ~1-2 orders
+    # faster; needs SIMPLE_RADIAL / PINHOLE cameras)
+    "BA_BACKEND": "ceres",
+    # Which GPU(s) all COLMAP stages use (CUDA_VISIBLE_DEVICES). "" = every GPU (default);
+    # e.g. "0", "1", "0,1".
+    "COLMAP_GPU": "",
     # GPS metric alignment (model_aligner) — off by default, needs GPS in the inputs
     "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
     # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
@@ -72,6 +78,7 @@ ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
     "MATCHER": ["sequential", "vocab", "both", "spatial", "custom"],
     "MAPPER": ["global", "incremental", "pose_prior", "hierarchical"],
+    "BA_BACKEND": ["ceres", "caspar"],
 }
 VIDEO_EXTS = {".mov", ".mp4", ".m4v", ".mkv", ".avi"}
 # formats the standalone mesh viewer can load (three.js loaders vendored under

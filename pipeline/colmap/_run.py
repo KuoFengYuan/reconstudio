@@ -34,7 +34,7 @@ COLMAP_BIN = settings.colmap_bin
 COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
     "vocab_tree_url": "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words256K.bin",
-    "camera_model": "OPENCV", "max_features": "4096", "camera_mode": "per_folder",
+    "camera_model": "SIMPLE_RADIAL", "max_features": "4096", "camera_mode": "per_folder",
     "matcher": "both", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",
@@ -51,6 +51,15 @@ COLMAP_DEFAULTS = {
     "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
+    # BA solver backend for the incremental / pose_prior mappers: "ceres" (default; the
+    # ba_gpu flag above then chooses CPU vs cuDSS-GPU Ceres) or "caspar" (COLMAP 4.1.0's
+    # SymForce GPU solver, ~1-2 orders of magnitude faster — but only supports the
+    # SIMPLE_RADIAL / PINHOLE camera models; on any other model Caspar skips every image).
+    "ba_backend": "ceres",
+    # Which GPU(s) COLMAP uses across ALL stages (extract / match / mapper / BA / Caspar
+    # / aligner), applied via CUDA_VISIBLE_DEVICES. "" = COLMAP default (-1 = every GPU).
+    # Set to e.g. "0", "1", or "0,1" to pin specific device(s).
+    "colmap_gpu": "",
     # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
     # custom matcher (make_colmap_custom_matcher): per-view match counts + loop anchors.
     "cm_n_seq": "0", "cm_n_quad": "10", "cm_n_loop": "5", "cm_n_gps": "25",
@@ -119,6 +128,8 @@ class _Ctx:
     gps_align_type: str
     gps_align_max_error: str
     ba_gpu: bool
+    ba_backend: str
+    gpu: str
     focal_factor: str
     sift_max_image_size: str
     max_image_size: str
@@ -169,6 +180,17 @@ def _setup(p: dict, r: Runner) -> _Ctx:
                          f"'hierarchical' (got: {mapper})")
     if camera_mode not in ("per_folder", "single"):
         raise ValueError(f"CAMERA_MODE must be 'per_folder' or 'single' (got: {camera_mode})")
+    ba_backend = str(d["ba_backend"]).lower()
+    if ba_backend not in ("ceres", "caspar"):
+        raise ValueError(f"BA_BACKEND must be 'ceres' or 'caspar' (got: {ba_backend})")
+    if ba_backend == "caspar":
+        if mapper not in ("incremental", "pose_prior"):
+            r.log(f"NOTE: BA_BACKEND=caspar only affects the incremental / pose_prior mappers; "
+                  f"MAPPER={mapper} ignores it (global / hierarchical are Ceres-only).")
+        if str(d["camera_model"]).upper() not in ("SIMPLE_RADIAL", "PINHOLE"):
+            r.log(f"WARNING: Caspar only supports SIMPLE_RADIAL / PINHOLE cameras, but "
+                  f"CAMERA_MODEL={d['camera_model']} — Caspar will skip every image "
+                  f"(no BA happens). Use SIMPLE_RADIAL or PINHOLE.")
     if matcher not in ("sequential", "vocab", "both", "spatial", "custom"):
         raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', 'spatial', or "
                          f"'custom' (got: {matcher})")
@@ -190,6 +212,14 @@ def _setup(p: dict, r: Runner) -> _Ctx:
     if not shutil.which(COLMAP_BIN):
         raise RuntimeError(f"colmap not found: '{COLMAP_BIN}' (set COLMAP_BIN or add to PATH)")
 
+    # GPU selection: pin all COLMAP stages to the requested device(s) via
+    # CUDA_VISIBLE_DEVICES on the runner (applied to every child process). Empty =
+    # COLMAP default (every visible GPU).
+    gpu = str(d["colmap_gpu"]).strip()
+    if gpu:
+        r.default_env["CUDA_VISIBLE_DEVICES"] = gpu
+        r.log(f"COLMAP GPU: CUDA_VISIBLE_DEVICES={gpu} (all stages)")
+
     dense_dir = ws / f"{d['dataset_name']}_{mapper}_mapper"
     (ws / "sparse").mkdir(parents=True, exist_ok=True)
     dense_dir.mkdir(parents=True, exist_ok=True)
@@ -205,6 +235,8 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         gps_align=bool(d["gps_align"]), gps_align_type=str(d["gps_align_type"]),
         gps_align_max_error=str(d["gps_align_max_error"]),
         ba_gpu=bool(d["ba_gpu"]),   # GPU bundle adjustment (incremental / pose_prior only)
+        ba_backend=str(d["ba_backend"]).lower(),  # "ceres" or "caspar" (incremental / pose_prior)
+        gpu=gpu,                    # CUDA_VISIBLE_DEVICES for all COLMAP stages ("" = all)
         # h3dgs large-scene method options
         focal_factor=str(d["focal_factor"]).strip(),
         sift_max_image_size=str(d["sift_max_image_size"]).strip(),
@@ -487,9 +519,17 @@ def _stage_mapper(c: _Ctx) -> None:
             # offloading it to CUDA is a big speedup (global_mapper / hierarchical_mapper
             # don't take this flag — they'd reject it — so only the two incremental
             # mappers get it).
-            if c.ba_gpu and c.mapper in ("incremental", "pose_prior"):
-                extra += ["--Mapper.ba_use_gpu", "1"]
-                label += " [GPU BA]"
+            if c.mapper in ("incremental", "pose_prior"):
+                if c.ba_backend == "caspar":
+                    # Caspar GPU solver (COLMAP 4.1.0): ~1-2 orders of magnitude faster than
+                    # Ceres for the repeated local/global BA. Requires SIMPLE_RADIAL/PINHOLE
+                    # cameras (warned about in _setup); takes over both BA stages.
+                    extra += ["--Mapper.ba_local_backend", "CASPAR",
+                              "--Mapper.ba_global_backend", "CASPAR"]
+                    label += " [Caspar GPU BA]"
+                elif c.ba_gpu:
+                    extra += ["--Mapper.ba_use_gpu", "1"]
+                    label += " [GPU BA]"
             c.r.banner(f"{label} -> {c.ws / 'sparse'}")
             c.r.run([COLMAP_BIN, sub, "--database_path", str(c.db),
                      "--image_path", c.img_root, "--output_path", str(c.ws / "sparse"), *extra])

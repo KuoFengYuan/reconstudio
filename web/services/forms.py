@@ -63,8 +63,12 @@ def build_blocksplit_params(source: str, out_dir: str, form: dict) -> dict:
         "tile": bool(form.get("tile")),
         "max_tile_px": g("max_tile_px", "8192"),
         "jpeg_quality": g("jpeg_quality", "95"),
-        "min_obs": g("min_obs", "30"), "min_tile_obs": g("min_tile_obs", "8"),
+        "min_tile_obs": g("min_tile_obs", "8"),
         "min_images": g("min_images", "15"), "workers": g("workers", "4"),
+        "vis_thresh": g("vis_thresh", "0.1667"),
+        "auto": form.get("auto") is not None,
+        "rebalance": bool(form.get("rebalance")),
+        "max_images": g("max_images", "200"),
     }
     for key in ("block_size", "buffer"):
         try:
@@ -75,8 +79,8 @@ def build_blocksplit_params(source: str, out_dir: str, form: dict) -> dict:
         raise ValueError("block_size 需 > 0")
     if float(params["buffer"]) < 0:
         raise ValueError("buffer 需 ≥ 0")
-    for key in ("max_tile_px", "min_obs", "min_tile_obs", "min_images",
-                "jpeg_quality", "workers"):
+    for key in ("max_tile_px", "min_tile_obs", "min_images",
+                "jpeg_quality", "workers", "max_images"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} 需為正整數")
     if not 1 <= int(params["jpeg_quality"]) <= 100:
@@ -85,6 +89,14 @@ def build_blocksplit_params(source: str, out_dir: str, form: dict) -> dict:
         raise ValueError("max_tile_px 需 ≥ 256")
     if not 1 <= int(params["workers"]) <= 32:
         raise ValueError("workers 需在 1–32")
+    try:
+        vt = float(params["vis_thresh"])
+    except ValueError:
+        raise ValueError("vis_thresh 需為數字") from None
+    if not 0 < vt <= 1:
+        raise ValueError("vis_thresh 需在 0–1（論文用 1/6 ≈ 0.1667）")
+    if int(params["max_images"]) < int(params["min_images"]):
+        raise ValueError("max_images 需 ≥ min_images（自適應分塊的每塊相機上限）")
     if params["region"]:
         from pipeline.blocksplit import parse_region  # zh errors, shared with pipeline
         parse_region(params["region"])
@@ -100,7 +112,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
     params = {
         "image_root": image_root, "workspace": workspace, "folders": folders,
         "stages": stages,
-        "camera_model": g("CAMERA_MODEL", "OPENCV"),
+        "camera_model": g("CAMERA_MODEL", "SIMPLE_RADIAL"),
         "camera_mode": g("CAMERA_MODE", "per_folder"),
         "max_features": g("MAX_FEATURES", "4096"),
         "matcher": g("MATCHER", "both"),
@@ -127,6 +139,8 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "prior_std_z": g("PRIOR_STD_Z", "5.0"),
         "prior_robust_loss": "1",
         "ba_gpu": bool(form.get("MAPPER_BA_GPU")),
+        "ba_backend": g("BA_BACKEND", "ceres"),
+        "colmap_gpu": (form.get("COLMAP_GPU") or "").strip(),
         # GPS metric alignment (model_aligner) — off unless ticked AND GPS is present
         "gps_align": bool(form.get("GPS_ALIGN")),
         "gps_align_type": g("GPS_ALIGN_TYPE", "enu"),
@@ -159,6 +173,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         params["resize"], params["resize_max"] = "fullhd", sel
     for key, allowed in (("camera_mode", ENUMS["CAMERA_MODE"]),
                          ("matcher", ENUMS["MATCHER"]), ("mapper", ENUMS["MAPPER"]),
+                         ("ba_backend", ENUMS["BA_BACKEND"]),
                          ("layout", ["auto", "single", "multi", "nested"]),
                          ("resize", ["keep", "fullhd"]),
                          ("gps_align_type", ["enu", "ecef", "enu-plane", "plane"])):
