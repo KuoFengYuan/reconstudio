@@ -69,19 +69,34 @@ def _resolve_dense(src: Path) -> tuple[Path, Path]:
         " 請先在 COLMAP 階段跑完 undistort，並把 source 指向 workspace 或其去畸變輸出。")
 
 
+def _camera_models_text(path: Path) -> tuple[set[str], int]:
+    """(set of camera-model names, camera count) from a COLMAP cameras.txt —
+    one camera per non-comment line: `CAM_ID MODEL W H PARAMS...`. Hand-parsed so
+    pipeline stays numpy-free (the vendored read_write_model imports numpy)."""
+    models, n = set(), 0
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                models.add(parts[1])
+                n += 1
+    return models, n
+
+
 def _assert_pinhole(sparse_dir: Path, r: Runner) -> None:
     if _model_ext(sparse_dir) == ".txt":
-        from .vendor.read_write_model import read_cameras_text
-        cams = {cid: {"model": c.model}
-                for cid, c in read_cameras_text(sparse_dir / "cameras.txt").items()}
+        models, ncam = _camera_models_text(sparse_dir / "cameras.txt")
     else:
         cams = read_cameras(sparse_dir / "cameras.bin")
-    models = {c["model"] for c in cams.values()}
+        models, ncam = {c["model"] for c in cams.values()}, len(cams)
     if not models <= _PINHOLE:
         raise ValueError(
             f"相機模型為 {sorted(models)}，但 GS-2M 只接受 PINHOLE/SIMPLE_PINHOLE。"
             " 你八成指到了 mapper 的原始 sparse（含畸變），請改用 undistort 後的輸出。")
-    r.log(f"camera model OK: {sorted(models)} ({len(cams)} cam)")
+    r.log(f"camera model OK: {sorted(models)} ({ncam} cam)")
 
 
 def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
