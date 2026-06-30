@@ -35,8 +35,19 @@ PANEL_BASE = Path(__file__).resolve().parent.parent
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 MARKER_SCRIPT, SCALE_SCRIPT = "estimate_marker_scale.py", "scale_mesh.py"
 
-_NEEDED = ("cameras.bin", "images.bin", "points3D.bin")
+_MODEL_STEMS = ("cameras", "images", "points3D")
 _PINHOLE = {"PINHOLE", "SIMPLE_PINHOLE"}
+
+
+def _model_ext(d: Path) -> str | None:
+    """The COLMAP model format present in dir `d`: '.bin' (preferred) or '.txt',
+    or None if neither. Both trainers' COLMAP loaders (LichtFeld, GS-2M) read text
+    and binary natively, so the panel accepts whichever the source ships."""
+    if (d / "cameras.bin").is_file():
+        return ".bin"
+    if (d / "cameras.txt").is_file():
+        return ".txt"
+    return None
 
 
 def _resolve_dense(src: Path) -> tuple[Path, Path]:
@@ -46,20 +57,25 @@ def _resolve_dense(src: Path) -> tuple[Path, Path]:
       (b) a workspace with a dense  : src/<name>_mapper/sparse/... + .../images/
       (c) an already sparse/0 scene : src/sparse/0/cameras.bin + src/images/
     """
-    if (src / "sparse" / "cameras.bin").is_file() and (src / "images").is_dir():
+    if _model_ext(src / "sparse") and (src / "images").is_dir():
         return src / "sparse", src / "images"
     for d in sorted(src.glob("*_mapper")):
-        if (d / "sparse" / "cameras.bin").is_file() and (d / "images").is_dir():
+        if _model_ext(d / "sparse") and (d / "images").is_dir():
             return d / "sparse", d / "images"
-    if (src / "sparse" / "0" / "cameras.bin").is_file() and (src / "images").is_dir():
+    if _model_ext(src / "sparse" / "0") and (src / "images").is_dir():
         return src / "sparse" / "0", src / "images"
     raise FileNotFoundError(
-        f"找不到去畸變的 COLMAP 模型（需要 sparse/cameras.bin + images/）於 {src}。"
+        f"找不到去畸變的 COLMAP 模型（需要 sparse/cameras.bin 或 cameras.txt + images/）於 {src}。"
         " 請先在 COLMAP 階段跑完 undistort，並把 source 指向 workspace 或其去畸變輸出。")
 
 
 def _assert_pinhole(sparse_dir: Path, r: Runner) -> None:
-    cams = read_cameras(sparse_dir / "cameras.bin")
+    if _model_ext(sparse_dir) == ".txt":
+        from .vendor.read_write_model import read_cameras_text
+        cams = {cid: {"model": c.model}
+                for cid, c in read_cameras_text(sparse_dir / "cameras.txt").items()}
+    else:
+        cams = read_cameras(sparse_dir / "cameras.bin")
     models = {c["model"] for c in cams.values()}
     if not models <= _PINHOLE:
         raise ValueError(
@@ -75,7 +91,9 @@ def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
     lands in the real sparse/0 dir here, not in the source workspace)."""
     s0 = scene / "sparse" / "0"
     s0.mkdir(parents=True, exist_ok=True)
-    for f in _NEEDED:
+    ext = _model_ext(sparse_dir) or ".bin"      # whichever the source ships (bin/txt)
+    for stem in _MODEL_STEMS:
+        f = stem + ext
         link = s0 / f
         if link.is_symlink() or link.exists():
             if not force:
