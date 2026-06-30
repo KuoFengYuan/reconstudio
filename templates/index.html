@@ -423,9 +423,9 @@
             <input name="SPATIAL_MAX_NEIGHBORS" value="{{ colmap_defaults.SPATIAL_MAX_NEIGHBORS }}">
             <label>SPATIAL_MAX_DISTANCE（公尺;依場景尺度調）</label>
             <input name="SPATIAL_MAX_DISTANCE" value="{{ colmap_defaults.SPATIAL_MAX_DISTANCE }}">
-            <label class="checks" style="margin-top:10px;">
+            <label class="chk" style="margin-top:10px;">
               <input type="checkbox" name="SPATIAL_IGNORE_Z" value="1" {{ 'checked' if colmap_defaults.SPATIAL_IGNORE_Z=='1' }}>
-              SPATIAL_IGNORE_Z（忽略高度,GPS 高程雜訊大時建議開）
+              <span>SPATIAL_IGNORE_Z（忽略高度,GPS 高程雜訊大時建議開）</span>
             </label>
           </div>
           <div class="mgrp" data-m="custom_matcher">
@@ -441,9 +441,9 @@
             <input name="CM_LOOP_MATCHES" value="{{ colmap_defaults.CM_LOOP_MATCHES }}" placeholder="例: 30 980, 120 1500">
             <div class="hint">配對名稱沿用 feature_extractor 的 image_list（每個 group 內依檔名排序),所以和資料庫一致。多相機 rig 請用「子資料夾 = 各相機」的 multi/nested layout。</div>
           </div>
-          <label class="checks" style="margin-top:10px;">
+          <label class="chk" style="margin-top:10px;">
             <input type="checkbox" name="GUIDED_MATCHING" value="1" {{ 'checked' if colmap_defaults.GUIDED_MATCHING=='1' }}>
-            GUIDED_MATCHING（較慢,低紋理多撿匹配;所有 matcher 通用）
+            <span>GUIDED_MATCHING（較慢,低紋理多撿匹配;所有 matcher 通用）</span>
           </label>
         </div>
       </details>
@@ -483,9 +483,9 @@
             <input name="HM_NUM_WORKERS" value="{{ colmap_defaults.HM_NUM_WORKERS }}" placeholder="-1">
           </div>
           <!-- GPU BA:incremental / pose_prior 適用(global_mapper / hierarchical_mapper 不掛) -->
-          <label class="checks pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
+          <label class="chk pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
             <input type="checkbox" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}>
-            GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）
+            <span>GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）</span>
           </label>
           <!-- BA backend:incremental / pose_prior 適用 -->
           <div class="pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
@@ -503,9 +503,9 @@
         <summary>GPS 對齊 + 大場景後處理 (h3dgs)</summary>
         <div class="gbody">
           <div class="hint">GPS 流程(spatial / pose_prior / 下方對齊)需<b>每張都有</b> EXIF GPS,非 100% 覆蓋會在開跑前中斷。影片轉幀無 per-frame GPS。</div>
-          <label class="checks" style="margin-top:10px;">
+          <label class="chk" style="margin-top:10px;">
             <input type="checkbox" name="GPS_ALIGN" value="1" {{ 'checked' if colmap_defaults.GPS_ALIGN=='1' }}>
-            GPS 對齊（公制尺度,model_aligner → ENU 公尺）
+            <span>GPS 對齊（公制尺度,model_aligner → ENU 公尺）</span>
           </label>
           <div class="hint">把稀疏模型改寫成真實公尺座標(需有 GPS)。與 Mesh 的 ChArUco mm 校正擇一,別同開。pose_prior 已對齊過可不勾。</div>
           <label>GPS_ALIGN_MAX_ERROR（RANSAC 內點門檻,公尺）</label>
@@ -513,15 +513,15 @@
 
           <label style="margin-top:14px;">MAX_IMAGE_SIZE（image_undistorter 長邊上限;留空=不限,h3dgs 用 2048)</label>
           <input name="MAX_IMAGE_SIZE" value="{{ colmap_defaults.MAX_IMAGE_SIZE }}" placeholder="2048">
-          <label class="checks" style="margin-top:10px;">
+          <label class="chk" style="margin-top:10px;">
             <input type="checkbox" name="SIMPLIFY" value="1" {{ 'checked' if colmap_defaults.SIMPLIFY=='1' }}>
-            simplify_images（剔除離群相機 + 沒配上 3D 點的觀測;原始備份 images_heavy.bin)
+            <span>simplify_images（剔除離群相機 + 沒配上 3D 點的觀測;原始備份 images_heavy.bin)</span>
           </label>
           <label>SIMPLIFY_MULT_MIN_DIST（相機間距 > 此倍×中位數 視為離群;預設 10)</label>
           <input name="SIMPLIFY_MULT_MIN_DIST" value="{{ colmap_defaults.SIMPLIFY_MULT_MIN_DIST }}">
-          <label class="checks" style="margin-top:10px;">
+          <label class="chk" style="margin-top:10px;">
             <input type="checkbox" name="REORIENT" value="1" {{ 'checked' if colmap_defaults.REORIENT=='1' }}>
-            auto_reorient（把場景轉正「up 朝上」+ 等比縮放;只改去畸變模型,影像不動)
+            <span>auto_reorient（把場景轉正「up 朝上」+ 等比縮放;只改去畸變模型,影像不動)</span>
           </label>
           <label>REORIENT_TARGET_MED_DIST（縮放到「相機→點」中位距=此值;預設 20)</label>
           <input name="REORIENT_TARGET_MED_DIST" value="{{ colmap_defaults.REORIENT_TARGET_MED_DIST }}">
@@ -562,8 +562,8 @@
     {# render one tunable param field from its schema entry (shared by train + mesh) #}
     {% macro field(pr, ready) %}
       {% if pr.type == 'bool' %}
-      <label class="checks" style="margin-top:8px"><input type="checkbox" name="{{ pr.key }}" value="1"
-             {{ 'checked' if pr.default }} {{ '' if ready else 'disabled' }}> {{ pr.label }}</label>
+      <label class="chk" style="margin-top:8px"><input type="checkbox" name="{{ pr.key }}" value="1"
+             {{ 'checked' if pr.default }} {{ '' if ready else 'disabled' }}> <span>{{ pr.label }}</span></label>
       {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
       {% elif pr.type == 'select' %}
       <label>{{ pr.label }}</label>
@@ -618,10 +618,10 @@
       <details class="grp">
         <summary>進階</summary>
         <div class="gbody">
-          <label class="checks"><input type="checkbox" name="recurse" value="1" checked> 遞迴子資料夾（含子資料夾）</label>
+          <label class="chk"><input type="checkbox" name="recurse" value="1" checked> <span>遞迴子資料夾（含子資料夾）</span></label>
           <div class="hint">多相機 / 巢狀資料集（如 nadir、oblique 分資料夾）需要;會保留相對路徑。</div>
-          <label class="checks" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> 覆蓋已存在的深度圖（預設略過,可續跑）</label>
-          <label class="checks" style="margin-top:8px"><input type="checkbox" name="invert" value="1"> 反轉（存 1-正規化,近處較暗）</label>
+          <label class="chk" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> <span>覆蓋已存在的深度圖（預設略過,可續跑）</span></label>
+          <label class="chk" style="margin-top:8px"><input type="checkbox" name="invert" value="1"> <span>反轉（存 1-正規化,近處較暗）</span></label>
           <div class="hint">深度損失為尺度/方向不變,反轉通常不影響結果;不確定就不要勾。</div>
         </div>
       </details>
@@ -740,7 +740,7 @@
         <div class="gbody">
           <label>extra（直接附加到指令後;表單沒有的旗標寫這）</label>
           <input name="extra" placeholder="--checkpoint_iterations 7000 30000">
-          <label class="checks" style="margin-top:10px"><input type="checkbox" name="force" value="1"> FORCE（重建 scene 連結）</label>
+          <label class="chk" style="margin-top:10px"><input type="checkbox" name="force" value="1"> <span>FORCE（重建 scene 連結）</span></label>
         </div>
       </details>
 
@@ -782,8 +782,8 @@
       <details class="grp">
         <summary>Marker 量測標定（產出實際尺寸 mesh）</summary>
         <div class="gbody">
-          <label class="checks"><input type="checkbox" name="marker_enable" value="1">
-            提供 marker（抽完 mesh 後自動依標定板換算成實際 mm 尺寸）</label>
+          <label class="chk"><input type="checkbox" name="marker_enable" value="1">
+            <span>提供 marker（抽完 mesh 後自動依標定板換算成實際 mm 尺寸）</span></label>
           <div class="hint">場景中需放一塊 ChArUco 標定板。勾選後會自動偵測板子、估算尺度,輸出
             <code>tsdf_post_scaled_mm.ply</code>（單位 mm）。<b>不需手動填數值</b> — 使用下列已設定的板子規格:</div>
           {% for b in marker_backends %}

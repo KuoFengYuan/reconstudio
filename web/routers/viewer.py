@@ -103,13 +103,16 @@ def _safe_image_file(path: str) -> Path:
     return p
 
 
-def _preview_jpeg(src: Path) -> Path | None:
-    """Transcode a non-web image (TIFF) to a cached <=1920px JPEG so browsers can
-    show it (no native TIFF support). Cached in the temp dir keyed by the source
-    path, reused while newer than the source. Returns None if ffmpeg is missing/fails.
-    Mirrors viz._preview_jpeg, but caches outside any workspace (gallery folders
+def _preview_jpeg(src: Path, max_w: int = 1920) -> Path | None:
+    """Transcode an image to a cached JPEG whose width is capped at `max_w` (with
+    `-2` so the height stays even, aspect preserved). Used both for TIFFs the browser
+    can't render natively AND for downscaled grid thumbnails of huge originals — the
+    grid otherwise downloads + decodes every full-res photo just to paint a 160px
+    cell, which is what makes a high-resolution folder crawl. Cached in the temp dir
+    keyed by the source path + width, reused while newer than the source. Returns
+    None if ffmpeg is missing/fails. Caches outside any workspace (gallery folders
     aren't job workspaces and may be read-only)."""
-    key = hashlib.sha1(str(src).encode()).hexdigest()[:20]
+    key = hashlib.sha1(f"{src}|{max_w}".encode()).hexdigest()[:20]
     dst = _PREVIEW_ROOT / f"{key}.jpg"
     try:
         if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
@@ -123,7 +126,7 @@ def _preview_jpeg(src: Path) -> Path | None:
     tmp = dst.with_suffix(".jpg.tmp")
     r = subprocess.run(
         [ff, "-y", "-nostdin", "-loglevel", "error", "-i", str(src),
-         "-vf", "scale='min(1920,iw)':-2:flags=area", "-q:v", "3", "-f", "mjpeg", str(tmp)],
+         "-vf", f"scale='min({max_w},iw)':-2:flags=area", "-q:v", "3", "-f", "mjpeg", str(tmp)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if r.returncode != 0 or not tmp.is_file():
         tmp.unlink(missing_ok=True)
@@ -182,11 +185,22 @@ async def gallery(request: Request, path: str = "", recursive: int = 1):
 
 
 @router.get("/api/gallery/imagefile")
-async def gallery_image(path: str):
-    """Serve one image the gallery shows. Web-native formats stream as-is; TIFF is
-    transcoded to a cached JPEG preview (browsers can't render TIFF)."""
+async def gallery_image(path: str, w: int = 0):
+    """Serve one image the gallery shows. With `w` (the grid's thumbnail width) the
+    image is downscaled to a cached JPEG so a high-res folder doesn't ship hundreds
+    of full-size photos to the browser; without it (the lightbox), web-native formats
+    stream at full resolution and TIFF is transcoded to a <=1920px preview (browsers
+    can't render TIFF)."""
     p = _safe_image_file(path)
-    if p.suffix.lower() in IMAGE_EXTS:
+    web_native = p.suffix.lower() in IMAGE_EXTS
+    if w > 0:                                   # grid thumbnail: always downscale + cache
+        jpg = await asyncio.to_thread(_preview_jpeg, p, max(64, min(w, 4096)))
+        if jpg:
+            return FileResponse(jpg, media_type="image/jpeg")
+        if web_native:                          # ffmpeg unavailable → original still works (slow)
+            return FileResponse(p)
+        raise HTTPException(415, f"cannot preview {p.suffix} image (transcode failed)")
+    if web_native:                              # lightbox / full view
         return FileResponse(p)
     jpg = await asyncio.to_thread(_preview_jpeg, p)
     if jpg:
