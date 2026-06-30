@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .backends import env_python, get_backend, repo_path
 from .model import read_cameras
-from .runner import Cancelled, Runner
+from .runner import Cancelled, PipelineError, Runner
 
 TRAIN_DEFAULTS = {"backend": "lichtfeld-mrnf", "gpu": "0", "extra": "", "force": False}
 
@@ -90,6 +90,16 @@ def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
     r.log(f"scene ready: {scene}  (sparse/0 + images → {sparse_dir.parent})")
 
 
+def _trained_ply(out: Path) -> Path | None:
+    """A trained 3DGS PLY in the output dir, if any, across trainer layouts —
+    LichtFeld `splat_<N>.ply` or GS-2M `point_cloud/iteration_<N>/point_cloud.ply`.
+    Mirrors web.services.models.trained_ply (existence is all we need here; pipeline
+    must not import the web layer)."""
+    cands = list(out.glob("splat_*.ply"))
+    cands += list(out.glob("point_cloud/iteration_*/point_cloud.ply"))
+    return cands[0] if cands else None
+
+
 def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
     """Run a compiled (non-Python) trainer, e.g. LichtFeld Studio. Unlike the
     conda-python path we invoke the executable directly and point `-d` at the
@@ -138,7 +148,18 @@ def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
     r.log(f"trainer: {exe} {cmd}")
     r.log(f"data:    {data_dir}")
     r.log(f"output:  {out}")
-    r.run(argv, cwd=str(out), env=env)          # cwd=out so ./train.log + splat_*.ply co-locate
+    rc = r.run(argv, cwd=str(out), env=env, check=False)   # cwd=out so ./train.log + splat_*.ply co-locate
+    if rc != 0:
+        # Compiled trainers (notably LichtFeld Studio) sometimes segfault during
+        # shutdown — CUDA-context teardown / static-destructor order — AFTER every
+        # output has been written. Don't fail a job whose model is already on disk:
+        # if the trained PLY exists, warn and treat as success; otherwise it really
+        # did fail before producing a model, so surface the error.
+        ply = _trained_ply(out)
+        if ply is None:
+            raise PipelineError(f"{exe.name} exited with code {rc}")
+        r.log(f"[warn] {exe.name} 退出碼 {rc}（多半是收尾時 segfault）,但模型已寫出："
+              f"{ply.name} → 視為訓練成功。")
     r.banner(f"train done. model={out}")
     r.log("[note] 此 backend 不支援 mesh;訓練雲可用「🧹 在 SuperSplat 去背景」清背景後下載。")
 
