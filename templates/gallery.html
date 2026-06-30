@@ -75,7 +75,8 @@
     <div class="grid">
       {% for it in g.files %}
       <div class="cell" onclick="openLb({{ it.i }})">
-        <img loading="lazy" src="/api/gallery/imagefile?path={{ (path ~ '/' ~ it.rel)|urlencode }}" alt="{{ it.name }}">
+        <img loading="lazy" decoding="async"
+             src="/api/gallery/imagefile?path={{ (path ~ '/' ~ it.rel)|urlencode }}&w=400" alt="{{ it.name }}">
         <div class="nm">{{ it.name }}</div>
       </div>
       {% endfor %}
