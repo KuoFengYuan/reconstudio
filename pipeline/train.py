@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .backends import env_python, get_backend, repo_path
 from .model import read_cameras
-from .runner import Cancelled, Runner
+from .runner import Cancelled, PipelineError, Runner
 
 TRAIN_DEFAULTS = {"backend": "lichtfeld-mrnf", "gpu": "0", "extra": "", "force": False}
 
@@ -35,8 +35,19 @@ PANEL_BASE = Path(__file__).resolve().parent.parent
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 MARKER_SCRIPT, SCALE_SCRIPT = "estimate_marker_scale.py", "scale_mesh.py"
 
-_NEEDED = ("cameras.bin", "images.bin", "points3D.bin")
+_MODEL_STEMS = ("cameras", "images", "points3D")
 _PINHOLE = {"PINHOLE", "SIMPLE_PINHOLE"}
+
+
+def _model_ext(d: Path) -> str | None:
+    """The COLMAP model format present in dir `d`: '.bin' (preferred) or '.txt',
+    or None if neither. Both trainers' COLMAP loaders (LichtFeld, GS-2M) read text
+    and binary natively, so the panel accepts whichever the source ships."""
+    if (d / "cameras.bin").is_file():
+        return ".bin"
+    if (d / "cameras.txt").is_file():
+        return ".txt"
+    return None
 
 
 def _resolve_dense(src: Path) -> tuple[Path, Path]:
@@ -46,26 +57,46 @@ def _resolve_dense(src: Path) -> tuple[Path, Path]:
       (b) a workspace with a dense  : src/<name>_mapper/sparse/... + .../images/
       (c) an already sparse/0 scene : src/sparse/0/cameras.bin + src/images/
     """
-    if (src / "sparse" / "cameras.bin").is_file() and (src / "images").is_dir():
+    if _model_ext(src / "sparse") and (src / "images").is_dir():
         return src / "sparse", src / "images"
     for d in sorted(src.glob("*_mapper")):
-        if (d / "sparse" / "cameras.bin").is_file() and (d / "images").is_dir():
+        if _model_ext(d / "sparse") and (d / "images").is_dir():
             return d / "sparse", d / "images"
-    if (src / "sparse" / "0" / "cameras.bin").is_file() and (src / "images").is_dir():
+    if _model_ext(src / "sparse" / "0") and (src / "images").is_dir():
         return src / "sparse" / "0", src / "images"
     raise FileNotFoundError(
-        f"找不到去畸變的 COLMAP 模型（需要 sparse/cameras.bin + images/）於 {src}。"
+        f"找不到去畸變的 COLMAP 模型（需要 sparse/cameras.bin 或 cameras.txt + images/）於 {src}。"
         " 請先在 COLMAP 階段跑完 undistort，並把 source 指向 workspace 或其去畸變輸出。")
 
 
+def _camera_models_text(path: Path) -> tuple[set[str], int]:
+    """(set of camera-model names, camera count) from a COLMAP cameras.txt —
+    one camera per non-comment line: `CAM_ID MODEL W H PARAMS...`. Hand-parsed so
+    pipeline stays numpy-free (the vendored read_write_model imports numpy)."""
+    models, n = set(), 0
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                models.add(parts[1])
+                n += 1
+    return models, n
+
+
 def _assert_pinhole(sparse_dir: Path, r: Runner) -> None:
-    cams = read_cameras(sparse_dir / "cameras.bin")
-    models = {c["model"] for c in cams.values()}
+    if _model_ext(sparse_dir) == ".txt":
+        models, ncam = _camera_models_text(sparse_dir / "cameras.txt")
+    else:
+        cams = read_cameras(sparse_dir / "cameras.bin")
+        models, ncam = {c["model"] for c in cams.values()}, len(cams)
     if not models <= _PINHOLE:
         raise ValueError(
             f"相機模型為 {sorted(models)}，但 GS-2M 只接受 PINHOLE/SIMPLE_PINHOLE。"
             " 你八成指到了 mapper 的原始 sparse（含畸變），請改用 undistort 後的輸出。")
-    r.log(f"camera model OK: {sorted(models)} ({len(cams)} cam)")
+    r.log(f"camera model OK: {sorted(models)} ({ncam} cam)")
 
 
 def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
@@ -75,7 +106,9 @@ def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
     lands in the real sparse/0 dir here, not in the source workspace)."""
     s0 = scene / "sparse" / "0"
     s0.mkdir(parents=True, exist_ok=True)
-    for f in _NEEDED:
+    ext = _model_ext(sparse_dir) or ".bin"      # whichever the source ships (bin/txt)
+    for stem in _MODEL_STEMS:
+        f = stem + ext
         link = s0 / f
         if link.is_symlink() or link.exists():
             if not force:
@@ -88,6 +121,16 @@ def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
     if not (img.is_symlink() or img.exists()):
         img.symlink_to(images_dir.resolve())
     r.log(f"scene ready: {scene}  (sparse/0 + images → {sparse_dir.parent})")
+
+
+def _trained_ply(out: Path) -> Path | None:
+    """A trained 3DGS PLY in the output dir, if any, across trainer layouts —
+    LichtFeld `splat_<N>.ply` or GS-2M `point_cloud/iteration_<N>/point_cloud.ply`.
+    Mirrors web.services.models.trained_ply (existence is all we need here; pipeline
+    must not import the web layer)."""
+    cands = list(out.glob("splat_*.ply"))
+    cands += list(out.glob("point_cloud/iteration_*/point_cloud.ply"))
+    return cands[0] if cands else None
 
 
 def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
@@ -138,7 +181,18 @@ def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
     r.log(f"trainer: {exe} {cmd}")
     r.log(f"data:    {data_dir}")
     r.log(f"output:  {out}")
-    r.run(argv, cwd=str(out), env=env)          # cwd=out so ./train.log + splat_*.ply co-locate
+    rc = r.run(argv, cwd=str(out), env=env, check=False)   # cwd=out so ./train.log + splat_*.ply co-locate
+    if rc != 0:
+        # Compiled trainers (notably LichtFeld Studio) sometimes segfault during
+        # shutdown — CUDA-context teardown / static-destructor order — AFTER every
+        # output has been written. Don't fail a job whose model is already on disk:
+        # if the trained PLY exists, warn and treat as success; otherwise it really
+        # did fail before producing a model, so surface the error.
+        ply = _trained_ply(out)
+        if ply is None:
+            raise PipelineError(f"{exe.name} exited with code {rc}")
+        r.log(f"[warn] {exe.name} 退出碼 {rc}（多半是收尾時 segfault）,但模型已寫出："
+              f"{ply.name} → 視為訓練成功。")
     r.banner(f"train done. model={out}")
     r.log("[note] 此 backend 不支援 mesh;訓練雲可用「🧹 在 SuperSplat 去背景」清背景後下載。")
 
