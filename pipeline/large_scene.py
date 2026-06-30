@@ -218,9 +218,11 @@ def auto_reorient(input_path, output_path, upscale: float = 0.0,
                   target_med_dist: float = 20.0, ext: str = "bin"):
     """PCA gravity-align (camera-centre plane normal = up; longest camera span =
     right) and uniformly scale a COLMAP model so the median camera→point distance
-    becomes `target_med_dist` (unless `upscale` is given). Reads input_path, writes
-    output_path. Port of auto_reorient.py with numpy instead of torch (identical
-    math). scipy.spatial is imported lazily."""
+    becomes `target_med_dist` (unless `upscale` is given). Output is Y-up (gravity
+    up -> -Y), the same convention as zup_to_yup, so reconstudio's viewer renders it
+    upright. Reads input_path, writes output_path. Ported from auto_reorient.py with
+    numpy instead of torch; the basis is reordered from the original Z-up so the
+    viewer's fixed flip shows +Y up. scipy.spatial is imported lazily."""
     from scipy import spatial
 
     cameras, images_in, points_in = read_model(str(input_path), ext=f".{ext}")
@@ -256,7 +258,10 @@ def auto_reorient(input_path, output_path, upscale: float = 0.0,
     forward /= np.linalg.norm(forward)
     right = np.cross(forward, up)
     right /= np.linalg.norm(right)
-    rotation_matrix = np.stack([right, forward, up], axis=1)   # columns = axes
+    # Y-up convention, matching zup_to_yup so the viewer (fixed 180°-about-X flip,
+    # which expects the model's up on -Y) renders it upright: gravity-up -> -Y,
+    # forward -> +Z, right -> +X. (columns = images of the new basis axes; det=+1.)
+    rotation_matrix = np.stack([right, -up, forward], axis=1)
 
     positions = np.array([points_in[k].xyz for k in points_in])
     rotated = scale * (positions @ rotation_matrix)
