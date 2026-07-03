@@ -69,7 +69,7 @@ def _render_measure_page(request: Request, mesh_path: Path, *, mode: str, axis: 
             flip_h=flip_h, flip_w=flip_w, flip_d=flip_d, mm_per_unit=mm_per_unit,
         )
     except ValueError as e:
-        raise HTTPException(400, f"無法量測這個 mesh：{e}")
+        raise HTTPException(400, f"無法量測這個 mesh：{e}") from e
 
     def toggled(**over):
         p = dict(base_params, mode=mode, axis=axis, swap_wd=swap_wd,
