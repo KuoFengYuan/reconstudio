@@ -33,8 +33,9 @@ async def browse(request: Request, path: str = "", target: str = "image_root",
     pick='multi' also lists files and renders checkboxes so the caller can select
     any mix of files + folders (used by the GCS upload source). pick='file' lists
     folders to navigate plus viewer-openable files to pick ONE of — `exts` chooses
-    the filter: 'mesh' (.ply/.obj/.stl/.glb, the mesh viewer) or 'splat'
-    (.ply/.splat/…, the SuperSplat point-cloud viewer)."""
+    the filter: 'mesh' (.ply/.obj/.stl/.glb, the mesh viewer), 'splat'
+    (.ply/.splat/…, the SuperSplat point-cloud viewer), or 'ply' (.ply only,
+    the mesh-measurement tool — its parser only reads binary PLY)."""
     base = DEST_ROOT if root == "dest" else BROWSE_ROOT
     p = _safe_dir(path, base)
     dirs = sorted((d.name for d in p.iterdir()
@@ -42,7 +43,7 @@ async def browse(request: Request, path: str = "", target: str = "image_root",
     files: list[str] = []
     truncated = False
     if pick in ("multi", "file"):
-        pickable = SPLAT_EXTS if exts == "splat" else MESH_EXTS
+        pickable = {".ply"} if exts == "ply" else (SPLAT_EXTS if exts == "splat" else MESH_EXTS)
         allf = sorted((f.name for f in p.iterdir()
                        if f.is_file() and not f.name.startswith(".")
                        and (pick == "multi" or f.suffix.lower() in pickable)),

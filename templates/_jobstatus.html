@@ -58,6 +58,7 @@
     {% if job.status == 'done' %}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <button onclick="openMeshViz('{{ job.id }}')">🧊 檢視 Mesh</button>
+      <button onclick="openMeshMeasure('{{ job.id }}')">📏 量測高寬深</button>
       <a class="dl" href="/api/jobs/{{ job.id }}/mesh.ply" download>⬇ 非實際尺寸 mesh</a>
       {% if job.meta.get('mesh_scaled_path') %}
       <a class="dl primary" href="/api/jobs/{{ job.id }}/mesh_scaled.ply" download>⬇ 實際尺寸 mesh (mm)</a>{% endif %}

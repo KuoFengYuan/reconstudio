@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesh 量測{% if title_label %} · {{ title_label }}{% endif %}</title>
+<style>
+  :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#c9d1d9; --panel:rgba(22,26,33,.92);
+          --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  html,body { margin:0; background:#0b0d11; color:var(--fg); min-height:100%;
+              font:13px/1.45 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif; }
+  body { padding:16px; }
+  .page { max-width:1120px; margin:0 auto; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  .hint { color:var(--mut); font-size:12px; }
+  a { color:var(--accent); }
+  .row { display:flex; gap:14px; flex-wrap:wrap; margin-top:14px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .views { display:flex; gap:14px; flex-wrap:wrap; }
+  .view { text-align:center; }
+  .view img { display:block; width:300px; height:300px; background:#fff; border-radius:8px; }
+  .view .cap { margin-top:6px; color:var(--mut); }
+  .ctl { min-width:220px; }
+  .ctl h2 { font-size:12px; color:var(--mut); margin:14px 0 6px; text-transform:uppercase; letter-spacing:.04em; }
+  .ctl h2:first-child { margin-top:0; }
+  .seg { display:flex; gap:0; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg a { flex:1; text-align:center; padding:6px 4px; color:var(--mut); text-decoration:none; font-size:12px; }
+  .seg a.on { background:var(--accent); color:#0a0c10; font-weight:600; }
+  .toggle { display:inline-block; margin:2px 6px 2px 0; padding:5px 10px; border:1px solid var(--line);
+            border-radius:6px; color:var(--mut); text-decoration:none; font-size:12px; }
+  .toggle.on { background:var(--accent); color:#0a0c10; border-color:var(--accent); font-weight:600; }
+  table { border-collapse:collapse; margin-top:6px; }
+  td { padding:3px 10px 3px 0; }
+  td.v { color:var(--accent); font-weight:700; font-variant-numeric:tabular-nums; text-align:right; }
+  .back { display:inline-block; margin-bottom:10px; }
+  .warn { color:var(--warn); }
+  input[type=text] { background:#0e1116; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+                      padding:7px 9px; width:420px; max-width:80vw; font:inherit; }
+  button { background:#222733; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:7px 12px; cursor:pointer; font:inherit; }
+  button:hover { filter:brightness(1.2); }
+</style>
+</head>
+<body>
+<div class="page">
+{% if need_path %}
+<h1>📏 Mesh 量測（看任意檔案）</h1>
+<div class="hint" style="margin-bottom:10px">不綁 job：直接量測 server 上任何一個 mesh 檔的高/寬/深，並產出三視圖。</div>
+<form onsubmit="location.href='/measure?path='+encodeURIComponent(document.getElementById('p').value); return false">
+  <input id="p" type="text" placeholder="/path/to/mesh.ply">
+  <button type="submit">開啟</button>
+</form>
+<div class="hint" style="margin-top:8px">請從左側工具列的「📏 量測」表單挑檔案，或直接在網址列加上 <code>?path=/絕對路徑/mesh.ply</code>。</div>
+
+{% else %}
+<a class="back hint" href="{{ back_href }}">{{ back_label }}</a>
+<h1>📏 {{ title_label }} — Mesh 量測</h1>
+<div class="hint">{{ "{:,}".format(result.n_vertices) }} 頂點 · 若下面三視圖方向不對（頭腳顛倒/躺著），用右側控制項調整，直到看起來正確為止 — 這一步沒辦法自動判斷，需要肉眼確認一次。</div>
+
+<div class="row">
+  <div class="panel views">
+    <div class="view">
+      <div class="hint">正面 FRONT</div>
+      <img src="{{ img_front }}">
+      <div class="cap">寬 {{ "%.1f"|format(result.width_mm if result.mm_per_unit else result.width_units) }}{{ "mm" if result.mm_per_unit else " units" }} ×
+        高 {{ "%.1f"|format(result.height_mm if result.mm_per_unit else result.height_units) }}{{ "mm" if result.mm_per_unit else " units" }}</div>
+    </div>
+    <div class="view">
+      <div class="hint">側面 SIDE</div>
+      <img src="{{ img_side }}">
+      <div class="cap">深 {{ "%.1f"|format(result.depth_mm if result.mm_per_unit else result.depth_units) }}{{ "mm" if result.mm_per_unit else " units" }} ×
+        高 {{ "%.1f"|format(result.height_mm if result.mm_per_unit else result.height_units) }}{{ "mm" if result.mm_per_unit else " units" }}</div>
+    </div>
+    <div class="view">
+      <div class="hint">俯視 TOP</div>
+      <img src="{{ img_top }}">
+      <div class="cap">寬 {{ "%.1f"|format(result.width_mm if result.mm_per_unit else result.width_units) }}{{ "mm" if result.mm_per_unit else " units" }} ×
+        深 {{ "%.1f"|format(result.depth_mm if result.mm_per_unit else result.depth_units) }}{{ "mm" if result.mm_per_unit else " units" }}</div>
+    </div>
+  </div>
+
+  <div class="panel ctl">
+    <h2>量測結果{% if not result.mm_per_unit %} <span class="warn">(重建單位，非實際尺寸)</span>{% endif %}</h2>
+    <table>
+      <tr><td>高度 Height</td><td class="v">{{ "%.2f"|format(result.height_mm if result.mm_per_unit else result.height_units) }}{{ " mm" if result.mm_per_unit else "" }}</td></tr>
+      <tr><td>寬度 Width</td><td class="v">{{ "%.2f"|format(result.width_mm if result.mm_per_unit else result.width_units) }}{{ " mm" if result.mm_per_unit else "" }}</td></tr>
+      <tr><td>深度 Depth</td><td class="v">{{ "%.2f"|format(result.depth_mm if result.mm_per_unit else result.depth_units) }}{{ " mm" if result.mm_per_unit else "" }}</td></tr>
+    </table>
+    <h2>實際尺寸換算</h2>
+    <form method="get" action="{{ base_url }}" style="display:flex;gap:6px;align-items:center">
+      {% for k, v in base_params.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+      <input type="hidden" name="mode" value="{{ mode }}">
+      <input type="hidden" name="axis" value="{{ axis }}">
+      <input type="hidden" name="swap_wd" value="{{ swap_wd|lower }}">
+      <input type="hidden" name="flip_h" value="{{ flip_h|lower }}">
+      <input type="hidden" name="flip_w" value="{{ flip_w|lower }}">
+      <input type="hidden" name="flip_d" value="{{ flip_d|lower }}">
+      <input type="text" name="mm_per_unit" placeholder="例如 20.26，或已經是mm就填1"
+             value="{{ mm_per_unit_raw }}" style="width:180px">
+      <button type="submit">套用</button>
+    </form>
+    {% if mm_error %}
+    <div class="hint" style="margin-top:4px;color:var(--err)">⚠ {{ mm_error }}</div>
+    {% endif %}
+    <div class="hint" style="margin-top:4px">
+      這裡填的是「1 個重建單位等於幾 mm」的倍率，不是單位名稱。
+      {% if result.mm_per_unit %}目前設定：1 unit = {{ result.mm_per_unit }} mm。
+      {% else %}留空則顯示重建單位（units）。{% endif %}
+      不知道倍率的話，用 <code>tools/estimate_marker_scale.py</code> 量出來；
+      如果這個 mesh 本來就已經用 <code>tools/scale_mesh.py</code> 轉成 mm 單位了，這裡填 <code>1</code> 就好。
+    </div>
+
+    <h2>座標基準</h2>
+    <div class="seg">
+      <a class="{{ 'on' if mode=='pca' else '' }}" href="{{ url_mode_pca }}">PCA 主軸</a>
+      <a class="{{ 'on' if mode=='raw' else '' }}" href="{{ url_mode_raw }}">原始 XYZ</a>
+    </div>
+    <div class="hint">PCA：自動找最長延伸方向，適合重建座標系是斜的情況（大多數 COLMAP/3DGS mesh）。原始 XYZ：直接用 x/y/z，適合本來就已經對齊好的 mesh。</div>
+
+    <h2>哪一軸是高度</h2>
+    <div class="seg">
+      <a class="{{ 'on' if axis==0 else '' }}" href="{{ url_axis0 }}">軸 0</a>
+      <a class="{{ 'on' if axis==1 else '' }}" href="{{ url_axis1 }}">軸 1</a>
+      <a class="{{ 'on' if axis==2 else '' }}" href="{{ url_axis2 }}">軸 2</a>
+    </div>
+
+    <h2>翻轉 / 互換</h2>
+    <a class="toggle {{ 'on' if flip_h else '' }}" href="{{ url_flip_h }}">↕ 上下翻轉</a>
+    <a class="toggle {{ 'on' if swap_wd else '' }}" href="{{ url_swap_wd }}">⇄ 寬深互換</a>
+    <a class="toggle {{ 'on' if flip_w else '' }}" href="{{ url_flip_w }}">↔ 寬度鏡像</a>
+    <a class="toggle {{ 'on' if flip_d else '' }}" href="{{ url_flip_d }}">⇅ 深度鏡像</a>
+
+    <h2></h2>
+    <a class="hint" href="{{ url_reset }}">↺ 重設所有調整</a>
+  </div>
+</div>
+{% endif %}
+</div>
+</body>
+</html>
