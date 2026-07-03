@@ -131,6 +131,11 @@
                      letter-spacing:2px; user-select:none; }
   .tabs.steps .tabrow.tools button,
   .tabs.steps .tabrow.viewer button { flex:0 1 auto; padding:6px 10px; }
+  /* 檢視 row has 4 buttons now (圖片/Mesh Viewer/量測/SuperSplat) — a plain flex-wrap
+     ragged-wraps them unevenly at typical sidebar widths, so lay this row out as an
+     explicit 2-column grid instead: always a tidy 2x2, buttons filling their cell. */
+  .tabs.steps .tabrow.viewer .tabbtns { display:grid; grid-template-columns:repeat(2, 1fr); }
+  .tabs.steps .tabrow.viewer button { text-align:center; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
@@ -272,6 +277,7 @@
         <div class="tabbtns">
           <button class="ghost" id="t-gallery" onclick="showForm('gallery')">🖼 圖片</button>
           <button class="ghost" id="t-viewer" onclick="showForm('viewer')">👁 Mesh Viewer</button>
+          <button class="ghost" id="t-measure" onclick="showForm('measure')">📏 量測</button>
           <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
         </div>
       </div>
@@ -912,6 +918,21 @@
       <button class="submit" type="submit">👁 開啟 Viewer</button>
     </form>
 
+    <!-- ----- standalone mesh measurement (auto height/width/depth on any local mesh file) ----- -->
+    <form id="form-measure" style="display:none" onsubmit="openMeasureTool(); return false;">
+      <fieldset>
+        <legend>Mesh 量測（看任意檔案）</legend>
+        <div class="hint" style="margin-bottom:8px">不綁 job:挑 server 上任何一個 mesh 檔,自動算高/寬/深並產出正面/側面/俯視三視圖。重建座標系通常是斜的,方向對不對要肉眼確認,頁面裡有翻轉/切換軸的按鈕。支援 <code>.ply</code>（binary，需含頂點座標；有頂點色會渲染更清楚）。</div>
+        <label>server 檔案路徑</label>
+        <div class="row">
+          <input id="measure_path" placeholder="{{ browse_root }}/…/tsdf_post.ply">
+          <button type="button" class="ghost" onclick="openFilePicker('measure_path','ply')">瀏覽</button>
+        </div>
+        <div class="hint">「瀏覽」從 <code>{{ browse_root }}</code> 起逐層挑檔(只列 mesh 檔)，也可直接貼完整路徑。</div>
+      </fieldset>
+      <button class="submit" type="submit">📏 開始量測</button>
+    </form>
+
     <!-- ----- SuperSplat point-cloud viewer (self-hosted editor as a viewer) ----- -->
     <form id="form-supersplat" style="display:none" onsubmit="openSplatViewer(); return false;">
       <fieldset>
@@ -990,7 +1011,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','blocksplit','depth','train','mesh','gcs','gallery','viewer','supersplat'].forEach(function(k){
+    ['frames','colmap','blocksplit','depth','train','mesh','gcs','gallery','viewer','measure','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -1190,6 +1211,13 @@
   function openViewer(){
     var p = (document.getElementById('viewer_path').value || '').trim();
     window.open(p ? '/viewer?path=' + encodeURIComponent(p) : '/viewer', '_blank');
+  }
+  // Unlike the 3D viewer, measurement needs numpy server-side (no client-local mode) —
+  // a path is required.
+  function openMeasureTool(){
+    var p = (document.getElementById('measure_path').value || '').trim();
+    if (!p){ alert('請先選一個 server 上的 mesh 檔（.ply）。'); return; }
+    window.open('/measure?path=' + encodeURIComponent(p), '_blank');
   }
   // Same two modes for SuperSplat: filled path -> preload via ?load= (it streams from
   // the meshfile endpoint; &filename= tells it the format); empty -> plain editor,
@@ -1392,6 +1420,14 @@
       '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
       '<span class="hint">Mesh 檢視 · 量尺單位 mm</span></div>' +
       '<iframe src="/viz/mesh/' + id + '" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
+  }
+  function openMeshMeasure(id){
+    if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
+    document.getElementById('main').innerHTML =
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
+      '<button class="ghost" onclick="loadJob(\'' + id + '\')">← 回 log</button>' +
+      '<span class="hint">自動量測高/寬/深 + 三視圖</span></div>' +
+      '<iframe src="/viz/mesh/' + id + '/measure" style="width:100%;height:80vh;border:1px solid var(--line);border-radius:8px"></iframe>';
   }
   // embed the self-hosted SuperSplat editor inline in the output column (not a new tab),
   // pre-loaded with the trained 3DGS cloud. 去背: box/sphere select → Ctrl+I invert →
