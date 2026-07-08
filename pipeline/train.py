@@ -16,12 +16,11 @@ is the single most common way this integration goes wrong.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 from pathlib import Path
 
-from .backends import env_python, get_backend, repo_path
+from .backends import binary_exec, env_python, get_backend, repo_path
 from .model import read_cameras
 from .runner import Cancelled, PipelineError, Runner
 
@@ -140,10 +139,11 @@ def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
     LichtFeld's COLMAP loader reads `<data>/sparse/` natively. Strategy defaults
     come from a shipped `--config` JSON; the panel's curated fields override via CLI."""
     name = p.get("backend")
-    exe = Path(spec.get("exec", "")).expanduser()
-    if not (exe.is_file() and os.access(exe, os.X_OK)):
+    exe = binary_exec(spec)          # resolves a relative "exec" against BASE, same as /doctor
+    if exe is None:
+        raw = Path(spec.get("exec", "")).expanduser()
         raise FileNotFoundError(
-            f"backend '{name}' 的執行檔不存在或不可執行：{str(exe)!r}。"
+            f"backend '{name}' 的執行檔不存在或不可執行：{str(raw)!r}。"
             " 請在 backends.json 把 \"exec\" 指向已編譯的 binary（開 /doctor 檢查）。")
 
     src = Path(p["source"])
