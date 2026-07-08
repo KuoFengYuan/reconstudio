@@ -16,7 +16,6 @@ is the single most common way this integration goes wrong.
 from __future__ import annotations
 
 import json
-import os
 import re
 import shlex
 from pathlib import Path
