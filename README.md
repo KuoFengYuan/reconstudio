@@ -180,6 +180,15 @@ LichtFeld backend(MR-NF / iGS+)的參數區有三個深度選項,先用「🌊 �
 > 前提:`depth/` 要和**這次訓練實際用的 `images/` 同層、同名同尺寸**。LichtFeld 看到
 > `--use-depth-loss` 會自動掃 `<資料夾>/depth` 對應(不用手動指路徑)。
 
+### 開啟 16-bit 色彩訓練(HDR 素材)
+
+LichtFeld backend(MR-NF / iGS+)參數區有 **16-bit 色彩訓練**(`--use-16bit`)勾選框,預設關。
+
+- 只在來源影像**本身就是 16-bit**(RAW 轉出的 TIFF/PNG、HDR 合成素材)才有意義——一般手機
+  /相機直出的 8-bit JPEG/PNG 開這個沒效果,因為動態範圍在源頭就已經被裁掉了。
+- 開啟後 LichtFeld 會自動用**無損 JPEG2000** 做磁碟快取(不用另外設定),換取更完整的亮部/
+  暗部細節,代價是快取檔案較大、稍慢。
+
 ## 🌊 深度(影像 → 深度圖 → 訓練深度監督)
 
 為每張照片產生深度圖,輸出成 **LichtFeld 格式的 `depth/` 資料夾**(8-bit 灰階 PNG、與來源
