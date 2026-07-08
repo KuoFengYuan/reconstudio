@@ -66,7 +66,12 @@ cd .. && git clone https://github.com/MrNeRF/LichtFeld-Studio.git && cd LichtFel
 cmake -B build && cmake --build build -j"$(nproc)"
 ```
 
-然後在 `backends.json` 把 `exec` 指到 `build/LichtFeld-Studio`(範本見 `backends.example.json`)。
+LichtFeld 的兩個 backend(MR-NF / iGS+)已內建在 `pipeline/backends.py`,只要
+`LichtFeld-Studio` 跟 `reconstudio` 同一層(就是上面 `cd ..` clone 的位置),完全不用
+碰 `backends.json`,程式會自動找到 `build/LichtFeld-Studio`。只有這台機器的 build
+放在別的地方(不同硬碟、NFS 路徑…)時,才需要在**這台機器自己的** `backends.json` 補一個
+`"exec"` 覆蓋(範本見 `backends.example.json`)——其餘參數仍吃內建預設,以後新增參數只要
+`git pull` 就全機器同步,不用手動改 JSON。
 
 ## 4. 選用元件
 

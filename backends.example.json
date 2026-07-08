@@ -70,49 +70,16 @@
     ]
   },
 
+  "_lichtfeld_note": [
+    "lichtfeld-mrnf / lichtfeld-igs+ are now BUILT-IN (pipeline/backends.py), so most",
+    "machines need NO entry here at all — the default exec path ../LichtFeld-Studio/",
+    "build/LichtFeld-Studio just works when the repo is a sibling of reconstudio/.",
+    "Only add an override below if this machine's build lives somewhere else; you",
+    "do NOT need to re-list \"params\" (shallow merge is per top-level backend key,",
+    "so overriding \"exec\" alone keeps every built-in param, including any new ones",
+    "added later without touching this file)."
+  ],
   "lichtfeld-mrnf": {
-    "label": "LichtFeld · MR-NF (無 mesh)",
-    "launch": "binary",
-    "exec": "../LichtFeld-Studio/build/LichtFeld-Studio",
-    "train_args": "-d {scene} -o {out} --strategy mrnf --headless --no-splash {args} {extra}",
-    "params": [
-      { "key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數" },
-      { "key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "1", "label": "步數縮放 (預設 1;留空=用內建預設)", "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值(LichtFeld 內部換算,不必自己乘)。預設 1(不縮放);留空 = 用 LichtFeld 內建預設。" },
-      { "key": "sh_degree", "flag": "--sh-degree", "type": "select", "options": ["0", "1", "2", "3"], "default": "3", "label": "SH 階數" },
-      { "key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)" },
-      { "key": "resize_factor", "flag": "--resize_factor", "type": "select", "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣" },
-      { "key": "use_16bit", "flag": "--use-16bit", "type": "bool", "default": false, "label": "16-bit 色彩訓練", "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。" },
-      { "key": "cpu_cache", "flag": "--no-cpu-cache", "type": "bool", "invert": true, "default": true, "label": "CPU 快取", "hint": "影像快取在 CPU 記憶體(預設開)。取消勾選 = 傳 --no-cpu-cache 停用。" },
-      { "key": "fs_cache", "flag": "--no-fs-cache", "type": "bool", "invert": true, "default": true, "label": "FS 快取", "hint": "用檔案系統快取縮放後影像(預設開)。取消勾選 = 傳 --no-fs-cache 停用。" },
-      { "key": "mask_mode", "flag": "--mask-mode", "type": "select", "options": ["none", "segment", "ignore", "alpha_consistent"], "default": "none", "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。" },
-      { "key": "bilateral_grid", "flag": "--bilateral-grid", "type": "bool", "default": false, "label": "雙邊網格 (曝光補償)" },
-      { "key": "enable_mip", "flag": "--enable-mip", "type": "bool", "default": true, "label": "Mip 濾波 (抗鋸齒)" },
-      { "key": "use_depth_loss", "flag": "--use-depth-loss", "type": "bool", "default": false, "label": "深度損失 (use-depth-loss)", "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。" },
-      { "key": "depth_loss_mode", "flag": "--depth-loss-mode", "type": "select", "options": ["adaptive-warped-l1", "pearson"], "default": "adaptive-warped-l1", "label": "深度損失模式", "hint": "作者推薦 adaptive-warped-l1(正規化反深度 L1);pearson 為尺度不變相關。僅在勾選深度損失時生效。" },
-      { "key": "depth_loss_weight", "flag": "--depth-loss-weight", "type": "float", "default": "2.0", "label": "深度損失權重", "hint": "深度監督權重(LichtFeld 預設 2.0)。僅在勾選深度損失時生效。" }
-    ]
-  },
-
-  "lichtfeld-igs+": {
-    "label": "LichtFeld · iGS+ (無 mesh)",
-    "launch": "binary",
-    "exec": "../LichtFeld-Studio/build/LichtFeld-Studio",
-    "train_args": "-d {scene} -o {out} --strategy igs+ --headless --no-splash {args} {extra}",
-    "params": [
-      { "key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數" },
-      { "key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "1", "label": "步數縮放 (預設 1;留空=用內建預設)", "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值(LichtFeld 內部換算,不必自己乘)。預設 1(不縮放);留空 = 用 LichtFeld 內建預設。" },
-      { "key": "sh_degree", "flag": "--sh-degree", "type": "select", "options": ["0", "1", "2", "3"], "default": "3", "label": "SH 階數" },
-      { "key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)" },
-      { "key": "resize_factor", "flag": "--resize_factor", "type": "select", "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣" },
-      { "key": "use_16bit", "flag": "--use-16bit", "type": "bool", "default": false, "label": "16-bit 色彩訓練", "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。" },
-      { "key": "cpu_cache", "flag": "--no-cpu-cache", "type": "bool", "invert": true, "default": true, "label": "CPU 快取", "hint": "影像快取在 CPU 記憶體(預設開)。取消勾選 = 傳 --no-cpu-cache 停用。" },
-      { "key": "fs_cache", "flag": "--no-fs-cache", "type": "bool", "invert": true, "default": true, "label": "FS 快取", "hint": "用檔案系統快取縮放後影像(預設開)。取消勾選 = 傳 --no-fs-cache 停用。" },
-      { "key": "mask_mode", "flag": "--mask-mode", "type": "select", "options": ["none", "segment", "ignore", "alpha_consistent"], "default": "none", "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。" },
-      { "key": "bilateral_grid", "flag": "--bilateral-grid", "type": "bool", "default": false, "label": "雙邊網格 (曝光補償)" },
-      { "key": "enable_mip", "flag": "--enable-mip", "type": "bool", "default": true, "label": "Mip 濾波 (抗鋸齒)" },
-      { "key": "use_depth_loss", "flag": "--use-depth-loss", "type": "bool", "default": false, "label": "深度損失 (use-depth-loss)", "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。" },
-      { "key": "depth_loss_mode", "flag": "--depth-loss-mode", "type": "select", "options": ["adaptive-warped-l1", "pearson"], "default": "adaptive-warped-l1", "label": "深度損失模式", "hint": "作者推薦 adaptive-warped-l1(正規化反深度 L1);pearson 為尺度不變相關。僅在勾選深度損失時生效。" },
-      { "key": "depth_loss_weight", "flag": "--depth-loss-weight", "type": "float", "default": "2.0", "label": "深度損失權重", "hint": "深度監督權重(LichtFeld 預設 2.0)。僅在勾選深度損失時生效。" }
-    ]
+    "exec": "/absolute/path/to/LichtFeld-Studio/build/LichtFeld-Studio"
   }
 }
