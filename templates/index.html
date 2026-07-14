@@ -268,7 +268,7 @@
       <div class="tabrow tools">
         <span class="lbl">工具</span>
         <div class="tabbtns">
-          <button class="ghost" id="t-depth" onclick="showForm('depth')">🌊 深度</button>
+          <button class="ghost" id="t-depth" onclick="showForm('depth')">🌊 深度/法線</button>
           <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
         </div>
       </div>
@@ -590,52 +590,55 @@
     {% endmacro %}
 
     <!-- ----- blocksplit form ----- -->
-    <!-- ----- depth form (Depth Anything -> LichtFeld depth/ folder) ----- -->
+    <!-- ----- depth/normal form (LichtFeld-Studio `preprocess` -> depth/ + normals/) ----- -->
     <form id="form-depth" style="display:none" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
-        <legend>深度生成（Depth Anything）</legend>
-        <div class="hint">為每張照片產生深度圖,輸出成 LichtFeld-Studio 格式的 <code>depth/</code> 資料夾
-          （8-bit 灰階 PNG、同名同尺寸）。訓練時加 <code>--use-depth-loss</code> 會自動讀取。</div>
+        <legend>深度/法線生成</legend>
+        <div class="hint">為每張照片產生深度圖和/或法線圖,輸出成 LichtFeld-Studio 格式的
+          <code>depth/</code>、<code>normals/</code> 資料夾(同名同尺寸;PNG)。用 LichtFeld 自帶的
+          <code>preprocess</code> 指令(MoGe-2 ONNX,模型第一次執行會自動下載,不需 conda/torch env)。
+          訓練時加 <code>--use-depth-loss</code> / <code>--use-normal-loss</code> 會自動讀取。</div>
         {% if not depth_ready %}
-        <div class="hint" style="color:var(--err)">⚠ 深度環境未就緒:需要名為
-          <code>{{ depth_defaults.conda_env }}</code> 的 conda env(裝 torch + transformers + pillow)。
-          可在 <code>local.env</code> 設 <code>DEPTH_CONDA_ENV</code> / <code>DEPTH_MODEL</code>,
+        <div class="hint" style="color:var(--err)">⚠ 找不到編譯好的 LichtFeld-Studio binary(跟
+          lichtfeld-mrnf/igs+ 訓練 backend 共用同一份)。請先在 <code>../LichtFeld-Studio</code> 建置,
           或開 <a href="/doctor" target="_blank" style="color:var(--accent)">/doctor</a> 檢查。</div>
         {% endif %}
-        <label>images（照片資料夾,或含 images/ 的 COLMAP workspace）</label>
+        <label>images(照片資料夾,或含 images/ 的 COLMAP workspace)</label>
         <div class="row">
           <input name="images" id="depth_images" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('depth_images')">瀏覽</button>
         </div>
-        <label>out_dir（留空 = images 的同層 <code>depth/</code>,讓 LichtFeld 自動找到）</label>
-        <div class="row">
-          <input name="out_dir" id="depth_out" placeholder="留空自動(建議)">
-          <button type="button" class="ghost" onclick="openPicker('depth_out')">瀏覽</button>
-        </div>
-        <label>model（深度模型:HF hub id、DA3 名稱或本地路徑）</label>
-        <input name="model" value="{{ depth_defaults.model }}" {{ '' if depth_ready else 'disabled' }}>
-        <div class="hint">預設 <code>depth-anything/Depth-Anything-V2-Large-hf</code>（V2,走 transformers）。
-          若已裝 Depth Anything 3 本體,可改用 <code>da3mono-large</code>（相對）/ <code>da3metric-large</code>（公制）。</div>
+        <div class="hint">輸出固定在資料集根目錄下的 <code>depth/</code>、<code>normals/</code>(不可自訂位置),
+          跟 LichtFeld 訓練時的自動掃描路徑一致。</div>
+        <label>產生內容</label>
+        <select name="mode" {{ '' if depth_ready else 'disabled' }}>
+          <option value="both" {{ 'selected' if depth_defaults.mode == 'both' }}>深度 + 法向量(both)</option>
+          <option value="depth" {{ 'selected' if depth_defaults.mode == 'depth' }}>只有深度(depth)</option>
+          <option value="normal" {{ 'selected' if depth_defaults.mode == 'normal' }}>只有法向量(normal)</option>
+        </select>
         <label>GPU</label>
         <select name="gpu" {{ '' if depth_ready else 'disabled' }}>
           {% if gpus %}{% for g in gpus %}
           <option value="{{ g.index }}">#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
           {% endfor %}{% else %}
-          <option value="0">0（預設;未偵測到 nvidia-smi）</option>
+          <option value="0">0(預設;未偵測到 nvidia-smi)</option>
           {% endif %}
         </select>
       </fieldset>
       <details class="grp">
         <summary>進階</summary>
         <div class="gbody">
-          <label class="chk"><input type="checkbox" name="recurse" value="1" checked> <span>遞迴子資料夾（含子資料夾）</span></label>
-          <div class="hint">多相機 / 巢狀資料集（如 nadir、oblique 分資料夾）需要;會保留相對路徑。</div>
-          <label class="chk" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> <span>覆蓋已存在的深度圖（預設略過,可續跑）</span></label>
-          <label class="chk" style="margin-top:8px"><input type="checkbox" name="invert" value="1"> <span>反轉（存 1-正規化,近處較暗）</span></label>
-          <div class="hint">深度損失為尺度/方向不變,反轉通常不影響結果;不確定就不要勾。</div>
+          <label>model(自訂 ONNX 模型路徑;留空 = 自動下載官方 MoGe-2 ViT-B)</label>
+          <input name="model" value="{{ depth_defaults.model }}" {{ '' if depth_ready else 'disabled' }}>
+          <label style="margin-top:8px">max-side(推論最長邊,留空 = 內建預設 518)</label>
+          <input name="max_side" value="{{ depth_defaults.max_side }}" {{ '' if depth_ready else 'disabled' }}>
+          <label style="margin-top:8px">bit-depth(輸出 PNG 位元深度,留空 = 內建預設 16;8-bit 深度先驗量化較明顯)</label>
+          <input name="bit_depth" value="{{ depth_defaults.bit_depth }}" {{ '' if depth_ready else 'disabled' }}>
+          <label class="chk" style="margin-top:8px"><input type="checkbox" name="cpu" value="1"> <span>強制 CPU 推論(忽略 GPU)</span></label>
+          <label class="chk" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> <span>覆蓋已存在的深度/法向量圖(預設略過,可續跑)</span></label>
         </div>
       </details>
-      <button class="submit" type="submit" {{ '' if depth_ready else 'disabled' }}>▶ 產生深度圖</button>
+      <button class="submit" type="submit" {{ '' if depth_ready else 'disabled' }}>▶ 產生深度/法向量圖</button>
     </form>
 
     <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">

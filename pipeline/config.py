@@ -39,15 +39,6 @@ class Settings(BaseSettings):
         validation_alias="COLMAP_PANEL_BACKENDS",
     )
 
-    # --- depth (Depth Anything) ---
-    # The depth tool runs tools/depth_anything3_infer.py inside its OWN conda env
-    # (needs torch); the panel never imports torch. Both are per-machine config.
-    depth_conda_env: str = Field("da2", validation_alias="DEPTH_CONDA_ENV")
-    # Default to Depth Anything V2 (transformers interface). For Depth Anything 3,
-    # install its package and set DEPTH_MODEL to a DA3 id (da3mono-large, …).
-    depth_model: str = Field(
-        "depth-anything/Depth-Anything-V2-Large-hf", validation_alias="DEPTH_MODEL")
-
     # --- storage / browsing ---
     data_dir: Path = Field(
         default_factory=lambda: Path.home() / ".recon_studio",

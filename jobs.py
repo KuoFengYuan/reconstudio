@@ -287,31 +287,30 @@ def _parse_gcs(job: Job, line: str) -> None:
         job.current_stage = "done"
 
 
-# --- depth parsing ---------------------------------------------------------- #
-# The infer script prints a header "[depth] model=… images=N out=…", one
-# "[depth] i/N <rel>" per image, and a final "[depth] done: <out> (k written, …)".
-_DE_HEAD = re.compile(r"\[depth\] model=\S+ device=(\S+) images=(\d+) out=(.+)")
-_DE_CUR = re.compile(r"\[depth\] (\d+)/(\d+)\s")
-_DE_DONE = re.compile(r"\[depth\] done: (.+?) \((\d+) written, (\d+) skipped, (\d+) failed\)")
+# --- depth/normal parsing ---------------------------------------------------- #
+# LichtFeld-Studio's `preprocess` subcommand: since stdout isn't a tty when piped
+# from a subprocess, it skips its interactive progress bar and prints plain
+# "Images: N under <dir>", one "[i/N] <path>" per image, and "Done. processed=N
+# skipped=K" at the end (see src/preprocessing/preprocess.cpp).
+_DE_IMAGES = re.compile(r"^Images: (\d+) under (.+)$")
+_DE_CUR = re.compile(r"^\[(\d+)/(\d+)\] (.+)$")
+_DE_DONE = re.compile(r"^Done\. processed=(\d+) skipped=(\d+)$")
 
 
 def _parse_depth(job: Job, line: str) -> None:
-    m = _DE_HEAD.search(line)
+    m = _DE_IMAGES.match(line)
     if m:
-        job.meta["device"] = m.group(1)
-        job.meta["total"] = int(m.group(2))
-        job.meta["out_dir"] = m.group(3).strip()
+        job.meta["total"] = int(m.group(1))
+        job.meta["out_dir"] = m.group(2).strip()
         job.meta["phase"] = "推論中"
         job.current_stage = "depth"
-    m = _DE_CUR.search(line)
+    m = _DE_CUR.match(line)
     if m:
         job.meta["cur"], job.meta["total"] = int(m.group(1)), int(m.group(2))
-    m = _DE_DONE.search(line)
+    m = _DE_DONE.match(line)
     if m:
-        job.meta["out_dir"] = m.group(1).strip()
-        job.meta["written"] = int(m.group(2))
-        job.meta["skipped"] = int(m.group(3))
-        job.meta["failed"] = int(m.group(4))
+        job.meta["written"] = int(m.group(1))
+        job.meta["skipped"] = int(m.group(2))
         job.meta["phase"] = "完成"
         job.current_stage = "done"
 
