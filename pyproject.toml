@@ -31,10 +31,10 @@ extend-exclude = ["static", "tools/colmap_read_write_model.py", "pipeline/vendor
 [tool.ruff.lint]
 # E/F = pyflakes+pycodestyle, I = import sort, UP = pyupgrade, B = bugbear, SIM = simplify.
 select = ["E", "F", "I", "UP", "B", "SIM"]
-# E501: line length is the formatter's job. SIM105/115: the codebase has deliberate
-# defensive try/except-pass and long-lived log file handles (Runner) where the
-# "simpler" rewrite is not actually clearer.
-ignore = ["E501", "SIM105", "SIM115"]
+# E501: line length is the formatter's job. SIM102/105/115: the codebase has deliberate
+# nested guard clauses, defensive try/except-pass, and long-lived log file handles
+# (Runner) where the "simpler" rewrite is not actually clearer.
+ignore = ["E501", "SIM102", "SIM105", "SIM115"]
 
 # --- type checking (lenient to start; tighten module-by-module later) ------ #
 [tool.mypy]

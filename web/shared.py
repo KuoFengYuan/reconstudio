@@ -55,9 +55,10 @@ COLMAP_DEFAULTS = {
     "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
     # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
     "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
-    # GPU bundle adjustment (incremental / pose_prior) — on by default
+    # GPU bundle adjustment (incremental / pose_prior / hierarchical) — on by default.
+    # global_mapper isn't in this set: its Ceres BA defaults to GPU on its own.
     "MAPPER_BA_GPU": "1",
-    # BA solver backend (incremental / pose_prior): "ceres" or "caspar" (GPU, ~1-2 orders
+    # BA solver backend (all four mappers): "ceres" or "caspar" (GPU, ~1-2 orders
     # faster; needs SIMPLE_RADIAL / PINHOLE cameras)
     "BA_BACKEND": "ceres",
     # Which GPU(s) all COLMAP stages use (CUDA_VISIBLE_DEVICES). "" = every GPU (default);
