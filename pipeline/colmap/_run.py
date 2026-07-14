@@ -185,11 +185,10 @@ def _setup(p: dict, r: Runner) -> _Ctx:
     ba_backend = str(d["ba_backend"]).lower()
     if ba_backend not in ("ceres", "caspar"):
         raise ValueError(f"BA_BACKEND must be 'ceres' or 'caspar' (got: {ba_backend})")
-    if ba_backend == "caspar":
-        if str(d["camera_model"]).upper() not in ("SIMPLE_RADIAL", "PINHOLE"):
-            r.log(f"WARNING: Caspar only supports SIMPLE_RADIAL / PINHOLE cameras, but "
-                  f"CAMERA_MODEL={d['camera_model']} — Caspar will skip every image "
-                  f"(no BA happens). Use SIMPLE_RADIAL or PINHOLE.")
+    if ba_backend == "caspar" and str(d["camera_model"]).upper() not in ("SIMPLE_RADIAL", "PINHOLE"):
+        r.log(f"WARNING: Caspar only supports SIMPLE_RADIAL / PINHOLE cameras, but "
+              f"CAMERA_MODEL={d['camera_model']} — Caspar will skip every image "
+              f"(no BA happens). Use SIMPLE_RADIAL or PINHOLE.")
     if matcher not in ("sequential", "vocab", "both", "spatial", "custom"):
         raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', 'spatial', or "
                          f"'custom' (got: {matcher})")
