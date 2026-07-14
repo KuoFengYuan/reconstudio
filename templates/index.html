@@ -488,19 +488,23 @@
             <label>HM_NUM_WORKERS（平行重建子模型的 worker 數;-1=自動)</label>
             <input name="HM_NUM_WORKERS" value="{{ colmap_defaults.HM_NUM_WORKERS }}" placeholder="-1">
           </div>
-          <!-- GPU BA:incremental / pose_prior 適用(global_mapper / hierarchical_mapper 不掛) -->
-          <label class="chk pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
+          <!-- GPU BA (--Mapper.ba_use_gpu):incremental / pose_prior / hierarchical 適用。
+               global_mapper 不掛這個字首,它自己的 Ceres BA 預設就是 GPU
+               (--GlobalMapper.ba_ceres_use_gpu=1),不需要這顆開關。 -->
+          <label class="chk pgrp" data-p="incremental pose_prior hierarchical" style="margin-top:10px;">
             <input type="checkbox" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}>
             <span>GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）</span>
           </label>
-          <!-- BA backend:incremental / pose_prior 適用 -->
-          <div class="pgrp" data-p="incremental pose_prior" style="margin-top:10px;">
+          <!-- BA backend:四種 mapper 都適用(global 用 --GlobalMapper.ba_backend,
+               其餘三種用 --Mapper.ba_*_backend;COLMAP main@2fe2b41 起 global/hierarchical
+               也能選 CASPAR 了) -->
+          <div class="pgrp" data-p="incremental pose_prior global hierarchical" style="margin-top:10px;">
             <label>BA 後端（BA_BACKEND）</label>
             <select name="BA_BACKEND">
-              <option value="ceres" {{ 'selected' if colmap_defaults.BA_BACKEND=='ceres' }}>ceres（預設;搭配上方 GPU BA 用 cuDSS）</option>
+              <option value="ceres" {{ 'selected' if colmap_defaults.BA_BACKEND=='ceres' }}>ceres（預設;incremental/pose_prior/hierarchical 搭配上方 GPU BA 用 cuDSS,global 本身預設已是 GPU）</option>
               <option value="caspar" {{ 'selected' if colmap_defaults.BA_BACKEND=='caspar' }}>caspar（GPU,快約 1~2 個數量級;需 SIMPLE_RADIAL/PINHOLE 相機）</option>
             </select>
-            <div class="hint">caspar = COLMAP 4.1.0 的 SymForce GPU 解算器,接管 local+global BA。<b>相機模型必須是 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過所有影像、不做 BA。選 caspar 時上方 GPU BA 勾選會被忽略。</div>
+            <div class="hint">caspar = COLMAP 的 SymForce GPU 解算器,接管 local+global BA(四種 mapper 都吃)。<b>相機模型必須是 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過所有影像、不做 BA。incremental/pose_prior/hierarchical 選 caspar 時上方 GPU BA 勾選會被忽略。</div>
           </div>
         </div>
       </details>

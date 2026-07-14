@@ -51,10 +51,12 @@ COLMAP_DEFAULTS = {
     "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
-    # BA solver backend for the incremental / pose_prior mappers: "ceres" (default; the
-    # ba_gpu flag above then chooses CPU vs cuDSS-GPU Ceres) or "caspar" (COLMAP 4.1.0's
-    # SymForce GPU solver, ~1-2 orders of magnitude faster — but only supports the
-    # SIMPLE_RADIAL / PINHOLE camera models; on any other model Caspar skips every image).
+    # BA solver backend: "ceres" (default; the ba_gpu flag above then chooses CPU vs
+    # cuDSS-GPU Ceres for incremental/pose_prior) or "caspar" (COLMAP's SymForce GPU
+    # solver, ~1-2 orders of magnitude faster — but only supports the SIMPLE_RADIAL /
+    # PINHOLE camera models; on any other model Caspar skips every image). Applies to
+    # incremental / pose_prior / global / hierarchical (all four take --Mapper.ba_*_backend
+    # or --GlobalMapper.ba_backend since COLMAP main@2fe2b41 / #4484).
     "ba_backend": "ceres",
     # Which GPU(s) COLMAP uses across ALL stages (extract / match / mapper / BA / Caspar
     # / aligner), applied via CUDA_VISIBLE_DEVICES. "" = COLMAP default (-1 = every GPU).
@@ -184,9 +186,6 @@ def _setup(p: dict, r: Runner) -> _Ctx:
     if ba_backend not in ("ceres", "caspar"):
         raise ValueError(f"BA_BACKEND must be 'ceres' or 'caspar' (got: {ba_backend})")
     if ba_backend == "caspar":
-        if mapper not in ("incremental", "pose_prior"):
-            r.log(f"NOTE: BA_BACKEND=caspar only affects the incremental / pose_prior mappers; "
-                  f"MAPPER={mapper} ignores it (global / hierarchical are Ceres-only).")
         if str(d["camera_model"]).upper() not in ("SIMPLE_RADIAL", "PINHOLE"):
             r.log(f"WARNING: Caspar only supports SIMPLE_RADIAL / PINHOLE cameras, but "
                   f"CAMERA_MODEL={d['camera_model']} — Caspar will skip every image "
@@ -235,7 +234,7 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         gps_align=bool(d["gps_align"]), gps_align_type=str(d["gps_align_type"]),
         gps_align_max_error=str(d["gps_align_max_error"]),
         ba_gpu=bool(d["ba_gpu"]),   # GPU bundle adjustment (incremental / pose_prior only)
-        ba_backend=str(d["ba_backend"]).lower(),  # "ceres" or "caspar" (incremental / pose_prior)
+        ba_backend=str(d["ba_backend"]).lower(),  # "ceres" or "caspar" (all mapper modes)
         gpu=gpu,                    # CUDA_VISIBLE_DEVICES for all COLMAP stages ("" = all)
         # h3dgs large-scene method options
         focal_factor=str(d["focal_factor"]).strip(),
@@ -489,6 +488,12 @@ def _stage_mapper(c: _Ctx) -> None:
             extra: list[str] = []
             if c.mapper == "global":
                 sub, label = "global_mapper", "colmap global_mapper"
+                if c.ba_backend == "caspar":
+                    # Caspar GPU solver, exposed to global_mapper since COLMAP main@2fe2b41
+                    # (#4484). Same SIMPLE_RADIAL/PINHOLE-only restriction as below (warned
+                    # about in _setup); Caspar always runs on GPU, no separate toggle needed.
+                    extra = ["--GlobalMapper.ba_backend", "CASPAR"]
+                    label += " [Caspar GPU BA]"
             elif c.mapper == "pose_prior":
                 # GPS priors folded into BA -> the output is already georeferenced
                 # and metric (model_aligner is then redundant). overwrite_priors_
@@ -507,6 +512,8 @@ def _stage_mapper(c: _Ctx) -> None:
                 # only when set, else COLMAP's defaults (500 / 50 / auto) apply.
                 sub, label = "hierarchical_mapper", "colmap hierarchical_mapper"
                 extra = ["--Mapper.ba_global_function_tolerance", "0.000001"]
+                # hierarchical_mapper reconstructs each cluster with the incremental
+                # pipeline, so it inherits the same --Mapper.ba_*_backend flags below.
                 if c.hm_leaf:
                     extra += ["--leaf_max_num_images", c.hm_leaf]
                 if c.hm_overlap:
@@ -515,15 +522,15 @@ def _stage_mapper(c: _Ctx) -> None:
                     extra += ["--num_workers", c.hm_workers]
             else:
                 sub, label = "mapper", "colmap mapper (incremental)"
-            # GPU bundle adjustment: BA dominates incremental/pose_prior runtime, so
-            # offloading it to CUDA is a big speedup (global_mapper / hierarchical_mapper
-            # don't take this flag — they'd reject it — so only the two incremental
-            # mappers get it).
-            if c.mapper in ("incremental", "pose_prior"):
+            # GPU bundle adjustment: BA dominates incremental/pose_prior/hierarchical
+            # runtime, so offloading it to CUDA is a big speedup. global_mapper uses its
+            # own --GlobalMapper.ba_backend switch (handled above) instead of these
+            # --Mapper.ba_* flags, which it doesn't take.
+            if c.mapper in ("incremental", "pose_prior", "hierarchical"):
                 if c.ba_backend == "caspar":
-                    # Caspar GPU solver (COLMAP 4.1.0): ~1-2 orders of magnitude faster than
-                    # Ceres for the repeated local/global BA. Requires SIMPLE_RADIAL/PINHOLE
-                    # cameras (warned about in _setup); takes over both BA stages.
+                    # Caspar GPU solver: ~1-2 orders of magnitude faster than Ceres for the
+                    # repeated local/global BA. Requires SIMPLE_RADIAL/PINHOLE cameras
+                    # (warned about in _setup); takes over both BA stages.
                     extra += ["--Mapper.ba_local_backend", "CASPAR",
                               "--Mapper.ba_global_backend", "CASPAR"]
                     label += " [Caspar GPU BA]"
