@@ -8,7 +8,7 @@ shell scripts' format so the panel's progress parsers keep working.
 from .backends import available_backends, build_cli, doctor, get_backend, list_gpus  # noqa: F401
 from .colmap import COLMAP_DEFAULTS, COLMAP_STAGES, run_colmap  # noqa: F401
 from .config import settings  # noqa: F401
-from .depth import DEPTH_DEFAULTS, depth_ready, run_depth  # noqa: F401
+from .depth import DEPTH_DEFAULTS, depth_ready, resolve_dataset, run_depth  # noqa: F401
 from .frames import FRAMES_DEFAULTS, run_frames  # noqa: F401
 from .gcs import (  # noqa: F401
     default_dest,

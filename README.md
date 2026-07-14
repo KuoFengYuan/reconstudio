@@ -78,24 +78,13 @@ LichtFeld 的兩個 backend(MR-NF / iGS+)已內建在 `pipeline/backends.py`,只
 - **☁️ GCS 雲端搬檔**:需 Google Cloud SDK + 登入,見[三、進階 — GCS 設定](#gcs-設定一次性)。
 - **🧹 SuperSplat(去背 + 點雲檢視)**:**免裝** — `run.sh` 啟動時自動同步到最新版
   (背景跑、不擋啟動;離線就沿用現有版本)。詳見[三、進階](#supersplat-自動更新)。
-- **🌊 深度(Depth Anything,選用)** — 為照片產生深度圖,給 LichtFeld 訓練做深度監督。
-  跟訓練器一樣跑在**自己的 conda env**(面板本體不含 torch)。預設用 **Depth Anything V2**
-  (走 `transformers`):
+- **🌊 深度/法向量(LichtFeld preprocess,選用)** — 為照片產生深度圖和/或法向量圖,給 LichtFeld
+  訓練做深度/法向量監督。**免額外裝 conda env** — 直接跑 LichtFeld-Studio 自己編譯出來的
+  `preprocess` 子指令(跟 lichtfeld-mrnf/igs+ 訓練 backend 共用同一份 binary),模型是內建的
+  MoGe-2 ONNX(深度+法向量聯合模型),第一次執行會自動下載,不需要 torch。
 
-  ```bash
-  conda create -n da2 python=3.10 -y && conda activate da2
-  pip install torch torchvision transformers pillow
-  ```
-
-  > **要用 Depth Anything 3** 改裝它的 repo(無 PyPI 套件),並把 `DEPTH_MODEL` 設為 `da3mono-large`:
-  > ```bash
-  > pip install xformers "torch>=2" torchvision pillow
-  > git clone https://github.com/ByteDance-Seed/Depth-Anything-3 && pip install -e Depth-Anything-3
-  > ```
-
-  env 名與模型在 `local.env` 設(`DEPTH_CONDA_ENV` / `DEPTH_MODEL`,見[三、進階 — 環境變數](#環境變數))。
-  模型首次執行會自動下載到 `~/.cache/huggingface`。裝好開 `/doctor` 會看到「深度生成」變綠燈。
-  用法見[二、使用 — 🌊 深度](#-深度影像--深度圖--訓練深度監督)。
+  只要 `../LichtFeld-Studio` 建置好(見上面「三、建置」),開 `/doctor` 就會看到「深度/法向量生成」
+  變綠燈。用法見[二、使用 — 🌊 深度](#-深度影像--深度圖法向量圖--訓練深度法向量監督)。
 
 ## 5. 這台機器的設定(選用)
 
@@ -132,7 +121,7 @@ cp backends.example.json backends.json  # 後端 env / repo / exec
 | 功能 | COLMAP | 照片算相機位姿 + 稀疏點雲 | 照片 → workspace(sparse + 去畸變 dense) |
 | 功能 | 訓練 | 3DGS 訓練(可開深度監督) | COLMAP workspace → 3DGS 模型 |
 | 功能 | Mesh | 模型抽三角網格,可量實際尺寸 | 3DGS 模型 → `tsdf_post.ply`(+mm 版) |
-| 工具 | 🌊 深度 | 為照片產生深度圖(Depth Anything) | 影像夾 → `depth/`(8-bit PNG,同名同尺寸) |
+| 工具 | 🌊 深度 | 為照片產生深度/法向量圖(LichtFeld preprocess) | 影像夾 → `depth/`、`normals/`(同名同尺寸) |
 | 工具 | 🧱 分塊 | 大場景切成可獨立訓練的子塊 | COLMAP workspace → 每塊一夾 |
 | 檢視 | 👁 Mesh Viewer | 看任意 mesh 檔(不綁 job) | `.ply/.obj/.stl/.glb`,server 或本機檔 |
 | 檢視 | ✨ SuperSplat | 看任意點雲 / 3DGS(不綁 job) | `.ply/.splat/.ksplat/.spz/.sog` |
@@ -174,16 +163,23 @@ cp backends.example.json backends.json  # 後端 env / repo / exec
 > 訓練只吃**去畸變(PINHOLE)**模型——接錯會在開跑前直接報錯,不會白跑。
 > 原 COLMAP workspace 完全不動(symlink 進去)。
 
-### 開啟深度監督(depth loss)
+### 開啟深度/法向量監督(depth / normal loss)
 
-LichtFeld backend(MR-NF / iGS+)的參數區有三個深度選項,先用「🌊 深度」產生深度圖後即可開啟:
+LichtFeld backend(MR-NF / iGS+)的參數區有深度與法向量兩組選項,先用「🌊 深度」產生對應
+的圖後即可開啟:
 
 - **深度損失 (use-depth-loss)** — 勾選才啟用(預設關)。
-- **深度損失模式** — `adaptive-warped-l1`(**作者推薦,預設**,正規化反深度 L1)或 `pearson`(尺度不變相關)。
+- **深度損失模式** — `ssi`(**自動偵測,預設,建議**)、`ssi-disparity`、`ssi-depth`(強制指定
+  先驗是反深度或正深度)。
 - **深度損失權重** — 預設 `2.0`。
+- **法向量損失 (use-normal-loss)** — 勾選才啟用(預設關)。
+- **法向量先驗權重** / **深度-法向量一致性權重** — 皆預設 `0.05`。
+- **扁平化權重** — 預設 `1.0`(法向量監督期間讓高斯最短軸攤平)。
+- **法向量先驗座標系** — `auto`(**自動偵測,建議**)、`camera-opencv`、`camera-opengl`、`world`。
 
-> 前提:`depth/` 要和**這次訓練實際用的 `images/` 同層、同名同尺寸**。LichtFeld 看到
-> `--use-depth-loss` 會自動掃 `<資料夾>/depth` 對應(不用手動指路徑)。
+> 前提:`depth/`、`normals/` 要和**這次訓練實際用的 `images/` 同層、同名同尺寸**。LichtFeld 看到
+> `--use-depth-loss` / `--use-normal-loss` 會自動掃 `<資料夾>/depth`、`<資料夾>/normals` 對應
+> (不用手動指路徑)。
 
 ### 開啟 16-bit 色彩訓練(HDR 素材)
 
@@ -194,26 +190,27 @@ LichtFeld backend(MR-NF / iGS+)參數區有 **16-bit 色彩訓練**(`--use-16bit
 - 開啟後 LichtFeld 會自動用**無損 JPEG2000** 做磁碟快取(不用另外設定),換取更完整的亮部/
   暗部細節,代價是快取檔案較大、稍慢。
 
-## 🌊 深度(影像 → 深度圖 → 訓練深度監督)
+## 🌊 深度(影像 → 深度圖/法向量圖 → 訓練深度/法向量監督)
 
-為每張照片產生深度圖,輸出成 **LichtFeld 格式的 `depth/` 資料夾**(8-bit 灰階 PNG、與來源
-**同名同尺寸**),給訓練的[深度監督](#開啟深度監督depth-loss)讀取。需先裝好深度 env(見
-[一、安裝 — 選用元件](#4-選用元件))。
+為每張照片產生深度圖和/或法向量圖,輸出成 **LichtFeld 格式的 `depth/`、`normals/` 資料夾**
+(與來源**同名同尺寸**的 PNG),給訓練的[深度/法向量監督](#開啟深度法向量監督depth--normal-loss)
+讀取。用 LichtFeld-Studio 自己編譯出來的 `preprocess` 子指令(跟訓練 backend 共用同一份
+binary),模型是內建 MoGe-2 ONNX,**免裝 conda env / torch**,第一次執行自動下載。
 
-1. **`images`** — 選照片資料夾(或含 `images/` 的 COLMAP workspace)。多相機 / 巢狀結構
-   (如 `backward/ forward/ nadir/ …`)會**遞迴**處理並保留子目錄(預設開)。
-2. **`out_dir`** — 留空 = 輸出到 `images` 的同層 `depth/`(建議,LichtFeld 才找得到)。
-3. **`model`** — 預設 `depth-anything/Depth-Anything-V2-Large-hf`(V2);裝了 DA3 可改
-   `da3mono-large`(相對)/ `da3metric-large`(公制)。
-4. 進階:**遞迴子資料夾**、**覆蓋已存在**(預設略過、可續跑)、**反轉**(深度損失尺度/方向
-   不變,通常免勾)。
-5. **▶ 產生深度圖** → 右側顯示進度與「已產生 N」。
+1. **`images`** — 選照片資料夾(或含 `images/` 的 COLMAP workspace)。
+2. **產生內容** — `both`(深度+法向量,**預設**)、`depth`(只有深度)、`normal`(只有法向量)。
+3. 輸出固定在資料集根目錄下的 `depth/`、`normals/`(不可自訂位置),跟 LichtFeld 自動掃描
+   的路徑一致。
+4. 進階:**model**(自訂 ONNX 模型路徑,留空 = 自動下載官方 MoGe-2 ViT-B)、**max-side**
+   (推論最長邊,留空用內建預設 518)、**bit-depth**(輸出 PNG 位元深度,留空用內建預設
+   16——8-bit 深度先驗量化較明顯)、**強制 CPU**、**覆蓋已存在**(預設略過、可續跑)。
+5. **▶ 產生深度/法向量圖** → 右側顯示進度。
 
-> ⚠️ **像素要對齊**:深度圖是逐像素對應影像的,所以 `images` 要指到**和訓練 source 相同的
-> 影像**。若用 COLMAP 去畸變後的 workspace 訓練,就對那個去畸變的 `images/` 產生深度;
-> 若直接用原圖訓練,就對原圖產生。產生後同層會多一個 `depth/`,**原圖完全不動**。
+> ⚠️ **像素要對齊**:深度/法向量圖是逐像素對應影像的,所以 `images` 要指到**和訓練 source
+> 相同的影像**。若用 COLMAP 去畸變後的 workspace 訓練,就對那個去畸變的 `images/` 產生;
+> 若直接用原圖訓練,就對原圖產生。產生後同層會多 `depth/`、`normals/`,**原圖完全不動**。
 
-接著到[訓練](#訓練重建--3dgs-模型)勾「深度損失」即可。
+接著到[訓練](#訓練重建--3dgs-模型)勾「深度損失」/「法向量損失」即可。
 
 ## 🧹 去背(選用)
 
@@ -278,8 +275,6 @@ LichtFeld 則直接下載乾淨點雲。
 | `RECON_STUDIO_DEST_ROOT` | `/` | GCS 下載落地根目錄 |
 | `RECON_STUDIO_GCS_ROOT` | 空(列全部 bucket) | GCS 瀏覽器起始 `gs://` 前綴 |
 | `CONDA_ROOT` / `CONDA_ENV` | 自動偵測 / `rec` | conda 不在標準位置時 |
-| `DEPTH_CONDA_ENV` | `da2` | 🌊 深度工具的 conda env(裝 torch + 模型) |
-| `DEPTH_MODEL` | `depth-anything/Depth-Anything-V2-Large-hf` | 深度模型 id / 路徑;用 DA3 改 `da3mono-large` |
 | `FFMPEG_HWACCEL` | `cuda` | 設 `none` 強制 CPU 解碼 |
 | `COLMAP_PANEL_MAX_JOBS` | `4` | 同時跑幾個 job |
 | `COLMAP_PANEL_RESIZE_WORKERS` | CPU 數(≤32) | 縮圖並行 ffmpeg 數 |

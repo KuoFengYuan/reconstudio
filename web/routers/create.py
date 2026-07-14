@@ -14,7 +14,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from jobs import COLMAP_STAGES, Job, manager, new_id
-from pipeline import build_cli, default_dest, gcs_multi_plan, get_backend
+from pipeline import build_cli, default_dest, gcs_multi_plan, get_backend, resolve_dataset
 from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
@@ -185,30 +185,36 @@ async def create_frames(request: Request):
 
 @router.post("/ui/depth", response_class=HTMLResponse)
 async def create_depth(request: Request):
-    """Depth Anything → a LichtFeld-style depth/ folder next to images/.
-    Non-destructive: only creates the depth folder; originals are untouched."""
+    """LichtFeld-Studio `preprocess` -> depth/ and/or normals/ folders next to
+    images/. Non-destructive: only creates those folders; originals untouched."""
     form = dict(await request.form())
     images = (form.get("images") or "").strip().rstrip("/")
-    out = (form.get("out_dir") or "").strip().rstrip("/")
+    mode = (form.get("mode") or "both").strip()
     model = (form.get("model") or "").strip()
     gpu = (form.get("gpu") or "").strip()
     try:
         if not Path(images).is_dir():
             raise ValueError(f"images 不是資料夾: {images!r}")
-        if not model:
-            raise ValueError("需要指定深度模型 id（model）")
-        params = {"images": images, "out_dir": out, "model": model, "gpu": gpu,
-                  "recurse": bool(form.get("recurse")),
-                  "invert": bool(form.get("invert")),
+        if mode not in ("depth", "normal", "both"):
+            raise ValueError(f"mode 必須是 depth/normal/both: {mode!r}")
+        params = {"images": images, "mode": mode, "model": model, "gpu": gpu,
+                  "max_side": (form.get("max_side") or "").strip(),
+                  "bit_depth": (form.get("bit_depth") or "").strip(),
+                  "cpu": bool(form.get("cpu")),
                   "overwrite": bool(form.get("overwrite"))}
     except ValueError as exc:
         return _page(request, "_error.html", message=str(exc))
 
-    dest = out or str(Path(images).parent / "depth")
+    dataset_root, _ = resolve_dataset(Path(images))
+    dests = []
+    if mode in ("depth", "both"):
+        dests.append(str(dataset_root / "depth"))
+    if mode in ("normal", "both"):
+        dests.append(str(dataset_root / "normals"))
     job = Job(id=new_id(), kind="depth",
-              title=f"🌊 深度 · {Path(images).name}",
-              subtitle=f"{images}  →  {dest}",
-              params=params, meta={"images": images, "out_dir": dest})
+              title=f"🌊 深度/法向量({mode}) · {Path(images).name}",
+              subtitle=f"{images}  →  {' + '.join(dests)}",
+              params=params, meta={"images": images, "mode": mode})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 

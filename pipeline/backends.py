@@ -174,10 +174,28 @@ BUILTIN_BACKENDS: dict[str, dict] = {
              "label": "深度損失 (use-depth-loss)",
              "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。"},
             {"key": "depth_loss_mode", "flag": "--depth-loss-mode", "type": "select",
-             "options": ["adaptive-warped-l1", "pearson"], "default": "adaptive-warped-l1", "label": "深度損失模式",
-             "hint": "作者推薦 adaptive-warped-l1(正規化反深度 L1);pearson 為尺度不變相關。僅在勾選深度損失時生效。"},
+             "options": ["ssi", "ssi-disparity", "ssi-depth"], "default": "ssi", "label": "深度損失模式",
+             "hint": "深度先驗慣例:ssi=自動偵測(預設,建議);ssi-disparity/ssi-depth=強制指定先驗是反深度或正深度。"
+                     "僅在勾選深度損失時生效。"},
             {"key": "depth_loss_weight", "flag": "--depth-loss-weight", "type": "float", "default": "2.0",
              "label": "深度損失權重", "hint": "深度監督權重(LichtFeld 預設 2.0)。僅在勾選深度損失時生效。"},
+            {"key": "use_normal_loss", "flag": "--use-normal-loss", "type": "bool", "default": False,
+             "label": "法向量損失 (use-normal-loss)",
+             "hint": "讀取資料集 normal/ 或 normals/ 法向量圖做監督(需與 images/ 同層、相同檔名,"
+                     "PNG/TIFF,RGB 編碼 [-1,1] 法向量)。目前「🌊 深度」工具不產生法向量,"
+                     "需另外用 LichtFeld 自帶的 preprocess 指令(--mode normals/both)產生。預設關。"},
+            {"key": "normal_loss_weight", "flag": "--normal-loss-weight", "type": "float", "default": "0.05",
+             "label": "法向量先驗權重", "hint": "渲染法向量對法向量先驗的 cosine 監督權重。僅在勾選法向量損失時生效。"},
+            {"key": "normal_consistency_weight", "flag": "--normal-consistency-weight", "type": "float",
+             "default": "0.05", "label": "深度-法向量一致性權重",
+             "hint": "渲染法向量與渲染深度反推法向量的一致性權重。僅在勾選法向量損失時生效。"},
+            {"key": "normal_flatten_weight", "flag": "--normal-flatten-weight", "type": "float",
+             "default": "1.0", "label": "扁平化權重",
+             "hint": "法向量監督期間,讓高斯最短軸 scale 攤平的權重。僅在勾選法向量損失時生效。"},
+            {"key": "normal_loss_space", "flag": "--normal-loss-space", "type": "select",
+             "options": ["auto", "camera-opencv", "camera-opengl", "world"], "default": "auto",
+             "label": "法向量先驗座標系",
+             "hint": "auto=自動偵測(建議);其餘為強制指定先驗座標慣例。僅在勾選法向量損失時生效。"},
         ],
     },
     "lichtfeld-igs+": {
@@ -213,10 +231,28 @@ BUILTIN_BACKENDS: dict[str, dict] = {
              "label": "深度損失 (use-depth-loss)",
              "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。"},
             {"key": "depth_loss_mode", "flag": "--depth-loss-mode", "type": "select",
-             "options": ["adaptive-warped-l1", "pearson"], "default": "adaptive-warped-l1", "label": "深度損失模式",
-             "hint": "作者推薦 adaptive-warped-l1(正規化反深度 L1);pearson 為尺度不變相關。僅在勾選深度損失時生效。"},
+             "options": ["ssi", "ssi-disparity", "ssi-depth"], "default": "ssi", "label": "深度損失模式",
+             "hint": "深度先驗慣例:ssi=自動偵測(預設,建議);ssi-disparity/ssi-depth=強制指定先驗是反深度或正深度。"
+                     "僅在勾選深度損失時生效。"},
             {"key": "depth_loss_weight", "flag": "--depth-loss-weight", "type": "float", "default": "2.0",
              "label": "深度損失權重", "hint": "深度監督權重(LichtFeld 預設 2.0)。僅在勾選深度損失時生效。"},
+            {"key": "use_normal_loss", "flag": "--use-normal-loss", "type": "bool", "default": False,
+             "label": "法向量損失 (use-normal-loss)",
+             "hint": "讀取資料集 normal/ 或 normals/ 法向量圖做監督(需與 images/ 同層、相同檔名,"
+                     "PNG/TIFF,RGB 編碼 [-1,1] 法向量)。目前「🌊 深度」工具不產生法向量,"
+                     "需另外用 LichtFeld 自帶的 preprocess 指令(--mode normals/both)產生。預設關。"},
+            {"key": "normal_loss_weight", "flag": "--normal-loss-weight", "type": "float", "default": "0.05",
+             "label": "法向量先驗權重", "hint": "渲染法向量對法向量先驗的 cosine 監督權重。僅在勾選法向量損失時生效。"},
+            {"key": "normal_consistency_weight", "flag": "--normal-consistency-weight", "type": "float",
+             "default": "0.05", "label": "深度-法向量一致性權重",
+             "hint": "渲染法向量與渲染深度反推法向量的一致性權重。僅在勾選法向量損失時生效。"},
+            {"key": "normal_flatten_weight", "flag": "--normal-flatten-weight", "type": "float",
+             "default": "1.0", "label": "扁平化權重",
+             "hint": "法向量監督期間,讓高斯最短軸 scale 攤平的權重。僅在勾選法向量損失時生效。"},
+            {"key": "normal_loss_space", "flag": "--normal-loss-space", "type": "select",
+             "options": ["auto", "camera-opencv", "camera-opengl", "world"], "default": "auto",
+             "label": "法向量先驗座標系",
+             "hint": "auto=自動偵測(建議);其餘為強制指定先驗座標慣例。僅在勾選法向量損失時生效。"},
         ],
     },
 }
@@ -459,19 +495,13 @@ def doctor(deep: bool = True) -> dict:
             item["probe"] = _probe_env(py, spec.get("probe_imports", ["torch"]))
         report["backends"][name] = item
 
-    # Depth Anything tool: its own conda env (DEPTH_CONDA_ENV) + panel-owned script.
-    envs = conda_envs_dir()
-    dpy = (envs / settings.depth_conda_env / "bin" / "python") if envs else None
-    dpy = dpy if (dpy and dpy.is_file()) else None
-    script_ok = (BASE / "tools" / "depth_anything_infer.py").is_file()
-    depth = {
-        "conda_env": settings.depth_conda_env,
-        "env_python": str(dpy) if dpy else None,
-        "model": settings.depth_model,
-        "script_ok": script_ok,
-        "ready": bool(dpy) and script_ok,
+    # Depth/normal tool: LichtFeld-Studio's own `preprocess` subcommand (MoGe-2
+    # ONNX, self-downloading) — same compiled binary as the lichtfeld-* trainers,
+    # no separate conda env.
+    lichtfeld_exe = binary_exec({"exec": BUILTIN_BACKENDS["lichtfeld-mrnf"]["exec"]})
+    report["depth"] = {
+        "exec": str(Path(BUILTIN_BACKENDS["lichtfeld-mrnf"]["exec"]).expanduser()),
+        "exec_ok": bool(lichtfeld_exe),
+        "ready": bool(lichtfeld_exe),
     }
-    if deep and dpy:
-        depth["probe"] = _probe_env(dpy, ["torch", "PIL"])
-    report["depth"] = depth
     return report

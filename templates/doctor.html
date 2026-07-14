@@ -68,34 +68,16 @@
 {% endfor %}
 
 {% if report.depth %}
-<h2>深度生成（Depth Anything）</h2>
+<h2>深度/法向量生成(LichtFeld preprocess)</h2>
 <div class="card">
-  <div style="font-weight:600">{{ yn(report.depth.ready) }} Depth Anything <span class="mut">(🌊 深度)</span></div>
+  <div style="font-weight:600">{{ yn(report.depth.ready) }} LichtFeld preprocess <span class="mut">(🌊 深度)</span></div>
   <table>
-    <tr><td class="mut">conda env</td><td><code>{{ report.depth.conda_env }}</code></td></tr>
-    <tr><td class="mut">env python</td><td>{{ yn(report.depth.env_python) }} <code>{{ report.depth.env_python or '找不到' }}</code></td></tr>
-    <tr><td class="mut">推論腳本</td><td>{{ yn(report.depth.script_ok) }} <code>tools/depth_anything_infer.py</code></td></tr>
-    <tr><td class="mut">model</td><td><code>{{ report.depth.model }}</code></td></tr>
-    {% if report.depth.probe %}
-      {% if report.depth.probe.error %}
-      <tr><td class="mut">probe</td><td class="err">{{ report.depth.probe.error }}</td></tr>
-      {% else %}
-      <tr><td class="mut">torch</td><td>
-        {% if report.depth.probe.torch %}<span class="ok">{{ report.depth.probe.torch }}</span>
-          · CUDA {{ '可用' if report.depth.probe.cuda else '不可用' }}{% if report.depth.probe.device %} · {{ report.depth.probe.device }}{% endif %}
-        {% else %}<span class="err">{{ report.depth.probe.torch_error or '無法載入 torch' }}</span>{% endif %}
-      </td></tr>
-      <tr><td class="mut">PIL</td><td>
-        {% if report.depth.probe.import_fail %}<span class="err">{{ report.depth.probe.import_fail }}</span>
-        {% else %}<span class="ok">import 成功</span>{% endif %}
-      </td></tr>
-      {% endif %}
-    {% endif %}
+    <tr><td class="mut">exec</td><td><code>{{ report.depth.exec }}</code></td></tr>
+    <tr><td class="mut">exec_ok</td><td>{{ yn(report.depth.exec_ok) }}</td></tr>
   </table>
   {% if not report.depth.ready %}
-  <div class="mut" style="margin-top:6px">建一個 env(預設 Depth Anything V2):
-    <code>conda create -n {{ report.depth.conda_env }} python=3.10 -y; pip install torch torchvision transformers pillow</code>。
-    若要用 DA3:改裝 <code>xformers torchvision</code> 並 clone ByteDance-Seed/Depth-Anything-3 後 <code>pip install -e .</code>,model 改 da3mono-large。</div>
+  <div class="mut" style="margin-top:6px">找不到編譯好的 LichtFeld-Studio binary(跟 lichtfeld-mrnf/igs+ 訓練 backend 共用同一份):
+    請先在 <code>../LichtFeld-Studio</code> 建置(見 README「安裝」)。MoGe-2 ONNX 模型會在第一次執行 preprocess 時自動下載,不需另外設定。</div>
   {% endif %}
 </div>
 {% endif %}

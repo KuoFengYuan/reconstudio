@@ -353,10 +353,9 @@ def test_gcs_full_flow():
 # --------------------------------------------------------------------------- #
 def test_depth_header_sets_total_and_out():
     job = _job("depth")
-    _parse_depth(job, "[depth] model=depth-anything/X device=cuda images=42 out=/data/scene/depth")
+    _parse_depth(job, "Images: 42 under /data/scene/images")
     assert job.meta["total"] == 42
-    assert job.meta["device"] == "cuda"
-    assert job.meta["out_dir"] == "/data/scene/depth"
+    assert job.meta["out_dir"] == "/data/scene/images"
     assert job.meta["phase"] == "推論中"
     assert job.current_stage == "depth"
 
@@ -364,8 +363,8 @@ def test_depth_header_sets_total_and_out():
 def test_depth_progress_updates_cur_total():
     job = _job("depth")
     _feed(_parse_depth, job, [
-        "[depth] 1/3 a.jpg",
-        "[depth] 2/3 sub/b.jpg",
+        "[1/3] a.jpg",
+        "[2/3] sub/b.jpg",
     ])
     assert job.meta["cur"] == 2
     assert job.meta["total"] == 3
@@ -373,11 +372,9 @@ def test_depth_progress_updates_cur_total():
 
 def test_depth_done_parses_counts_and_marks_done():
     job = _job("depth")
-    _parse_depth(job, "[depth] done: /data/scene/depth (40 written, 1 skipped, 1 failed)")
-    assert job.meta["out_dir"] == "/data/scene/depth"
+    _parse_depth(job, "Done. processed=40 skipped=1")
     assert job.meta["written"] == 40
     assert job.meta["skipped"] == 1
-    assert job.meta["failed"] == 1
     assert job.meta["phase"] == "完成"
     assert job.current_stage == "done"
 
