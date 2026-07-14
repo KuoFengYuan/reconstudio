@@ -41,24 +41,24 @@
   .col.left { border-right:1px solid var(--line); background:#101319; }
   #toggle-left { padding:3px 10px; font-size:15px; line-height:1; cursor:pointer; }
   /* fixed (always-visible) section */
-  fieldset { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 12px;
-             padding:12px 13px; background:var(--panel); }
+  fieldset { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 9px;
+             padding:10px 13px; background:var(--panel); }
   legend { color:var(--accent); font-size:11px; padding:0 6px; font-weight:600;
            text-transform:uppercase; letter-spacing:.07em; }
   /* collapsible advanced section */
-  details.grp { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 10px;
+  details.grp { border:1px solid var(--line); border-radius:var(--radius); margin:0 0 7px;
                 background:var(--panel); overflow:hidden; }
-  details.grp > summary { list-style:none; cursor:pointer; padding:10px 13px; color:var(--mut);
+  details.grp > summary { list-style:none; cursor:pointer; padding:8px 13px; color:var(--mut);
         font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.06em;
         user-select:none; display:flex; align-items:center; gap:7px; }
   details.grp > summary::-webkit-details-marker { display:none; }
   details.grp > summary::before { content:'▸'; font-size:9px; color:var(--mut); transition:transform .15s; }
   details.grp[open] > summary::before { transform:rotate(90deg); }
   details.grp > summary:hover { color:var(--fg); background:var(--panel2); }
-  details.grp .gbody { padding:2px 13px 13px; }
-  label { display:block; font-size:12px; color:var(--mut); margin:9px 0 3px; }
+  details.grp .gbody { padding:2px 13px 10px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:7px 0 2px; }
   input,select,textarea { width:100%; background:#0b0d12; border:1px solid var(--line);
-        color:var(--fg); border-radius:7px; padding:7px 9px; font:inherit; transition:border-color .12s,box-shadow .12s; }
+        color:var(--fg); border-radius:7px; padding:6px 9px; font:inherit; transition:border-color .12s,box-shadow .12s; }
   input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accent);
         box-shadow:0 0 0 3px rgba(76,139,245,.18); }
   /* Chrome paints autofilled fields (e.g. the remembered MATCHER/MAPPER/CAMERA_MODE
@@ -107,7 +107,7 @@
   .checks label { display:flex; align-items:center; gap:5px; margin:0; color:var(--fg); font-size:13px; }
   .checks input { width:auto; accent-color:var(--accent); }
   /* checkbox + long wrapping label kept inline (box left, text beside it) */
-  .chk { display:flex; align-items:flex-start; gap:6px; margin-top:8px; color:var(--fg); font-size:13px; }
+  .chk { display:flex; align-items:flex-start; gap:6px; margin-top:6px; color:var(--fg); font-size:13px; }
   .chk input { width:auto; flex:none; margin-top:2px; accent-color:var(--accent); }
   .chk > span { flex:1; }
   .submit { width:100%; padding:11px; font-weight:650; margin-top:6px; font-size:14px;
@@ -140,7 +140,7 @@
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
                 width:560px; max-height:70vh; overflow:auto; padding:15px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
-  .hint { color:var(--mut); font-size:11px; margin-top:3px; }
+  .hint { color:var(--mut); font-size:11px; line-height:1.4; margin-top:2px; }
   .empty { color:var(--mut); padding:30px; text-align:center; border:1px dashed var(--line2);
            border-radius:12px; background:var(--panel); }
 </style>
