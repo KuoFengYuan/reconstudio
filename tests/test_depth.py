@@ -4,8 +4,6 @@ resolution and run_depth's pre-flight guards (which are what surface a
 misconfigured machine as a clean FAILED job, not a stall)."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from pipeline.depth import resolve_dataset, run_depth
