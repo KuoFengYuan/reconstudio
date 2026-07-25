@@ -20,13 +20,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
 
 from .config import settings
+from .preflight import colmap_check, make_check, probe, system_report
 
 BASE = Path(__file__).resolve().parent.parent          # reconstudio/
 COLMAP_BIN = settings.colmap_bin
@@ -298,16 +298,17 @@ def conda_envs_dir() -> Path | None:
     prefix = Path(sys.prefix)
     if prefix.parent.name == "envs" and prefix.parent.is_dir():
         return prefix.parent
-    try:
-        base = subprocess.check_output(
-            ["conda", "info", "--base"], text=True, stderr=subprocess.DEVNULL).strip()
-        if base and (Path(base) / "envs").is_dir():
-            return Path(base) / "envs"
-    except Exception:
-        pass
-    for d in (Path.home() / "miniconda3", Path.home() / "anaconda3", Path("/opt/conda")):
-        if (d / "envs").is_dir():
-            return d / "envs"
+    base = probe(["conda", "info", "--base"]).strip()
+    if base and (Path(base) / "envs").is_dir():
+        return Path(base) / "envs"
+    # Last resort: the usual install locations. Keep this list in sync with
+    # detect_conda_root() in tools/detect.sh — that's the bash twin run.sh needs
+    # before any Python exists, so the two can only be kept aligned by hand.
+    for d in ("miniconda3", "anaconda3", "miniforge3", "mambaforge"):
+        if (Path.home() / d / "envs").is_dir():
+            return Path.home() / d / "envs"
+    if Path("/opt/conda/envs").is_dir():
+        return Path("/opt/conda/envs")
     return None
 
 
@@ -392,12 +393,8 @@ def available_backends() -> list[dict]:
 # GPU discovery (never hardcode the GPU count — machines differ)
 # --------------------------------------------------------------------------- #
 def list_gpus() -> list[dict]:
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=index,name,memory.total",
-             "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL)
-    except Exception:
-        return []
+    out = probe(["nvidia-smi", "--query-gpu=index,name,memory.total",
+                 "--format=csv,noheader,nounits"])
     gpus = []
     for line in out.strip().splitlines():
         parts = [x.strip() for x in line.split(",")]
@@ -411,15 +408,12 @@ def list_gpus() -> list[dict]:
 # Preflight /doctor — turn "deploy to a new machine" into a checklist
 # --------------------------------------------------------------------------- #
 def _colmap_check() -> dict:
-    path = shutil.which(COLMAP_BIN)
-    version = None
-    if path:
-        try:
-            version = subprocess.check_output(
-                [COLMAP_BIN, "-h"], text=True, stderr=subprocess.STDOUT).splitlines()[0].strip()
-        except Exception:
-            pass
-    return {"bin": COLMAP_BIN, "path": path, "version": version, "ok": bool(path)}
+    """The pre-`system` report shape, kept for /api/doctor consumers. Derived from
+    the system check so there's exactly one implementation of the probing."""
+    c = colmap_check()
+    ok = c["status"] == "ok"
+    return {"bin": COLMAP_BIN, "path": c["value"] if ok else None,
+            "version": c["detail"] or None, "ok": ok}
 
 
 def _probe_env(py: Path, imports: list[str]) -> dict:
@@ -457,6 +451,61 @@ def _probe_env(py: Path, imports: list[str]) -> dict:
         return {"error": repr(e)}
 
 
+def _backend_checks(spec: dict, py: Path | None, repo: Path,
+                    script_ok: bool, probe_result: dict | None) -> list[dict]:
+    """A Python backend's readiness as uniform check rows.
+
+    The hints live HERE, in the data, not in each renderer: doctor.html and
+    doctor_cli.py previously each decided what `env_python is None` means and only
+    the CLI ever grew the "how do I fix it" text, so the web page showed a red light
+    with no remedy. Both now just iterate.
+
+    Everything is `warn`, never `err`: backends are per-machine opt-in, so a box
+    that only runs GS-2M must not be reported as a failed deployment because
+    LichtFeld isn't built. The 訓練 tab greys out whatever isn't ready.
+    """
+    checks = [
+        make_check("env_python", "env python", "ok" if py else "warn",
+                   str(py) if py else f"conda env '{spec.get('conda_env')}'",
+                   "" if py else "找不到這個 env 的 python",
+                   "" if py else '建好該 env,或在 backends.json 設絕對路徑 "python"'),
+        make_check("repo", "repo / train script", "ok" if script_ok else "warn", str(repo),
+                   "" if script_ok else f"找不到 {spec.get('train_script', 'train.py')}",
+                   "" if script_ok else 'clone 到面板的兄弟目錄,或在 backends.json 覆蓋 "repo"'),
+    ]
+    if not probe_result:                 # deep=False, or no interpreter to probe
+        return checks
+
+    if probe_result.get("error"):
+        checks.append(make_check("probe", "env 探測", "warn", "", probe_result["error"]))
+        return checks
+
+    torch_ver, cuda = probe_result.get("torch"), probe_result.get("cuda")
+    if torch_ver:
+        device = probe_result.get("device")
+        checks.append(make_check(
+            "torch", "torch", "ok" if cuda else "warn",
+            f"{torch_ver} · CUDA {'可用' if cuda else '不可用'}"
+            f"{' · ' + device if device else ''}",
+            "" if cuda else "torch 看不到 CUDA,訓練會失敗",
+            "" if cuda else "確認驅動版本與這個 env 的 torch cu 版本相符"))
+    else:
+        checks.append(make_check("torch", "torch", "warn", "",
+                                 probe_result.get("torch_error", "無法載入 torch")))
+    # Importing the compiled extensions is what catches the most common
+    # move-to-a-new-machine failure, so give it its own row either way. A probe
+    # that got this far always has import_fail (a dict, empty when all imports ok).
+    failed = probe_result.get("import_fail") or {}
+    if failed:
+        checks.append(make_check(
+            "submodules", "編譯子模組", "warn", ", ".join(failed),
+            "; ".join(f"{mod}: {err}" for mod, err in failed.items()),
+            "通常是 extension 是為別張顯卡的 arch 編的 — 在這台機器重編"))
+    else:
+        checks.append(make_check("submodules", "編譯子模組", "ok", "全部 import 成功"))
+    return checks
+
+
 def doctor(deep: bool = True) -> dict:
     """Full preflight report. deep=True imports torch in each env (slow, ~seconds
     per backend, triggers CUDA init); deep=False only checks paths exist."""
@@ -464,19 +513,27 @@ def doctor(deep: bool = True) -> dict:
         "colmap": _colmap_check(),
         "conda_envs_dir": str(conda_envs_dir() or ""),
         "gpus": list_gpus(),
+        # Host-level checks (ffmpeg + its blurdetect filter, disks, cudnn, gsutil,
+        # SuperSplat, local.env sanity) — see pipeline/preflight.py for the shape.
+        "system": system_report(deep),
         "backends": {},
     }
     for name, spec in load_backends().items():
         if spec.get("launch") == "binary":            # compiled trainer (LichtFeld)
             exe = binary_exec(spec)
+            exec_path = str(Path(spec.get("exec", "")).expanduser())
             item = {
                 "label": spec.get("label", name),
                 "launch": "binary",
-                "exec": str(Path(spec.get("exec", "")).expanduser()),
+                "exec": exec_path,
                 "exec_ok": bool(exe),
                 "config": spec.get("config", ""),
                 "mesh": bool(spec.get("mesh_args")),
                 "ready": bool(exe),
+                "checks": [make_check(
+                    "exec", "exec", "ok" if exe else "warn", exec_path,
+                    "" if exe else "找不到編譯好的執行檔",
+                    "" if exe else '在 ../LichtFeld-Studio 建置,或在 backends.json 覆蓋 "exec"')],
             }
             report["backends"][name] = item
             continue
@@ -491,8 +548,10 @@ def doctor(deep: bool = True) -> dict:
             "repo_ok": script_ok,
             "ready": bool(py) and script_ok,
         }
-        if deep and py:
-            item["probe"] = _probe_env(py, spec.get("probe_imports", ["torch"]))
+        probe_result = _probe_env(py, spec.get("probe_imports", ["torch"])) if deep and py else None
+        if probe_result is not None:
+            item["probe"] = probe_result
+        item["checks"] = _backend_checks(spec, py, repo, script_ok, probe_result)
         report["backends"][name] = item
 
     # Depth/normal tool: LichtFeld-Studio's own `preprocess` subcommand (MoGe-2
