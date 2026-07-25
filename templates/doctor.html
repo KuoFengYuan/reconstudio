@@ -18,19 +18,44 @@
   table { border-collapse:collapse; font-size:13px; }
   td { padding:2px 14px 2px 0; vertical-align:top; }
   .pill { display:inline-block; border-radius:20px; padding:1px 9px; font-size:12px; font-weight:600; color:#0a0c10; }
+  .row { display:flex; gap:10px; align-items:baseline; padding:5px 0; border-top:1px solid var(--line); }
+  .row:first-child { border-top:0; }
+  .row .body { flex:1; min-width:0; }
+  .row .lbl { font-weight:600; }
+  .row .val { font-family:ui-monospace,monospace; color:#c9d1d9; word-break:break-all; }
+  .row .hint { color:var(--warn); }
+  .tip { color:var(--mut); font-size:12px; }
 </style>
 </head>
 <body>
 {% macro yn(v) %}{% if v %}<span class="pill" style="background:var(--ok)">OK</span>{% else %}<span class="pill" style="background:var(--err)">缺</span>{% endif %}{% endmacro %}
+{# Every check row — system AND per-backend — carries its own 4-state status plus
+   the remedy text, all built in pipeline/preflight.py / backends._backend_checks.
+   This macro is the ONLY place that decides how a row looks, so the page and
+   `./run.sh --doctor` can't disagree about what a red light means. #}
+{% set BADGE = {'ok': ('OK', 'var(--ok)'), 'warn': ('注意', 'var(--warn)'),
+                'err': ('失敗', 'var(--err)'), 'skip': ('已關閉', 'var(--mut)')} %}
+{% macro check(c) %}
+{% set text, colour = BADGE.get(c.status, ('?', 'var(--mut)')) %}
+<div class="row">
+  <span class="pill" style="background:{{ colour }}">{{ text }}</span>
+  <div class="body">
+    <span class="lbl">{{ c.label }}</span>
+    {% if c.value %} <span class="val">{{ c.value }}</span>{% endif %}
+    {% if c.detail %}<div class="mut">{{ c.detail }}</div>{% endif %}
+    {% if c.hint %}<div class="hint">→ {{ c.hint }}</div>{% endif %}
+  </div>
+</div>
+{% endmacro %}
 <h1>🔧 環境檢查（部署到新機器先看這頁）</h1>
 <p class="mut">conda envs 目錄：<code>{{ report.conda_envs_dir or '（未偵測到）' }}</code>
    · <a href="/doctor?deep=0">只查路徑（快）</a> · <a href="/doctor?deep=1">含 torch/CUDA 探測（慢）</a> · <a href="/">← 回面板</a></p>
+<p class="tip">同一份檢查也能在終端機跑，遠端機器不用轉埠開瀏覽器：<code>./run.sh --doctor</code>
+   （全部必要條件通過時 exit 0，可直接接在部署腳本後面）</p>
 
-<h2>COLMAP</h2>
+<h2>系統 / 外部工具</h2>
 <div class="card">
-  {{ yn(report.colmap.ok) }} <code>{{ report.colmap.bin }}</code>
-  {% if report.colmap.path %}<span class="mut">→ {{ report.colmap.path }}</span>{% endif %}
-  {% if report.colmap.version %}<div class="mut">{{ report.colmap.version }}</div>{% endif %}
+  {% for c in report.system %}{{ check(c) }}{% endfor %}
 </div>
 
 <h2>GPU</h2>
@@ -41,29 +66,12 @@
 </div>
 
 <h2>訓練 backends</h2>
+<p class="tip">未就緒只是該後端不能用（訓練分頁會把它灰掉），不算部署失敗。</p>
 {% for name, b in report.backends.items() %}
 <div class="card">
-  <div style="font-weight:600">{{ yn(b.ready) }} {{ b.label }} <span class="mut">({{ name }})</span></div>
-  <table>
-    <tr><td class="mut">conda env</td><td><code>{{ b.conda_env }}</code></td></tr>
-    <tr><td class="mut">env python</td><td>{{ yn(b.env_python) }} <code>{{ b.env_python or '找不到' }}</code></td></tr>
-    <tr><td class="mut">repo / train.py</td><td>{{ yn(b.repo_ok) }} <code>{{ b.repo }}</code></td></tr>
-    {% if b.probe %}
-      {% if b.probe.error %}
-      <tr><td class="mut">probe</td><td class="err">{{ b.probe.error }}</td></tr>
-      {% else %}
-      <tr><td class="mut">torch</td><td>
-        {% if b.probe.torch %}<span class="ok">{{ b.probe.torch }}</span>
-          · CUDA {{ '可用' if b.probe.cuda else '不可用' }}{% if b.probe.device %} · {{ b.probe.device }}{% endif %}
-        {% else %}<span class="err">{{ b.probe.torch_error or '無法載入 torch' }}</span>{% endif %}
-      </td></tr>
-      <tr><td class="mut">submodules</td><td>
-        {% if b.probe.import_fail %}<span class="err">{{ b.probe.import_fail }}</span>
-        {% else %}<span class="ok">全部 import 成功</span>{% endif %}
-      </td></tr>
-      {% endif %}
-    {% endif %}
-  </table>
+  <div style="font-weight:600">{{ yn(b.ready) }} {{ b.label }} <span class="mut">({{ name }})</span>
+    {% if b.conda_env %}<span class="mut">· conda env <code>{{ b.conda_env }}</code></span>{% endif %}</div>
+  {% for c in b.checks %}{{ check(c) }}{% endfor %}
 </div>
 {% endfor %}
 

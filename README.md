@@ -22,24 +22,84 @@
 
 # 一、安裝(第一次部署)
 
-> 面板本身很輕(純 Python、不含 torch);重的是 GPU 訓練環境。裝完開 **`/doctor`** 頁面,
-> 它會逐項檢查、紅燈變綠燈再開始用。
+> 面板本身很輕(純 Python、不含 torch);重的是 GPU 訓練環境。任何時候都可以用
+> **`./run.sh --doctor`**(終端機)或 **`/doctor`** 頁面逐項檢查,紅燈變綠燈再開始用。
 
-## 1. 面板本體
+**下面的節次就是執行順序**,由快到慢:
+
+| # | 做什麼 | 大概要多久 |
+|---|--------|-----------|
+| [0](#0-系統前置) | 系統前置:git / conda / NVIDIA 驅動 | 10 分鐘 |
+| [1](#1-外部工具) | 外部工具:colmap + ffmpeg | 5 分鐘(apt)~ 1 小時(自己編) |
+| [2](#2-面板本體) | 面板本體:`./setup.sh` | 2~3 分鐘,**全自動** |
+| [3](#3-訓練後端需要-gpu每台機器各自編譯) | 訓練後端(每台機器各自編譯) | 20 分鐘 ~ 數小時 ← **最花時間** |
+| [4](#4-選用元件) · [5](#5-這台機器的設定) | 選用元件、微調設定 | 看需求 |
+| [6](#6-環境檢查) · [7](#7-啟動) | 健檢 + 啟動 | 1 分鐘 |
+
+> 第 2 步的 `setup.sh` 結尾會跑一次健檢。那時第 1、3 步還沒做完,**紅燈是正常的**
+> ——它就是在告訴你還缺什麼。
+
+## 0. 系統前置
 
 ```bash
-git clone https://github.com/KuoFengYuan/reconstudio.git
-cd reconstudio
-conda create -n rec python=3.10 -y
-conda run -n rec pip install -r requirements.txt
+sudo apt install -y git build-essential
+nvidia-smi                       # 驅動要先裝好,看得到卡才有得訓練
 ```
 
-## 2. 外部工具
+還沒有 conda 的話裝一個(`setup.sh` 找不到 conda 會直接停下來):
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+```
+
+## 1. 外部工具
 
 | 工具 | 用途 | 注意 |
 |------|------|------|
 | **colmap**(3.x / 4.x) | 重建核心 | 不在 `PATH` 就在 `local.env` 設 `COLMAP_BIN` |
 | **ffmpeg** | 抽幀去模糊、縮圖 | **必須含 `blurdetect` filter**;有 NVDEC build 可 GPU 解碼 |
+
+多數情況 apt 版就夠:
+
+```bash
+sudo apt install -y colmap ffmpeg
+ffmpeg -hide_banner -filters | grep blurdetect   # 必須有這行,否則抽幀會失敗
+```
+
+> **什麼時候需要自己編 colmap**:要用 Caspar BA(`MAPPER=global-caspar` 後端)、或
+> 要讀航拍大圖的 IPTC/大小寫副檔名時,apt 版不夠 —— 得從源碼編。編完把路徑寫進
+> `local.env` 的 `COLMAP_BIN`(或 `sudo cmake --install build` 裝到 `PATH`)。
+
+## 2. 面板本體
+
+```bash
+git clone https://github.com/KuoFengYuan/reconstudio.git
+cd reconstudio
+./setup.sh          # 建 conda env + 裝依賴 + 產生 local.env + 跑環境檢查
+```
+
+`setup.sh` 會偵測這台機器的 conda 位置、最大的非 root 磁碟、有沒有 NVDEC 版 ffmpeg,
+產生 `local.env`,最後印出環境檢查告訴你還缺什麼。**通常不需要再手改。**
+可重複執行:env 已存在就只更新套件,`local.env` 已存在**絕不覆蓋**(偵測結果會另存成
+`local.env.detected` 讓你自己比對)。
+
+> 產生的 `local.env` 裡,磁碟/ffmpeg 那幾行是**註解掉的**——這是刻意的。`run.sh` 每次啟動
+> 都會重跑同一份偵測,把值寫死反而會**遮蔽偵測**:之後裝了 NVDEC ffmpeg、換了資料磁碟,
+> run.sh 都不會發現。要固定某一項就把該行的 `#` 拿掉。(`CONDA_ROOT` 是例外,寫死可以
+> 省下每次啟動一次 `conda info --base`,約 0.5 秒。)
+
+<details><summary>不想用腳本 / 想自己一步步來</summary>
+
+```bash
+conda create -n rec python=3.10 -y
+conda run -n rec pip install -r requirements.txt
+cp local.env.example local.env    # 再自己填路徑
+./run.sh --doctor                 # 確認缺什麼
+```
+
+`--env NAME` 換 env 名、`--skip-env` 只重新產生設定不碰 conda。
+</details>
 
 ## 3. 訓練後端(需要 GPU,每台機器各自編譯)
 
@@ -59,12 +119,21 @@ pip install -r requirements.txt          # 編 CUDA submodule(依顯卡,要跑�
 
 > 要量**實際尺寸 (mm)** 再補:`conda run -n gs2m pip install opencv-contrib-python plyfile`
 
+> **新顯卡(Blackwell 等)注意**:GS-2M 的 `environment.yml` 釘的 torch 版本可能沒有
+> 你這張卡的 CUDA arch。裝完先確認 `./run.sh --doctor` 的 gs2m 那項 torch/CUDA 是綠的
+> ——它會真的在 gs2m env 裡 import 編譯出來的 CUDA submodule,這是「換機器後最常壞掉」
+> 的地方(extension 是為別張卡的 arch 編的)。需要時改用對應的 cu12x wheel 重編。
+
 **LichtFeld Studio(選用,只訓練、不 mesh)** — C++/CUDA binary,需 CUDA 12.8+ 與 vcpkg:
 
 ```bash
+sudo apt install -y libcudnn9-cuda-12   # onnxruntime 的 CUDA provider 需要,缺了會跑到一半才爆
 cd .. && git clone https://github.com/MrNeRF/LichtFeld-Studio.git && cd LichtFeld-Studio
 cmake -B build && cmake --build build -j"$(nproc)"
 ```
+
+> `libcudnn9` 同時也是 🌊 深度 工具(共用同一份 binary)的必要條件。裝在非標準位置時
+> 用 `local.env` 的 `LD_LIBRARY_PATH` 指過去;`./run.sh --doctor` 有專門一項在檢查它。
 
 LichtFeld 的兩個 backend(MR-NF / iGS+)已內建在 `pipeline/backends.py`,只要
 `LichtFeld-Studio` 跟 `reconstudio` 同一層(就是上面 `cd ..` clone 的位置),完全不用
@@ -86,23 +155,58 @@ LichtFeld 的兩個 backend(MR-NF / iGS+)已內建在 `pipeline/backends.py`,只
   只要 `../LichtFeld-Studio` 建置好(見上面「三、建置」),開 `/doctor` 就會看到「深度/法向量生成」
   變綠燈。用法見[二、使用 — 🌊 深度](#-深度影像--深度圖法向量圖--訓練深度法向量監督)。
 
-## 5. 這台機器的設定(選用)
+### 從舊機器搬過來可以省的
+
+已經有一台裝好的機器時,這兩樣**直接複製比重建快**:
 
 ```bash
-cp local.env.example local.env          # 路徑 / port / 非標準 binary 位置
-cp backends.example.json backends.json  # 後端 env / repo / exec
+# SuperSplat bundle:省掉第一次啟動的背景建置,新機器也就不需要 node/npm
+rsync -a 舊機器:~/repo/reconstudio/static/supersplat/ static/supersplat/
 ```
 
-兩個檔都有逐行註解,名字路徑都是預設值的話可以跳過這步。
+`local.env` **不要整份複製** —— 路徑、磁碟、port 都是機器專屬的。跑 `./setup.sh` 讓它重新
+偵測,只把真正跨機器通用的那幾行搬過去(例如 `CLOUDSDK_CORE_PROJECT`)。複製整份最常見的
+後果就是留下一堆指向不存在路徑的變數,而**打錯字或失效的變數不會報錯**(見下一節)。
 
-## 6. 啟動
+## 5. 這台機器的設定
+
+`setup.sh` 已經產生 `local.env`(路徑 / port / binary 位置),要調再開它——每個選項的
+完整說明在 `local.env.example`。
+
+`backends.json` **通常不用建**:內建預設已涵蓋「兄弟目錄 + 標準 env 名」的情況。只有這台
+機器的 repo/build 放在別處才需要,而且只寫要覆蓋的那幾個 key(範本見 `backends.example.json`)。
+
+> `local.env` 裡打錯字或留著失效的舊變數**不會報錯**——`Settings` 會靜默忽略它、改用預設值。
+> `./run.sh --doctor` 的「local.env 變數」一項專門抓這個。
+
+**`setup.sh` 猜不到、要你自己判斷的一項**:`COLMAP_PANEL_RESIZE_WORKERS`(COLMAP FullHD
+縮圖的平行 ffmpeg 數)取決於**來源檔放在哪種磁碟**,不是 CPU 核數。單顆 HDD 上開太多
+worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航拍 TIFF 的甜蜜點約 4~6);
+放 SSD/NVMe 就可以往上加。預設是 CPU 核數(上限 32),對 HDD 來說通常太高。
+
+## 6. 環境檢查
+
+```bash
+./run.sh --doctor          # 終端機版:colmap / ffmpeg / 磁碟 / cudnn / 後端 / GPU 全部逐項
+./run.sh --doctor --fast   # 跳過每個後端的 torch/CUDA 探測(快)
+./run.sh --doctor --json   # 給腳本吃的 JSON
+```
+
+必要條件全通過就 **exit 0**,可以直接串在部署腳本後面。它檢查的不只是「檔案在不在」,還包括
+幾個典型的**靜默失敗**:ffmpeg 有沒有編進 `blurdetect` filter、設定的 hwaccel 這個 build
+到底支不支援、資料/暫存磁碟是真的可寫還是唯讀掛載、`libcudnn.so.9` 解析得到嗎
+(LichtFeld 的 onnxruntime 在跑到一半才會爆)。
+
+`WARN` 代表「某個**選用**功能不能用」,不算部署失敗;`FAIL` 才是一定會出問題。
+同一份報告的網頁版在 `/doctor`。
+
+## 7. 啟動
 
 ```bash
 ./run.sh        # → 開瀏覽器 http://127.0.0.1:8077
 ```
 
-第一次先開 **`http://127.0.0.1:8077/doctor`** 做健檢。遠端機器用
-`ssh -L 8077:127.0.0.1:8077 user@host`,或 `HOST=0.0.0.0 ./run.sh`。
+遠端機器用 `ssh -L 8077:127.0.0.1:8077 user@host`,或 `HOST=0.0.0.0 ./run.sh`。
 
 ---
 
@@ -322,7 +426,8 @@ app.py        app factory:建 FastAPI、mount static、include routers(~30 行)
 jobs.py       JobManager:asyncio 佇列、N=MAX_JOBS workers、狀態存檔 + log 解析
 pipeline/     領域層(torch-free,shell out 到外部工具)
    config.py    Settings:所有設定的單一來源(pydantic-settings)
-   runner.py    子行程執行 + 取消        backends.py  後端登錄 + /doctor preflight
+   runner.py    子行程執行 + 取消        backends.py  後端登錄 + 後端 preflight
+   preflight.py 系統層檢查(ffmpeg/磁碟/cudnn/…)  doctor_cli.py  終端機版報告
    frames / colmap/ / train / gcs       model.py     解析 COLMAP 稀疏模型(讀取快取)
 ```
 
@@ -340,10 +445,12 @@ pipeline/     領域層(torch-free,shell out 到外部工具)
 | `jobs.py` | `JobManager`(佇列、workers、cancel/delete)+ log 解析 |
 | `pipeline/colmap/` | `_run`(orchestrator:stages、sentinels)· `_layout`(版面偵測)· `_resize`(並行縮圖)· `_gps`(EXIF GPS 讀取 JPEG+TIFF、pose prior 注入) |
 | `pipeline/frames.py` / `train.py` | 抽幀去模糊 / 訓練 + mesh(+ChArUco mm 縮放) |
-| `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、doctor preflight |
+| `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor()` 總報告 |
+| `pipeline/preflight.py` | 系統層檢查(ffmpeg + blurdetect / 磁碟可寫 / cudnn / gsutil / local.env 失效變數);每項回同一個 `{status, label, value, detail, hint}` 形狀,兩個 renderer 共用 |
+| `pipeline/doctor_cli.py` | `./run.sh --doctor`:同一份報告輸出到終端機,exit code 反映有無 FAIL |
 | `pipeline/model.py` | COLMAP 稀疏模型解析 + PLY 匯出(LRU 快取) |
 | `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器(`viz` / `mesh_viz` / `mesh_view`) |
-| `tools/` | `build_supersplat.sh`(自動更新也走這)· marker 量尺 / 縮放腳本 |
+| `tools/` | `detect.sh`(conda/磁碟/ffmpeg 偵測,`run.sh` 與 `setup.sh` 共用)· `build_supersplat.sh`(自動更新也走這)· marker 量尺 / 縮放腳本 |
 | `tests/` | 離線單元測試(無需 colmap/ffmpeg/GPU/網路) |
 
 ## 開發
