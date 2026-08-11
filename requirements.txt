@@ -17,9 +17,12 @@ pydantic-settings>=2.0   # typed config (pipeline/config.py); pydantic itself co
 # MAPPER=hierarchical, simplify / reorient stages, masks). Only imported lazily by
 # pipeline/large_scene.py when those options are actually used — the panel still
 # starts without them. numpy/scipy/scikit-learn are always needed by that path;
-# `exif` only for the custom matcher's GPS neighbours; `opencv-python` only for masks.
+# `exif` only for the custom matcher's GPS neighbours; `opencv-python` for masks and the
+# oversized-image resize fallback.
 numpy>=1.24
 scipy>=1.10           # auto_reorient: ConvexHull + distance_matrix
 scikit-learn>=1.3     # simplify_images + custom matcher GPS NearestNeighbors
 exif>=1.6             # custom matcher GPS-neighbour pairs (skip with CM_N_GPS=0)
-opencv-python>=4.8    # mask cleanup (skip by leaving MASKS_DIR blank)
+opencv-python>=4.8    # mask cleanup (skip by leaving MASKS_DIR blank); ALSO the resize
+                      # fallback for images past ffmpeg's ~268 MP decode ceiling (large-
+                      # format aerial frames) — see pipeline/colmap/_resize.py

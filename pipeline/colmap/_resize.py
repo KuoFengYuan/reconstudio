@@ -6,8 +6,11 @@ the original's APP1 segment (see _gps.read_app1_exif / graft_app1).
 from __future__ import annotations
 
 import concurrent.futures as futures
+import os
 import shutil
+import struct
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -17,6 +20,17 @@ from ._gps import graft_app1, read_app1_exif
 
 FFMPEG_BIN = settings.ffmpeg_bin
 FULLHD_MAX = "1920"   # longest side cap for the "fullhd" resize option
+
+# ffmpeg refuses to even OPEN a picture whose (w+128)*(h+128) reaches INT_MAX/8
+# (libavutil av_image_check_size, compiled in — no CLI option raises it). That caps it
+# at ~268 MP, so large-format aerial frames (e.g. a DMC's 14592x25728 = 375 MP) fail with
+# "Picture size WxH is invalid" before a single pixel is decoded. Those go through
+# _resize_oversized() below instead.
+FFMPEG_SIZE_TERM_MAX = (2 ** 31 - 1) // 8
+# Concurrent oversized decodes are capped separately: unlike ffmpeg (which streams), the
+# fallback holds a whole decoded frame in RAM (375 MP RGB ~= 1.1 GB at full scale), so
+# running one per resize worker would OOM the box.
+OVERSIZED_WORKERS = 4
 
 
 def resize_workers() -> int:
@@ -40,6 +54,102 @@ def _resize_enc_args(rel: str) -> list[str]:
         # resized copies never need to carry it.
         return ["-compression_algo", "deflate"]
     return []
+
+
+def _jpeg_dimensions(path: Path) -> tuple[int, int] | None:
+    """(width, height) from a JPEG's SOF marker, reading only the header (stdlib, like
+    _gps): walk the segments until a Start-Of-Frame, whose payload is
+    precision(1) height(2) width(2). None if it isn't a parseable JPEG."""
+    try:
+        with path.open("rb") as fh:
+            if fh.read(2) != b"\xff\xd8":                 # not a JPEG (no SOI)
+                return None
+            while True:
+                hdr = fh.read(2)
+                if len(hdr) < 2 or hdr[0] != 0xFF:
+                    return None
+                marker = hdr[1]
+                if marker == 0xD8 or 0xD0 <= marker <= 0xD7:
+                    continue                              # standalone markers, no length
+                if marker in (0xDA, 0xD9):                # SOS / EOI: pixels, no SOF found
+                    return None
+                seg_len = int.from_bytes(fh.read(2), "big")
+                if seg_len < 2:
+                    return None
+                body = fh.read(seg_len - 2)
+                # SOF0..SOF15 carry the frame size; 0xC4/0xC8/0xCC are DHT/JPG/DAC, not SOF.
+                if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                    h, w = struct.unpack(">HH", body[1:5])
+                    return (w, h)
+    except Exception:                                     # noqa: BLE001 — probe is best-effort
+        return None
+
+
+def _ffmpeg_can_decode(path: Path) -> bool:
+    """False only when we can prove the picture is past ffmpeg's built-in size ceiling."""
+    dims = _jpeg_dimensions(path)
+    if not dims:
+        return True                                       # unknown -> let ffmpeg try
+    w, h = dims
+    return (w + 128) * (h + 128) < FFMPEG_SIZE_TERM_MAX
+
+
+def _resize_oversized(src: Path, dst: Path, rel: str, max_size: str) -> None:
+    """Downscale a picture ffmpeg cannot open, via OpenCV (already a requirement for the
+    mask path). Decoding is done at a reduced DCT scale — libjpeg emits the 1/2, 1/4 or
+    1/8 image directly, so a 375 MP frame costs ~1.5 s and ~11 MB instead of a full
+    1.1 GB decode — then Lanczos brings it to the exact same target ffmpeg's filter would
+    have produced. Output is 8-bit (matching ffmpeg's yuvj444p JPEG), and EXIF is dropped
+    here exactly as it is on the ffmpeg path, so the caller's APP1 graft still restores GPS."""
+    # must precede the cv2 import: OpenCV reads its own pixel ceiling at load time
+    os.environ.setdefault("OPENCV_IO_MAX_IMAGE_PIXELS", str(2 ** 40))
+    try:
+        import cv2
+    except ImportError as e:                              # pragma: no cover - env-dependent
+        raise RuntimeError(
+            f"{rel} is too large for ffmpeg to decode and OpenCV is missing "
+            "(pip install opencv-python) — needed to resize oversized images") from e
+
+    dims = _jpeg_dimensions(src)
+    if dims:
+        # cheapest DCT scale whose output is still >= the target (Lanczos then only downscales)
+        w, h = dims
+        cap, long_side = int(max_size), max(w, h)
+        flag = cv2.IMREAD_COLOR
+        for f, reduced in ((8, cv2.IMREAD_REDUCED_COLOR_8), (4, cv2.IMREAD_REDUCED_COLOR_4),
+                           (2, cv2.IMREAD_REDUCED_COLOR_2)):
+            if long_side // f >= min(cap, long_side):
+                flag = reduced
+                break
+    else:
+        flag = cv2.IMREAD_COLOR                        # not a JPEG: no header probe, no DCT scale
+    img = cv2.imread(str(src), flag)
+    if img is None:
+        raise RuntimeError(f"{rel}: OpenCV could not decode the image either")
+    if not dims:
+        h, w = img.shape[:2]
+
+    cap = int(max_size)
+    long_side, short_side = max(w, h), min(w, h)
+    # never upscale; keep aspect; even sides, matching the ffmpeg filter's -2
+    new_long = min(cap, long_side)
+    new_short = max(2, round(short_side * new_long / long_side / 2) * 2)
+    target = (new_long, new_short) if w >= h else (new_short, new_long)
+    if target != (img.shape[1], img.shape[0]):
+        img = cv2.resize(img, target, interpolation=cv2.INTER_LANCZOS4)
+
+    ext = dst.suffix.lower()
+    if ext in (".jpg", ".jpeg"):                          # q~ffmpeg -q:v 1, no chroma subsampling
+        params = [cv2.IMWRITE_JPEG_QUALITY, 98,
+                  cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
+    elif ext == ".png":
+        params = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+    elif ext in (".tif", ".tiff"):
+        params = [cv2.IMWRITE_TIFF_COMPRESSION, 8]        # ADOBE_DEFLATE, lossless
+    else:
+        params = []
+    if not cv2.imwrite(str(dst), img, params):
+        raise RuntimeError(f"{rel}: OpenCV failed to write {dst}")
 
 
 def resize_to_fullhd(img_root: str, lines: list[str], ws: Path, force: bool, r: Runner,
@@ -90,19 +200,39 @@ def resize_to_fullhd(img_root: str, lines: list[str], ws: Path, force: bool, r: 
     vf = (f"scale='if(gte(iw,ih),min({max_size},iw),-2)':"
           f"'if(gte(iw,ih),-2,min({max_size},ih))':flags=lanczos")
 
+    big_sem = threading.Semaphore(max(1, min(OVERSIZED_WORKERS, workers)))
+    announced = threading.Event()
+
+    def _oversized(src: Path, dst: Path, rel: str) -> None:
+        if not announced.is_set():
+            announced.set()
+            r.log(f"  {rel} exceeds ffmpeg's decode limit -> OpenCV reduced-scale "
+                  f"fallback (max {max(1, min(OVERSIZED_WORKERS, workers))} at a time)")
+        with big_sem:                                # bound peak RAM: whole frames in memory
+            _resize_oversized(src, dst, rel, max_size)
+
     def _one(rel: str) -> None:
         dst = out_root / rel
         if dst.exists() and not force:
             return                                   # resume a partial run cheaply
         dst.parent.mkdir(parents=True, exist_ok=True)
         src = Path(img_root) / rel
-        argv = [FFMPEG_BIN, "-y", "-nostdin", "-loglevel", "error",
-                "-i", str(src), "-vf", vf, *_resize_enc_args(rel), str(dst)]
-        res = subprocess.run(argv, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(f"ffmpeg resize failed for {rel}: "
-                               f"{res.stderr.strip()[:200]}")
+        if not _ffmpeg_can_decode(src):              # too big for ffmpeg; don't even spawn it
+            _oversized(src, dst, rel)
+        else:
+            argv = [FFMPEG_BIN, "-y", "-nostdin", "-loglevel", "error",
+                    "-i", str(src), "-vf", vf, *_resize_enc_args(rel), str(dst)]
+            res = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                # the probe only proves the JPEG case; other formats (and any size check we
+                # mis-predicted) land here, so retry oversized frames before giving up
+                if "Picture size" in res.stderr and "is invalid" in res.stderr:
+                    _oversized(src, dst, rel)
+                else:
+                    raise RuntimeError(f"ffmpeg resize failed for {rel}: "
+                                       f"{res.stderr.strip()[:200]}")
+        # both paths drop EXIF, so the graft below applies to either
         if preserve_exif and Path(rel).suffix.lower() in (".jpg", ".jpeg"):
             app1 = read_app1_exif(src)               # carry GPS (+focal) past the re-encode
             if app1:
