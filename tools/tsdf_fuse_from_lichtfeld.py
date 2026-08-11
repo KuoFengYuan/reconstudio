@@ -197,7 +197,7 @@ def main():
     )
 
     fused, missing = 0, 0
-    for image_id, img in image_items:
+    for _image_id, img in image_items:
         stem = relative_stem(img.name)
         rgb_path = renders / "rgb" / stem.with_suffix(".png")
         depth_path = renders / "depth" / stem.with_suffix(".exr")
