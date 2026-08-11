@@ -60,6 +60,7 @@ from pathlib import Path, PurePosixPath
 
 import numpy as np
 
+from .model import up_axis as model_up_axis
 from .runner import Runner
 from .train import _resolve_dense
 from .vendor.read_write_model import (
@@ -67,7 +68,6 @@ from .vendor.read_write_model import (
     Image,
     Point3D,
     qvec2rotmat,
-    read_images_binary,
     read_model,
     write_cameras_binary,
     write_images_binary,
@@ -270,15 +270,12 @@ def visibility(xy_in: np.ndarray, xy_all: np.ndarray) -> float:
 def _up_axis(sparse_dir: Path) -> int | None:
     """World axis (0=X,1=Y,2=Z) with the smallest camera-centre spread — i.e.
     the vertical/up axis (cameras sit at ~constant height, so the up axis varies
-    least). None when the model can't be read or has <3 views."""
-    try:
-        imgs = read_images_binary(str(sparse_dir / "images.bin"))
-    except Exception:
-        return None
-    if len(imgs) < 3:
-        return None
-    C = np.array([-qvec2rotmat(im.qvec).T @ im.tvec for im in imgs.values()])
-    return int(np.argmin(C.max(0) - C.min(0)))
+    least). None when the model can't be read or has <3 views.
+
+    Delegates to pipeline.model.up_axis so the viewer's ⬚ 選訓練範圍 tool (which
+    must know whether the model it displays is Z-up before it can emit a region)
+    and _resolve_zup below share one definition."""
+    return model_up_axis(sparse_dir)
 
 
 def _resolve_zup(src: Path, r: Runner) -> tuple[Path, Path]:

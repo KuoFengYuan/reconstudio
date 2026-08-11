@@ -24,9 +24,12 @@ from pipeline.model import (
     cull_cameras,
     cull_points,
     ensure_ply,
+    frame_delta,
     image_detail,
     read_images,
+    region_stats,
     scene,
+    up_axis,
 )
 from web.services.models import (
     block_list,
@@ -64,9 +67,14 @@ async def viz(request: Request, job_id: str, m: str | None = None):
     # blocksplit results are N sibling models — the viewer offers a block switcher
     blocks = block_list(job)
     cur_block = (m or (blocks[0]["name"] if blocks else "")) if md else ""
+    # ⬚ 選訓練範圍 needs the path it should hand blocksplit as `source` (the
+    # workspace — blocksplit's _resolve_dense finds the undistorted model under it).
+    # Empty for blocksplit's own results: you can't pick a region out of a block.
+    bs_source = "" if job.kind == "blocksplit" else ((job.meta or {}).get("workspace") or "")
     return _page(request, "viz.html", job=job.to_dict(), has_model=bool(md),
                  model_sub=(m or ""), clean_dir=clean_dir, clean_dataset=clean_dataset,
-                 scale_ok=scale_ok, blocks=blocks, cur_block=cur_block)
+                 scale_ok=scale_ok, blocks=blocks, cur_block=cur_block,
+                 bs_source=bs_source)
 
 
 @router.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
@@ -132,6 +140,77 @@ async def scale_check_ep(job_id: str, m: str | None = None):
         raise HTTPException(400, str(e)) from e
     except FileNotFoundError as e:
         raise HTTPException(404, "sparse 模型不完整（缺 images.bin）。") from e
+
+
+@router.post("/api/jobs/{job_id}/region_check")
+async def region_check_ep(job_id: str, request: Request):
+    """Validate a region picked in the viewer against the model blocksplit will read.
+
+    The viewer renders workspace/sparse/0. blocksplit grids the X–Y plane of the
+    *undistorted Z-up* model it resolves for itself (_resolve_dense, then a Z-up
+    sibling). Normally those share one frame — image_undistorter preserves poses,
+    and the reorient step keeps the pre-reorient model as a sibling — but a
+    reoriented or GPS-aligned model does not, and a region picked against the wrong
+    frame is silently wrong rather than an error. So re-read the target model,
+    prove the frames agree by comparing shared cameras, and report the region's
+    real content from there. The client shows THESE numbers, not its own.
+    """
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job.kind == "blocksplit":
+        raise HTTPException(400, "這是分塊結果,不能再從它挑範圍 — 請回原本的 COLMAP job 挑。")
+    ws = (job.meta or {}).get("workspace")
+    if not ws:
+        raise HTTPException(400, "此 job 沒有 workspace,無法解析分塊要讀的模型。")
+    body = await request.json()
+    # numpy-only imports, kept lazy so the panel's numpy-free base still serves /viz
+    from pipeline.blocksplit import parse_region
+    try:
+        region = parse_region(body.get("region") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if region is None:
+        raise HTTPException(400, "region 是空的。")
+
+    def _resolve() -> tuple[Path, list[str]]:
+        """The Z-up sparse dir blocksplit would grid, mirroring _resolve_zup."""
+        from pipeline.train import _resolve_dense
+        sparse_dir, _images = _resolve_dense(Path(ws))
+        notes: list[str] = []
+        if up_axis(sparse_dir) == 2:
+            return sparse_dir, notes
+        for sib in sorted(sparse_dir.parent.glob("sparse*")):
+            if sib != sparse_dir and (sib / "cameras.bin").is_file() and up_axis(sib) == 2:
+                notes.append(f"分塊會改用 Z-up 模型 {sib.name}（{sparse_dir.name} 非 Z-up）")
+                return sib, notes
+        notes.append(f"⚠️ 找不到 Z-up 模型,分塊會沿用 {sparse_dir.name} — X-Y 切格可能塌成一格。")
+        return sparse_dir, notes
+
+    def _work() -> dict:
+        sparse_dir, notes = _resolve()
+        stats = region_stats(sparse_dir, region)
+        viewer_md = resolve_model(job, body.get("from") or None)
+        delta, size, shared = 0.0, 0.0, stats["cameras_total"]
+        if viewer_md and viewer_md.resolve() != sparse_dir.resolve():
+            delta, size, shared = frame_delta(viewer_md, sparse_dir)
+        # tolerate float32 PLY round-trip + undistort re-triangulation, not a reorient
+        tol = max(size * 1e-4, 1e-6)
+        match = shared > 0 and delta <= tol
+        if not match:
+            notes.append(
+                "⚠️ 檢視器顯示的模型與分塊要讀的模型不是同一個座標系"
+                f"（相機位置最大差 {delta:.3g},容許 {tol:.3g}）— 這個 region 的數字"
+                "不能直接用。請改用未 reorient 的模型檢視,或手動換算。")
+        return {"ok": True, "region": list(region), "source": str(ws),
+                "sparse": str(sparse_dir), "up_axis": up_axis(sparse_dir),
+                "frame_match": match, "frame_delta": delta, "frame_shared": shared,
+                "notes": notes, **stats}
+
+    try:
+        return JSONResponse(await asyncio.to_thread(_work))
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 # formats a browser's <img> can render directly; anything else (TIFF) is transcoded.
