@@ -4,7 +4,12 @@ import random
 
 import pytest
 
-from pipeline.colmap._scale_check import analyze, enu_factors
+# The noise-calibrated estimator needs numpy, which the panel keeps out of its
+# base/CI install — skip this module when absent, mirroring test_blocksplit.py.
+# Runs in full locally (the `rec` env has it).
+pytest.importorskip("numpy")
+
+from pipeline.colmap._scale_check import analyze, enu_factors  # noqa: E402
 
 LAT0, LON0, ALT0 = 23.93, 120.66, 1610.0
 

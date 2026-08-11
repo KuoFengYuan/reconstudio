@@ -17,7 +17,6 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from jobs import manager
 from pipeline import get_backend
-from pipeline.colmap._scale_check import scale_check
 from pipeline.config import settings
 from pipeline.model import (
     count_points,
@@ -131,6 +130,11 @@ async def scale_check_ep(job_id: str, m: str | None = None):
         raise HTTPException(404, "no sparse model for this job")
     if not (job.params or {}).get("gps_align"):
         raise HTTPException(400, "此 job 未開啟 GPS 對齊（GPS_ALIGN），模型沒有公制尺度可驗。")
+    # Lazy import: the noise-calibrated estimator pulls numpy, which the panel base /
+    # CI's pure-Python install doesn't carry. Kept out of this module's import chain
+    # (like jobs.py's blocksplit import) so serving /viz stays numpy-free — only
+    # clicking 驗證地圖尺度 needs it.
+    from pipeline.colmap._scale_check import scale_check
     meta = job.meta or {}
     roots = [Path(meta.get("image_root", "")),
              Path(meta.get("workspace", "")) / "staging"]   # NESTED staging fallback
