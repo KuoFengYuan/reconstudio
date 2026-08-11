@@ -104,11 +104,24 @@ def test_parse_region():
             parse_region(bad)
 
 
-def test_grid_cells_cover_region():
+def test_grid_cells_tile_region_exactly_without_overshoot():
     cells = grid_cells(0, 0, 250, 90, 100)
     assert len(cells) == 3 * 1
-    assert cells[0][2:] == (0, 0, 100, 100)
-    assert cells[-1][2:] == (200, 0, 300, 100)
+    assert cells[0][2:] == (0, 0, 100, 90)      # clamped in y (region is only 90 tall)
+    assert cells[-1][2:] == (200, 0, 250, 90)   # clamped in x, NOT 300 — see grid_cells
+    # the union is exactly the region: no cell reaches past maxx/maxy
+    assert max(c[4] for c in cells) == 250
+    assert max(c[5] for c in cells) == 90
+
+
+def test_grid_cells_one_cell_equals_the_region_when_size_exceeds_it():
+    """What the viewer's ✂️ 只裁切不分塊 preset relies on: a block_size past the
+    region's longest side must yield ONE cell equal to the region, so the crop is
+    exactly the rectangle the user framed (a non-square region used to overshoot)."""
+    region = (-454.8, -1907.7, 1243.6, 137.3)   # 1698.4 x 2045.0, deliberately non-square
+    cells = grid_cells(*region, 2148.0)
+    assert len(cells) == 1
+    assert cells[0][2:] == pytest.approx(region)
 
 
 def test_rebalance_cells_splits_dense_keeps_sparse():

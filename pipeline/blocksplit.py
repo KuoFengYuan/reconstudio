@@ -60,6 +60,7 @@ from pathlib import Path, PurePosixPath
 
 import numpy as np
 
+from .model import up_axis as model_up_axis
 from .runner import Runner
 from .train import _resolve_dense
 from .vendor.read_write_model import (
@@ -67,7 +68,6 @@ from .vendor.read_write_model import (
     Image,
     Point3D,
     qvec2rotmat,
-    read_images_binary,
     read_model,
     write_cameras_binary,
     write_images_binary,
@@ -137,11 +137,19 @@ def shift_principal_point(cam, new_id: int, x0: int, y0: int,
 
 def grid_cells(minx: float, miny: float, maxx: float, maxy: float,
                size: float) -> list[tuple[int, int, float, float, float, float]]:
-    """All (ix, iy, bx0, by0, bx1, by1) cells of a `size`-step grid covering the region."""
+    """All (ix, iy, bx0, by0, bx1, by1) cells of a `size`-step grid tiling the region.
+
+    Cells are CLAMPED to the region, so the outermost ones may be thinner than
+    `size` and their union is exactly the region — the same contract as
+    rebalance_cells, which tiles by recursive splitting and never reaches outside.
+    Without the clamp the last row/column ran a full `size` past maxx/maxy, which
+    leaked whenever the region came from the user rather than the point cloud: a
+    "crop to this rectangle" run assigned points from outside the rectangle (and
+    with a non-square region the overshoot could add ~30% more area)."""
     nx = max(1, math.ceil((maxx - minx) / size))
     ny = max(1, math.ceil((maxy - miny) / size))
     return [(ix, iy, minx + ix * size, miny + iy * size,
-             minx + (ix + 1) * size, miny + (iy + 1) * size)
+             min(minx + (ix + 1) * size, maxx), min(miny + (iy + 1) * size, maxy))
             for iy in range(ny) for ix in range(nx)]
 
 
@@ -270,15 +278,12 @@ def visibility(xy_in: np.ndarray, xy_all: np.ndarray) -> float:
 def _up_axis(sparse_dir: Path) -> int | None:
     """World axis (0=X,1=Y,2=Z) with the smallest camera-centre spread — i.e.
     the vertical/up axis (cameras sit at ~constant height, so the up axis varies
-    least). None when the model can't be read or has <3 views."""
-    try:
-        imgs = read_images_binary(str(sparse_dir / "images.bin"))
-    except Exception:
-        return None
-    if len(imgs) < 3:
-        return None
-    C = np.array([-qvec2rotmat(im.qvec).T @ im.tvec for im in imgs.values()])
-    return int(np.argmin(C.max(0) - C.min(0)))
+    least). None when the model can't be read or has <3 views.
+
+    Delegates to pipeline.model.up_axis so the viewer's ⬚ 選訓練範圍 tool (which
+    must know whether the model it displays is Z-up before it can emit a region)
+    and _resolve_zup below share one definition."""
+    return model_up_axis(sparse_dir)
 
 
 def _resolve_zup(src: Path, r: Runner) -> tuple[Path, Path]:

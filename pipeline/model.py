@@ -135,6 +135,96 @@ def _points_stats(key: tuple[str, int, int]) -> tuple[int, float, float]:
     return n, (err_sum / n if n else 0.0), (trk_sum / n if n else 0.0)
 
 
+# --------------------------------------------------------------------------- #
+# region helpers — back the viewer's ⬚ 選訓練範圍 tool, which produces a
+# blocksplit `region` (minx,miny,maxx,maxy on the model's X–Y plane).
+#
+# Deliberately numpy-free (struct-parsed like the readers above) so the web panel
+# keeps its numpy-free base install: blocksplit itself needs numpy, but validating
+# a region must not.
+# --------------------------------------------------------------------------- #
+def up_axis(model_dir: Path) -> int | None:
+    """World axis (0=X, 1=Y, 2=Z) with the smallest camera-centre spread — i.e.
+    the vertical/up axis, since cameras sit at roughly constant height so the up
+    axis varies least. None when the model can't be read or has < 3 views.
+
+    Single definition, shared with blocksplit._up_axis (which drives _resolve_zup)
+    so the viewer's idea of "is this model Z-up" cannot drift from the splitter's.
+    """
+    try:
+        imgs = read_images(model_dir / "images.bin")
+    except OSError:
+        return None
+    if len(imgs) < 3:
+        return None
+    lo = [min(im["center"][k] for im in imgs) for k in range(3)]
+    hi = [max(im["center"][k] for im in imgs) for k in range(3)]
+    spread = [hi[k] - lo[k] for k in range(3)]
+    return spread.index(min(spread))
+
+
+def frame_delta(model_a: Path, model_b: Path) -> tuple[float, float, int]:
+    """(max centre disagreement, scene size, n shared images) between two models,
+    matching cameras by image name.
+
+    Used to prove that a region picked in the viewer's model is meaningful in the
+    model blocksplit will actually read. Undistortion preserves poses, so
+    sparse/0 and the undistorted sibling normally agree exactly; a reoriented or
+    GPS-aligned model does not, and picking a region there would silently produce
+    numbers for the wrong frame. Returns (0.0, size, n) for identical paths.
+    """
+    a = {im["name"]: im["center"] for im in read_images(model_a / "images.bin")}
+    b = {im["name"]: im["center"] for im in read_images(model_b / "images.bin")}
+    shared = sorted(set(a) & set(b))
+    if not shared:
+        return (float("inf"), 0.0, 0)
+    lo = [min(a[n][k] for n in shared) for k in range(3)]
+    hi = [max(a[n][k] for n in shared) for k in range(3)]
+    size = max(hi[k] - lo[k] for k in range(3))
+    worst = max(max(abs(a[n][k] - b[n][k]) for k in range(3)) for n in shared)
+    return (worst, size, len(shared))
+
+
+def region_stats(model_dir: Path, region: tuple[float, float, float, float],
+                 track_min: int = 5) -> dict:
+    """What a blocksplit `region` actually contains, read from `model_dir`.
+
+    Counts cameras whose centre falls inside the X–Y rectangle, points inside it,
+    and the in-region track-length distribution — track length is the multi-view
+    coverage signal that decides whether the region is worth training (a region
+    full of 2-view points reconstructs badly however large it is).
+    """
+    minx, miny, maxx, maxy = region
+    imgs = read_images(model_dir / "images.bin")
+    cam_in = sum(1 for im in imgs
+                 if minx <= im["center"][0] <= maxx and miny <= im["center"][1] <= maxy)
+
+    n_pts = pts_in = trk_sum = trk_ge = 0
+    z_lo = z_hi = None
+    with open(model_dir / "points3D.bin", "rb") as f:
+        n_pts = struct.unpack("<Q", f.read(8))[0]
+        for _ in range(n_pts):
+            head = f.read(43)                    # id + xyz + rgb + error
+            x, y, z = struct.unpack("<3d", head[8:32])
+            tl = struct.unpack("<Q", f.read(8))[0]
+            f.seek(tl * 8, 1)                    # skip the track
+            if minx <= x <= maxx and miny <= y <= maxy:
+                pts_in += 1
+                trk_sum += tl
+                if tl >= track_min:
+                    trk_ge += 1
+                z_lo = z if z_lo is None or z < z_lo else z_lo
+                z_hi = z if z_hi is None or z > z_hi else z_hi
+    return {
+        "cameras_in": cam_in, "cameras_total": len(imgs),
+        "points_in": pts_in, "points_total": n_pts,
+        "mean_track_in": (trk_sum / pts_in) if pts_in else 0.0,
+        "track_min": track_min,
+        "frac_track_ge_in": (trk_ge / pts_in) if pts_in else 0.0,
+        "z_range": [z_lo, z_hi] if pts_in else None,
+    }
+
+
 def ensure_ply(model_dir: Path, out_ply: Path, force: bool = False) -> Path:
     if out_ply.exists() and not force and out_ply.stat().st_size > 0:
         return out_ply

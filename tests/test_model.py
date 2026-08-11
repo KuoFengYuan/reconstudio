@@ -198,6 +198,102 @@ def test_image_detail_out_of_range_raises_index_error(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# up_axis / frame_delta / region_stats — back the viewer's ⬚ 選訓練範圍 tool.
+# A region is 4 numbers on a Z-up model's X–Y plane, so these three answer:
+# "which axis is up", "is the model I framed the one blocksplit will read", and
+# "what is actually inside the rectangle".
+# --------------------------------------------------------------------------- #
+def _model_with_centers(model_dir: Path, centers):
+    """A model whose cameras sit at `centers` (identity rotation -> center == -t)."""
+    model_dir.mkdir(parents=True, exist_ok=True)
+    _write_cameras(model_dir / "cameras.bin", [(1, 1, 8, 8, [1.0, 1.0, 4.0, 4.0])])
+    _write_images(model_dir / "images.bin", [
+        (i + 1, _IDENTITY_Q, (-c[0], -c[1], -c[2]), 1, f"img{i}.png", [])
+        for i, c in enumerate(centers)
+    ])
+    return model_dir
+
+
+def test_up_axis_picks_the_least_varying_axis(tmp_path):
+    # cameras spread over X and Y at near-constant Z -> Z is up
+    zup = [(x * 10.0, y * 10.0, 1.0 + (x % 2) * 0.01) for x in range(4) for y in range(4)]
+    assert m.up_axis(_model_with_centers(tmp_path / "zup", zup)) == 2
+    # the same layout with Y and Z swapped -> Y is up
+    yup = [(c[0], c[2], c[1]) for c in zup]
+    assert m.up_axis(_model_with_centers(tmp_path / "yup", yup)) == 1
+
+
+def test_up_axis_none_for_too_few_views_or_missing_model(tmp_path):
+    assert m.up_axis(_model_with_centers(tmp_path / "two", [(0, 0, 0), (1, 1, 1)])) is None
+    assert m.up_axis(tmp_path / "does_not_exist") is None
+
+
+def test_frame_delta_zero_for_same_poses_and_large_for_a_rotation(tmp_path):
+    centers = [(x * 10.0, y * 10.0, 1.0) for x in range(3) for y in range(3)]
+    a = _model_with_centers(tmp_path / "a", centers)
+    same = _model_with_centers(tmp_path / "same", centers)
+    delta, size, shared = m.frame_delta(a, same)
+    assert shared == len(centers)
+    assert delta == pytest.approx(0.0, abs=1e-9)
+    assert size == pytest.approx(20.0)          # widest axis span of the shared cameras
+
+    # a reoriented sibling (Y/Z swapped) must NOT look like the same frame — this is
+    # the case that would otherwise hand blocksplit a region for the wrong plane.
+    rot = _model_with_centers(tmp_path / "rot", [(c[0], c[2], c[1]) for c in centers])
+    delta_rot, _size, shared_rot = m.frame_delta(a, rot)
+    assert shared_rot == len(centers)
+    assert delta_rot > size * 1e-4
+
+
+def test_frame_delta_infinite_when_no_shared_image_names(tmp_path):
+    a = _model_with_centers(tmp_path / "x", [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)])
+    b = tmp_path / "y"
+    b.mkdir()
+    _write_cameras(b / "cameras.bin", [(1, 1, 8, 8, [1.0, 1.0, 4.0, 4.0])])
+    _write_images(b / "images.bin", [
+        (1, _IDENTITY_Q, (0.0, 0.0, 0.0), 1, "other_a.png", []),
+        (2, _IDENTITY_Q, (0.0, 0.0, 0.0), 1, "other_b.png", []),
+    ])
+    delta, _size, shared = m.frame_delta(a, b)
+    assert shared == 0 and delta == float("inf")
+
+
+def test_region_stats_counts_only_what_is_inside_the_rectangle(tmp_path):
+    model = tmp_path / "region"
+    model.mkdir()
+    _write_cameras(model / "cameras.bin", [(1, 1, 8, 8, [1.0, 1.0, 4.0, 4.0])])
+    _write_images(model / "images.bin", [
+        (1, _IDENTITY_Q, (-1.0, -1.0, 0.0), 1, "in.png", []),      # centre (1,1) inside
+        (2, _IDENTITY_Q, (-9.0, -9.0, 0.0), 1, "out.png", []),     # centre (9,9) outside
+    ])
+    _write_points(model / "points3D.bin", [
+        # inside, long track (2 of them) — these drive frac_track_ge_in
+        (1, (1.0, 1.0, 5.0), (0, 0, 0), 0.5, [(1, 0)] * 6),
+        (2, (2.0, 2.0, 7.0), (0, 0, 0), 0.5, [(1, 0)] * 4),        # inside, short track
+        (3, (9.0, 9.0, 9.0), (0, 0, 0), 0.5, [(1, 0)] * 9),        # outside entirely
+        (4, (1.0, 9.0, 9.0), (0, 0, 0), 0.5, [(1, 0)] * 9),        # x in, y out -> excluded
+    ])
+    s = m.region_stats(model, (0.0, 0.0, 3.0, 3.0), track_min=5)
+    assert (s["cameras_in"], s["cameras_total"]) == (1, 2)
+    assert (s["points_in"], s["points_total"]) == (2, 4)
+    assert s["mean_track_in"] == pytest.approx((6 + 4) / 2)
+    assert s["frac_track_ge_in"] == pytest.approx(0.5)             # only point 1 has >= 5
+    assert s["z_range"] == [5.0, 7.0]                              # up-axis span of in-region pts
+
+
+def test_region_stats_empty_region_reports_zeros_not_a_crash(tmp_path):
+    model = tmp_path / "empty_region"
+    model.mkdir()
+    _write_cameras(model / "cameras.bin", [(1, 1, 8, 8, [1.0, 1.0, 4.0, 4.0])])
+    _write_images(model / "images.bin", [(1, _IDENTITY_Q, (0.0, 0.0, 0.0), 1, "a.png", [])])
+    _write_points(model / "points3D.bin", [(1, (0.0, 0.0, 0.0), (0, 0, 0), 0.5, [(1, 0)])])
+    s = m.region_stats(model, (100.0, 100.0, 200.0, 200.0))
+    assert s["points_in"] == 0 and s["cameras_in"] == 0
+    assert s["mean_track_in"] == 0.0 and s["frac_track_ge_in"] == 0.0
+    assert s["z_range"] is None
+
+
+# --------------------------------------------------------------------------- #
 # _qvec_to_rt
 # --------------------------------------------------------------------------- #
 def test_qvec_to_rt_identity():
