@@ -137,11 +137,19 @@ def shift_principal_point(cam, new_id: int, x0: int, y0: int,
 
 def grid_cells(minx: float, miny: float, maxx: float, maxy: float,
                size: float) -> list[tuple[int, int, float, float, float, float]]:
-    """All (ix, iy, bx0, by0, bx1, by1) cells of a `size`-step grid covering the region."""
+    """All (ix, iy, bx0, by0, bx1, by1) cells of a `size`-step grid tiling the region.
+
+    Cells are CLAMPED to the region, so the outermost ones may be thinner than
+    `size` and their union is exactly the region — the same contract as
+    rebalance_cells, which tiles by recursive splitting and never reaches outside.
+    Without the clamp the last row/column ran a full `size` past maxx/maxy, which
+    leaked whenever the region came from the user rather than the point cloud: a
+    "crop to this rectangle" run assigned points from outside the rectangle (and
+    with a non-square region the overshoot could add ~30% more area)."""
     nx = max(1, math.ceil((maxx - minx) / size))
     ny = max(1, math.ceil((maxy - miny) / size))
     return [(ix, iy, minx + ix * size, miny + iy * size,
-             minx + (ix + 1) * size, miny + (iy + 1) * size)
+             min(minx + (ix + 1) * size, maxx), min(miny + (iy + 1) * size, maxy))
             for iy in range(ny) for ix in range(nx)]
 
 

@@ -813,6 +813,15 @@ function snapTopDown(){
 
 function enterRegionMode(){
   document.getElementById('region-unit').textContent = UNIT;
+  // 🔄 旋轉物體 grabs the same left-drag (TransformControls installs its own pointer
+  // handlers), so a gizmo drag would also lay down a region box. It also reorients
+  // the object mid-pick, which moves the ground plane under the rectangle. Turn it
+  // off on entry — the two tools cannot share the gesture.
+  const rot = document.getElementById('rot-obj');
+  if (rot && rot.checked){
+    rot.checked = false; gizmo.enabled = gizmo.visible = false;
+    document.getElementById('region-msg').textContent = 'ℹ 已關閉「🔄 旋轉物體」(會搶走拖曳手勢)。';
+  }
   snapTopDown();
   updateRegionPanel();
 }
@@ -832,19 +841,42 @@ function screenToGround(cx, cy, UP){
   return t > 0 ? o.addScaledVector(d, t) : null;
 }
 
+// How far the view is tilted off straight-down, in degrees. At θ from vertical a
+// screen rect maps to a ground trapezoid stretched ~1/cos²θ deep, so a grazing view
+// turns a small drag into a region covering the whole scene — rays that are nearly
+// parallel to the plane still *hit* it, just kilometres away. Refuse rather than
+// hand back a plausible-looking wrong rectangle.
+const REGION_MAX_TILT = 20;
+function viewTiltDeg(UP){
+  inner.updateWorldMatrix(true, false);
+  const n = new THREE.Vector3().setComponent(UP, 1).transformDirection(inner.matrixWorld).normalize();
+  const fwd = new THREE.Vector3(); camera.getWorldDirection(fwd);
+  return Math.acos(Math.min(1, Math.abs(fwd.dot(n)))) * 180 / Math.PI;
+}
+
 function regionFromRect(x0, y0, x1, y1){
   const UP = modelUpAxis(), AX = horizAxes(UP);
+  const msgEl = document.getElementById('region-msg');
+  const tilt = viewTiltDeg(UP);
+  if (tilt > REGION_MAX_TILT){
+    msgEl.innerHTML = `⚠ 視角離正上方 <b>${tilt.toFixed(0)}°</b>（上限 ${REGION_MAX_TILT}°）,` +
+      '這樣框出來的範圍會被透視拉長好幾倍 — 按「⬆ 俯視」再框。';
+    return;
+  }
   const corners = [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]
     .map(([a,b]) => screenToGround(a, b, UP)).filter(Boolean);
   if (corners.length < 4){
-    document.getElementById('region-msg').textContent =
-      '⚠ 這個視角框不到地面平面 — 按「⬆ 俯視」再框。';
+    msgEl.textContent = '⚠ 這個視角框不到地面平面 — 按「⬆ 俯視」再框。';
     return;
   }
   const a = corners.map(p => p.getComponent(AX[0])), b = corners.map(p => p.getComponent(AX[1]));
   regionRaw = [Math.min(...a), Math.min(...b), Math.max(...a), Math.max(...b)];
   regionVerified = null;
-  document.getElementById('region-msg').textContent = '';
+  // still note a mild tilt: within the limit the trapezoid's bbox is a little
+  // larger than what was framed, and the user should know before trusting it.
+  msgEl.innerHTML = tilt > 5
+    ? `ℹ 視角離正上方 ${tilt.toFixed(0)}°,範圍略大於你框的;要精準請先按「⬆ 俯視」。`
+    : '';
   updateRegionPanel();
 }
 

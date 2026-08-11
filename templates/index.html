@@ -1052,6 +1052,8 @@
   // "only crop": region-limited, ONE block out. block_size must exceed the region's
   // longest side or grid_cells would still tile it, so derive it from the region and
   // fall back to a value larger than any real scene when the region is empty.
+  // grid_cells clamps cells to the region, so any size past the longest side gives
+  // exactly one cell equal to the region — no need to pad for a non-square region.
   function bsCropPreset(){
     var f = document.getElementById('form-blocksplit');
     if (!f) return;
@@ -1061,14 +1063,14 @@
     if (bsAuto) bsAuto.checked = false;
     var reb = f.querySelector('[name=rebalance]');  if (reb) reb.checked = false;
     var tile = f.querySelector('[name=tile]');      if (tile) tile.checked = false;
-    var bsz = f.querySelector('[name=block_size]'); if (bsz) bsz.value = side > 0 ? Math.ceil(side * 1.05) : 1e7;
+    var bsz = f.querySelector('[name=block_size]'); if (bsz) bsz.value = side > 0 ? Math.ceil(side) + 1 : 1e7;
     var buf = f.querySelector('[name=buffer]');     if (buf) buf.value = '0';
     var mi = f.querySelector('[name=min_images]');  if (mi) mi.value = '1';
     bsSyncAutoWarn();
     var h = document.getElementById('bs_crop_hint');
     if (h){ h.style.color = 'var(--ok)';
             h.textContent = '✅ 已設為「只裁切」:' + (side > 0
-              ? 'block_size 依 region 邊長 ' + Math.ceil(side * 1.05) + ' → 只會出 1 塊。'
+              ? 'block_size 依 region 長邊 ' + (Math.ceil(side) + 1) + ' → 只會出 1 塊,範圍與你框的完全一致。'
               : 'block_size 放到極大 → 只會出 1 塊。先填 region 再按一次會更精準。'); }
   }
   var bsCropBtn = document.getElementById('bs_crop_preset');
