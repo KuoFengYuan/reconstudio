@@ -765,32 +765,53 @@ if (scaleBtn) scaleBtn.onclick = async () => {
 };
 function renderScale(d){
   const fg = 'color:var(--fg)';
-  const a = Math.abs(d.scale_err_pct);
-  // green when indistinguishable from zero at this network's sensitivity
-  const col = a <= Math.max(0.1, 2 * d.sensitivity_pct) ? 'var(--ok)'
-            : a <= 1 ? 'var(--warn)' : 'var(--err)';
-  const bins = d.bins.map(b =>
-    `基線 ${b.lo_m}–${b.hi_m}m:<span style="${fg}">${b.median.toFixed(5)}</span> (${b.n}對)`
-  ).join('<br>');
+  const sgn = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+  // Judge the NOISE-CALIBRATED figure: at this GPS sigma even a zero-error model
+  // scores a few percent short, so the raw ratio would cry wolf on good models.
+  const a = Math.abs(d.headline_err_pct);
+  const sens = Math.max(d.sensitivity_pct, 0.01);
+  const col = a <= Math.max(0.1, 2 * sens) ? 'var(--ok)'
+            : a <= Math.max(1, 4 * sens) ? 'var(--warn)' : 'var(--err)';
+  // real bins next to the noise baseline: only the gap between them is signal
+  const cb = d.bins_calib || [];
+  const bins = d.bins.map((b, i) =>
+    `基線 ${b.lo_m}–${b.hi_m}m:<span style="${fg}">${b.median.toFixed(5)}</span>` +
+    (cb[i] ? ` <span style="opacity:.6">(噪聲基準 ${cb[i].median.toFixed(5)})</span>` : '') +
+    ` ${b.n}對`).join('<br>');
+  const drift = d.drift_excess_pct;
+  const driftLine = drift === undefined ? '' :
+    (drift <= Math.max(0.2, sens)
+      ? `各區間離散未超過噪聲基準 → 無明顯形變<br>`
+      : `<span style="color:var(--warn)">各區間離散超出噪聲基準 ${drift.toFixed(2)}% → 仍有形變/彎曲</span><br>`);
   const fo = d.folders.length ? '<br>各資料夾固定偏移(桿臂,非地圖誤差):<br>' +
     d.folders.map(f =>
       `&nbsp;${f.folder} <span style="${fg}">${f.bias_m.toFixed(2)}m</span>` +
       ` · 扣偏移後散布 ${f.spread_m.toFixed(2)}m (n=${f.n})`).join('<br>') : '';
-  // verdict first — a non-expert should know good/bad without reading numbers
-  const sens = Math.max(d.sensitivity_pct, 0.01);
   const bound = Math.max(a, sens);                       // below sensitivity = report the bound
   const verdict =
     col === 'var(--ok)' ? `✅ <b style="color:var(--ok)">地圖尺度正常</b>` :
     col === 'var(--warn)' ? `⚠️ <b style="color:var(--warn)">尺度略有偏差</b>` :
     `❌ <b style="color:var(--err)">尺度異常</b>`;
+  const dimName = d.headline_dims === 'h' ? '水平' : '3D';
   return `${verdict}<br>` +
     `每 100 公尺誤差約 <span style="${fg}">${col === 'var(--ok)' ? '≤' : ''}${(bound * 100).toFixed(0)} 公分</span><br>` +
     `與 GPS 定位差:約 <span style="${fg}">${d.resid_median_m.toFixed(1)} 公尺</span>(多為 GPS 本身噪聲)` +
+    (d.vert_note ? `<br><span style="opacity:.8">ℹ ${d.vert_note}</span>` : '') +
     (d.warning ? `<br><span style="color:var(--err)">⚠ ${d.warning}</span>` : '') +
     `<details style="margin-top:3px"><summary style="cursor:pointer">詳細數據</summary>` +
-    `尺度差 ${d.scale_err_pct >= 0 ? '+' : ''}${d.scale_err_pct.toFixed(2)}%(靈敏度 ±${sens.toFixed(2)}%)<br>` +
+    `尺度差(${dimName}·已扣噪聲偏差) <span style="${fg}">${sgn(d.headline_err_pct)}</span>` +
+    `(靈敏度 ±${sens.toFixed(2)}%)<br>` +
+    `&nbsp;原始比值 3D ${sgn(d.scale_err_pct)}` +
+    (d.scale_err_pct_h !== null && d.scale_err_pct_h !== undefined
+      ? ` · 水平 ${sgn(d.scale_err_pct_h)}` : '') + '<br>' +
+    `&nbsp;噪聲基準線(零誤差模型應得) 3D ${sgn(d.noise_bias_pct)}` +
+    (d.noise_bias_pct_h !== null && d.noise_bias_pct_h !== undefined
+      ? ` · 水平 ${sgn(d.noise_bias_pct_h)}` : '') + '<br>' +
+    `&nbsp;靈敏度來源:噪聲散布 ±${d.calib_scatter_pct.toFixed(2)}% / 架次間偏移 ±${d.folder_floor_pct.toFixed(2)}%<br>` +
+    `GPS 噪聲 σ E/N/U <span style="${fg}">${d.gps_sigma_enu_m.join(' / ')}</span>m` +
+    ` · 垂直${d.vertical_usable ? '採用' : '停用'}(實際變化 ${d.vert_spread_m}m vs σ ${d.vert_sigma_m}m)<br>` +
     `${d.n_cams} 台相機 / ${d.n_pairs} 對基線<br>` +
-    bins + '<br>各區間一致=尺度均勻、無形變<br>' +
+    bins + '<br>' + driftLine +
     `殘差 p90 ${d.resid_p90_m.toFixed(2)}m · 各軸 E/N/U ${d.resid_axis_median_m.join(' / ')}m` +
     fo +
     `<br><span style="opacity:.75">${d.note}</span></details>`;
