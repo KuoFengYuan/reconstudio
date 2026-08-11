@@ -79,6 +79,21 @@
            display:none; pointer-events:none; z-index:5; }
   #viewbanner { margin-top:8px; padding:5px 8px; border:1px solid var(--warn); border-radius:6px;
                 color:var(--warn); font-size:12px; display:none; }
+  /* ⬚ 選訓練範圍 — same floating-panel idiom as #cull, accent instead of danger */
+  #region { position:fixed; left:12px; bottom:32px; width:330px; max-width:48vw; background:var(--panel);
+            border:1px solid var(--accent); border-radius:9px; padding:9px 11px; display:none; z-index:6; }
+  #region-hd { color:var(--accent); font-weight:600; margin-bottom:5px; }
+  #region-str { display:block; width:100%; box-sizing:border-box; margin:5px 0; background:#12161d;
+                color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:5px 7px;
+                font:12px ui-monospace,monospace; }
+  #region .rg-stats { color:var(--mut); font-size:12px; line-height:1.55; margin:4px 0; }
+  #region .rg-stats b { color:var(--fg); font-variant-numeric:tabular-nums; }
+  #region .rg-btns { display:flex; gap:7px; margin-top:6px; flex-wrap:wrap; }
+  #region .rg-grow { display:flex; align-items:center; gap:6px; color:var(--mut); font-size:12px; margin-top:5px; }
+  #region .rg-grow input { width:74px; background:#12161d; color:var(--fg); border:1px solid var(--line);
+                           border-radius:5px; padding:3px 5px; font:inherit; }
+  #region-msg { margin-top:7px; font-size:11.5px; color:var(--mut); word-break:break-all; line-height:1.5; }
+  #region-msg code { color:var(--fg); }  #region-msg a { color:var(--accent); }
 </style>
 </head>
 <body>
@@ -163,6 +178,22 @@
   </div>
   <div id="cull-msg"></div>
 </div>
+<div id="region">
+  <div id="region-hd">⬚ 訓練範圍（blocksplit region）</div>
+  <div style="color:var(--mut);font-size:11px">拖曳框住要訓練的區域 → 取框內點的 X–Y 外框。<b>已切成俯視</b>,斜視角框選不會是矩形。</div>
+  <input id="region-str" readonly placeholder="還沒框選">
+  <div class="rg-grow">外擴 <input id="region-grow" type="number" step="any" value="0"> <span id="region-unit">單位</span>
+    <span style="opacity:.75">(邊界品質:建議 &gt;0)</span></div>
+  <div class="rg-stats" id="region-stats"></div>
+  <div class="rg-btns">
+    <button id="region-top" title="轉回正上方俯視(斜視角框選會失真)">⬆ 俯視</button>
+    <button id="region-verify">🔍 驗證範圍</button>
+    <button id="region-copy">📋 複製</button>
+    <button id="region-clear">清除</button>
+  </div>
+  <div class="rg-btns"><button id="region-go" style="border-color:var(--accent);color:var(--accent)">▶ 用這個範圍去裁切/分塊</button></div>
+  <div id="region-msg"></div>
+</div>
 <div id="rband"></div>
 <div id="brush-cur"></div>
 <!-- SuperSplat-style bottom toolbar: one active interaction tool at a time -->
@@ -173,6 +204,8 @@
   <button data-tool="box" title="框選刪點(標紅預覽)">▭ 框選刪點</button>
   <button data-tool="brush" title="筆刷刪點(標紅預覽)">🖌 筆刷刪點</button>
   <span id="tb-brush"><input id="brush-size" type="range" min="8" max="150" step="2" value="30">筆刷 <span id="brush-v">30</span></span>
+  <span class="sep"></span>
+  <button data-tool="region" title="框選要訓練的區域 → 產生 blocksplit region">⬚ 選訓練範圍</button>
 </div>
 <div id="hint"><b>WASD</b>=移動 · <b>Q/E</b> 或右鍵拖曳=上下 · <b>R</b>=重置 · 拖曳=旋轉 · 滾輪=縮放 · 雙擊相機=資訊 ‖ 挑選模式:點=單選/取消 · 勾「框選模式」後拖曳=框選一群</div>
 
@@ -265,6 +298,7 @@ const CULLCLR = 0xf85149;  // marked-for-removal camera colour
 let selectMode = false;            // 挑選要移除的相機
 let boxMode = false;               // 框選模式: drag=box-select (off: drag=rotate)
 let delPtsMode = false;            // ✂️ 刪點模式: box / brush select → mark → delete (client-side, non-destructive)
+let regionMode = false;            // ⬚ 選訓練範圍: box-select → blocksplit region (reads nothing, writes nothing)
 let delTool = 'box';               // 'box' | 'brush'
 let brushR = 30;                   // brush radius in screen px
 let _scrX = null, _scrY = null, _rIdx = null;     // brush: cached screen coords + render-index of alive points
@@ -464,6 +498,7 @@ function updateCullTip(){
 function setTool(tool){
   selectMode = (tool === 'cam');
   delPtsMode = (tool === 'box' || tool === 'brush');
+  regionMode = (tool === 'region');
   delTool = (tool === 'brush') ? 'brush' : 'box';
   cull.style.display = selectMode ? 'block' : 'none';
   document.getElementById('culltip').style.display = selectMode ? 'block' : 'none';
@@ -472,6 +507,9 @@ function setTool(tool){
   document.getElementById('delpts-tip').style.display = delPtsMode ? '' : 'none';
   document.getElementById('tb-brush').style.display = (tool === 'brush') ? 'inline-flex' : 'none';
   if (tool !== 'brush') document.getElementById('brush-cur').style.display = 'none';
+  // #region and #cull share the bottom-left slot — only one tool is ever active
+  document.getElementById('region').style.display = regionMode ? 'block' : 'none';
+  if (regionMode) enterRegionMode();
   controls.enabled = true;                       // leaving a box/brush drag can't strand it
   updateCullTip(); updateCullPanel();
   document.querySelectorAll('#toolbar [data-tool]').forEach(b => b.classList.toggle('on', b.dataset.tool === tool));
@@ -511,10 +549,13 @@ function camsInRect(x0, y0, x1, y1){
 // Shift+drag = rotate. Alt = the box deselects. Capture phase so we can suspend
 // TrackballControls before it starts orbiting when the drag is meant to be a box.
 let pdx = 0, pdy = 0, boxing = false, maybeBox = false, addToSel = true, delBox = false, brushing = false;
+let regionBox = false;             // this drag is a ⬚ region box
 const onCanvas = e => e.target === renderer.domElement;
 renderer.domElement.addEventListener('pointerdown', e => {
-  pdx = e.clientX; pdy = e.clientY; boxing = false; maybeBox = false; delBox = false;
-  if (delPtsMode && e.button === 0 && onCanvas(e)){          // ✂️ mark points (box or brush)
+  pdx = e.clientX; pdy = e.clientY; boxing = false; maybeBox = false; delBox = false; regionBox = false;
+  if (regionMode && e.button === 0 && onCanvas(e)){          // ⬚ frame the training region
+    maybeBox = true; regionBox = true; controls.enabled = false;
+  } else if (delPtsMode && e.button === 0 && onCanvas(e)){   // ✂️ mark points (box or brush)
     if (delTool === 'brush'){ brushing = true; controls.enabled = false; brushProject(); brushAt(e.clientX, e.clientY); e.preventDefault(); }
     else { maybeBox = true; delBox = true; controls.enabled = false; }
   } else if (selectMode && e.button === 0 && onCanvas(e)){
@@ -536,11 +577,12 @@ addEventListener('pointerup', e => {
     maybeBox = false; controls.enabled = true;
     if (boxing){                                                  // 框選 a group
       boxing = false; rband.style.display = 'none';
+      if (regionBox){ regionBox = false; regionFromRect(pdx, pdy, e.clientX, e.clientY); return; }
       if (delBox){ delBox = false; selectPointsInRect(pdx, pdy, e.clientX, e.clientY); return; }
       camsInRect(pdx, pdy, e.clientX, e.clientY).forEach(i => addToSel ? selected.add(i) : selected.delete(i));
       refreshCams(); updateCullPanel(); return;
     }
-    delBox = false;
+    delBox = false; regionBox = false;
   }
   if (selectMode && e.button === 0 && onCanvas(e) && !wasDrag){    // a click -> single toggle
     const idx = pickCamera(e.clientX, e.clientY);
@@ -710,6 +752,211 @@ document.getElementById('brush-size').oninput = e => { brushR = +e.target.value;
 document.getElementById('delpts-go').onclick = commitDeleteSelected;
 document.getElementById('delpts-deselect').onclick = clearSelection;
 
+// ── ⬚ 選訓練範圍 → blocksplit `region` ──────────────────────────────────────
+// blocksplit grids the X–Y plane of a Z-up model, so a region is 4 numbers in the
+// model's own units. Two decisions matter for correctness:
+//
+//  1. The drag is turned into a ground rectangle by RAYCASTING its four screen
+//     corners onto the plane at the cloud's median height — not by screen-selecting
+//     points. A screen rect encloses a frustum, so with 1.4 km of terrain relief
+//     under an aerial block, point-based selection would pull in far-off points at
+//     other heights. Ray/plane intersection is height-independent and gives exactly
+//     the area the user framed. (Entering the tool snaps to top-down, where a screen
+//     rect maps to an axis-aligned ground rect; off-axis views degrade gracefully
+//     because we take the bbox of all four corners.)
+//  2. The numbers only mean something in the frame blocksplit will read. We derive
+//     the up axis exactly as pipeline.model.up_axis does, refuse to trust a non-Z-up
+//     model, and 🔍 驗證範圍 re-reads the real target model server-side.
+// default('') so a stale server process (templates are re-read per request, router
+// code is not) degrades to "no source" instead of 500-ing the whole viewer page.
+const BS_SOURCE = {{ bs_source | default('') | tojson }};
+const UNIT = {{ 'true' if scale_ok else 'false' }} ? '公尺' : '模型單位';
+let regionRaw = null;              // [min0, min1, max0, max1] on the horizontal axes, pre-grow
+let regionZ = null;                // [lo, hi] on the up axis, for drawing the box
+let regionBoxObj = null;           // the 3D wireframe in `inner`
+let regionVerified = null;         // last server response
+
+// same rule as pipeline.model.up_axis: the axis whose camera centres vary least
+function modelUpAxis(){
+  if (imagesData.length < 3) return 2;
+  const lo = [1e30,1e30,1e30], hi = [-1e30,-1e30,-1e30];
+  for (const im of imagesData) for (let k=0;k<3;k++){
+    if (im.center[k] < lo[k]) lo[k] = im.center[k];
+    if (im.center[k] > hi[k]) hi[k] = im.center[k];
+  }
+  const sp = [hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]];
+  return sp.indexOf(Math.min(...sp));
+}
+const horizAxes = up => [0,1,2].filter(k => k !== up);
+const regionDec = () => sceneSize > 200 ? 1 : sceneSize > 20 ? 2 : 4;
+const fmtR = v => (+v).toFixed(regionDec());
+
+function snapTopDown(){
+  if (!points) return;
+  const UP = modelUpAxis(), tgt = obj.position.clone();
+  inner.updateWorldMatrix(true, false);
+  const upW = new THREE.Vector3().setComponent(UP, 1).transformDirection(inner.matrixWorld).normalize();
+  const AX = horizAxes(UP);
+  // camera.up along the SECOND horizontal axis → screen-x runs along the first,
+  // so the drag rect comes out axis-aligned with the region's own axes.
+  camera.up.copy(new THREE.Vector3().setComponent(AX[1], 1).transformDirection(inner.matrixWorld).normalize());
+  // stand on the side the cameras are on, else an aerial block is viewed from underground
+  let sgn = 1;
+  if (imagesData.length){
+    let s = 0; for (const im of imagesData) s += im.center[UP];
+    sgn = (s / imagesData.length >= centerC.getComponent(UP)) ? 1 : -1;
+  }
+  controls.target.copy(tgt);
+  camera.position.copy(tgt.clone().addScaledVector(upW, sgn * sceneSize * 1.8));
+  controls.update();
+}
+
+function enterRegionMode(){
+  document.getElementById('region-unit').textContent = UNIT;
+  snapTopDown();
+  updateRegionPanel();
+}
+
+// screen point -> model-space point on the ground plane (up coord = cloud median)
+function screenToGround(cx, cy, UP){
+  const r = renderer.domElement.getBoundingClientRect();
+  inner.updateWorldMatrix(true, false);
+  const inv = new THREE.Matrix4().copy(inner.matrixWorld).invert();
+  const ndc = new THREE.Vector3(((cx - r.left)/r.width)*2 - 1, -((((cy - r.top)/r.height)*2) - 1), 0.5);
+  const o = camera.position.clone();
+  const d = ndc.unproject(camera).sub(o).normalize();
+  o.applyMatrix4(inv); d.transformDirection(inv);
+  const k = d.getComponent(UP);
+  if (Math.abs(k) < 1e-12) return null;
+  const t = (centerC.getComponent(UP) - o.getComponent(UP)) / k;
+  return t > 0 ? o.addScaledVector(d, t) : null;
+}
+
+function regionFromRect(x0, y0, x1, y1){
+  const UP = modelUpAxis(), AX = horizAxes(UP);
+  const corners = [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]
+    .map(([a,b]) => screenToGround(a, b, UP)).filter(Boolean);
+  if (corners.length < 4){
+    document.getElementById('region-msg').textContent =
+      '⚠ 這個視角框不到地面平面 — 按「⬆ 俯視」再框。';
+    return;
+  }
+  const a = corners.map(p => p.getComponent(AX[0])), b = corners.map(p => p.getComponent(AX[1]));
+  regionRaw = [Math.min(...a), Math.min(...b), Math.max(...a), Math.max(...b)];
+  regionVerified = null;
+  document.getElementById('region-msg').textContent = '';
+  updateRegionPanel();
+}
+
+// the grown region actually handed to blocksplit
+function regionFinal(){
+  if (!regionRaw) return null;
+  const g = +document.getElementById('region-grow').value || 0;
+  const r = [regionRaw[0]-g, regionRaw[1]-g, regionRaw[2]+g, regionRaw[3]+g];
+  return (r[0] < r[2] && r[1] < r[3]) ? r : null;
+}
+const regionStr = () => { const r = regionFinal(); return r ? r.map(fmtR).join(',') : ''; };
+
+function drawRegionBox(){
+  if (regionBoxObj){ inner.remove(regionBoxObj); regionBoxObj.geometry.dispose();
+                     regionBoxObj.material.dispose(); regionBoxObj = null; }
+  const r = regionFinal();
+  if (!r || !points) return;
+  const UP = modelUpAxis(), AX = horizAxes(UP);
+  const lo = regionZ ? regionZ[0] : centerC.getComponent(UP) - sceneSize*0.05;
+  const hi = regionZ ? regionZ[1] : centerC.getComponent(UP) + sceneSize*0.05;
+  const at = (i, j, up) => { const v = new THREE.Vector3();
+    v.setComponent(AX[0], i ? r[2] : r[0]); v.setComponent(AX[1], j ? r[3] : r[1]);
+    v.setComponent(UP, up); return v; };
+  const q = [at(0,0,lo),at(1,0,lo),at(1,1,lo),at(0,1,lo),at(0,0,hi),at(1,0,hi),at(1,1,hi),at(0,1,hi)];
+  const E = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+  const pos = [];
+  for (const [i,j] of E) pos.push(q[i].x,q[i].y,q[i].z, q[j].x,q[j].y,q[j].z);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  regionBoxObj = new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:0x39c5cf}));
+  inner.add(regionBoxObj);
+}
+
+function updateRegionPanel(){
+  const el = document.getElementById('region-str'), st = document.getElementById('region-stats');
+  const r = regionFinal();
+  el.value = regionStr();
+  if (!r){ st.innerHTML = ''; drawRegionBox(); return; }
+  const UP = modelUpAxis(), AX = horizAxes(UP);
+  const inR = (p0, p1) => p0 >= r[0] && p0 <= r[2] && p1 >= r[1] && p1 <= r[3];
+  let nc = 0;
+  for (const im of imagesData) if (inR(im.center[AX[0]], im.center[AX[1]])) nc++;
+  let np = 0;
+  const ups = [];                    // in-region up coords, for a robust box height
+  if (ptAlive) for (let i=0;i<ptAlive.length;i++){
+    if (!ptAlive[i]) continue;
+    if (!inR(ptPos[i*3+AX[0]], ptPos[i*3+AX[1]])) continue;
+    np++;
+    ups.push(ptPos[i*3+UP]);
+  }
+  // 2–98 percentile, not min/max: a handful of sky/underground outliers would
+  // otherwise stretch the drawn box over kilometres and hide the actual footprint.
+  if (ups.length >= 20){
+    ups.sort((a,b) => a-b);
+    regionZ = [ups[Math.floor(ups.length*0.02)], ups[Math.floor((ups.length-1)*0.98)]];
+  } else regionZ = ups.length ? [Math.min(...ups), Math.max(...ups)] : null;
+  const w = r[2]-r[0], h = r[3]-r[1];
+  const area = UNIT === '公尺' ? `${(w*h/1e6).toFixed(2)} km²` : `${(w*h).toPrecision(3)} 單位²`;
+  const upName = 'XYZ'[UP];
+  st.innerHTML =
+    `尺寸 <b>${fmtR(w)} × ${fmtR(h)}</b> ${UNIT} · <b>${area}</b><br>` +
+    `框內相機 <b>${nc}</b> / ${imagesData.length} · 框內點 <b>${np.toLocaleString()}</b><br>` +
+    `切格平面 <b>${'XYZ'[AX[0]]}–${'XYZ'[AX[1]]}</b>（up=${upName}）` +
+    (UP === 2 ? '' : ` <span style="color:var(--warn)">⚠ 這個模型不是 Z-up,region 需要 Z-up 模型 — 按 🔍 驗證範圍確認</span>`);
+  drawRegionBox();
+}
+
+document.getElementById('region-top').onclick = snapTopDown;
+document.getElementById('region-grow').oninput = () => { regionVerified = null; updateRegionPanel(); };
+document.getElementById('region-clear').onclick = () => {
+  regionRaw = null; regionZ = null; regionVerified = null;
+  document.getElementById('region-msg').textContent = ''; updateRegionPanel();
+};
+document.getElementById('region-copy').onclick = async () => {
+  const s = regionStr(); if (!s) return;
+  const msg = document.getElementById('region-msg');
+  try { await navigator.clipboard.writeText(s); msg.textContent = '✅ 已複製 region: ' + s; }
+  catch(_){ const el = document.getElementById('region-str'); el.select(); msg.textContent = '請按 Ctrl+C 複製'; }
+};
+document.getElementById('region-verify').onclick = async () => {
+  const s = regionStr(), btn = document.getElementById('region-verify'), msg = document.getElementById('region-msg');
+  if (!s){ msg.textContent = '先框選一個範圍。'; return; }
+  btn.disabled = true; msg.textContent = '讀取分塊會用的模型並統計中…';
+  try {
+    const rq = await fetch(`/api/jobs/${JOB}/region_check`, {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({region: s, from: MSUB})});
+    const d = await rq.json();
+    if (!rq.ok || !d.ok) throw new Error(d.detail || rq.statusText);
+    regionVerified = d;
+    const pct = d.points_total ? (100*d.points_in/d.points_total).toFixed(1) : '0';
+    const cov = (100*d.frac_track_ge_in).toFixed(0);
+    msg.innerHTML =
+      (d.frame_match ? '✅ <b>座標系相符</b>,以下是分塊模型的實際內容:'
+                     : '❌ <b style="color:var(--err)">座標系不符</b> — 下面的數字不可用:') + '<br>' +
+      `相機 <b>${d.cameras_in}</b>/${d.cameras_total} · 點 <b>${d.points_in.toLocaleString()}</b>/${d.points_total.toLocaleString()}（${pct}%）<br>` +
+      `框內平均 track <b>${d.mean_track_in.toFixed(1)}</b> · track≥${d.track_min} 佔 <b>${cov}%</b>` +
+      `　<span style="opacity:.75">(多視角覆蓋指標,越高越值得訓練)</span><br>` +
+      `分塊會讀:<code>${d.sparse}</code>` +
+      (d.notes.length ? '<br>' + d.notes.map(n => `<span style="color:var(--warn)">${n}</span>`).join('<br>') : '');
+  } catch(err){ msg.textContent = '❌ 驗證失敗: ' + err; }
+  btn.disabled = false;
+};
+document.getElementById('region-go').onclick = () => {
+  const s = regionStr(), msg = document.getElementById('region-msg');
+  if (!s){ msg.textContent = '先框選一個範圍。'; return; }
+  if (!BS_SOURCE){ msg.textContent = '此 job 沒有 workspace,無法自動帶入分塊表單 — 請用 📋 複製手動貼。'; return; }
+  if (regionVerified && !regionVerified.frame_match &&
+      !confirm('驗證顯示座標系不符,這個 region 很可能是錯的。仍要帶入分塊表單?')) return;
+  const q = new URLSearchParams({tool:'blocksplit', source: BS_SOURCE, region: s, crop: '1'});
+  open('/?' + q, '_blank');
+};
+
 // ── WASD fly-nav ────────────────────────────────────────────────────────────
 // W/S=前/後, A/D=左/右, Q/E=下/上;Shift=加速。速度依場景大小(sceneSize,在 fitView
 // 設定)自動縮放,所以不管場景是 1 單位還是 1000 單位都差不多手感。移動時 eye 與 orbit
@@ -765,32 +1012,53 @@ if (scaleBtn) scaleBtn.onclick = async () => {
 };
 function renderScale(d){
   const fg = 'color:var(--fg)';
-  const a = Math.abs(d.scale_err_pct);
-  // green when indistinguishable from zero at this network's sensitivity
-  const col = a <= Math.max(0.1, 2 * d.sensitivity_pct) ? 'var(--ok)'
-            : a <= 1 ? 'var(--warn)' : 'var(--err)';
-  const bins = d.bins.map(b =>
-    `基線 ${b.lo_m}–${b.hi_m}m:<span style="${fg}">${b.median.toFixed(5)}</span> (${b.n}對)`
-  ).join('<br>');
+  const sgn = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+  // Judge the NOISE-CALIBRATED figure: at this GPS sigma even a zero-error model
+  // scores a few percent short, so the raw ratio would cry wolf on good models.
+  const a = Math.abs(d.headline_err_pct);
+  const sens = Math.max(d.sensitivity_pct, 0.01);
+  const col = a <= Math.max(0.1, 2 * sens) ? 'var(--ok)'
+            : a <= Math.max(1, 4 * sens) ? 'var(--warn)' : 'var(--err)';
+  // real bins next to the noise baseline: only the gap between them is signal
+  const cb = d.bins_calib || [];
+  const bins = d.bins.map((b, i) =>
+    `基線 ${b.lo_m}–${b.hi_m}m:<span style="${fg}">${b.median.toFixed(5)}</span>` +
+    (cb[i] ? ` <span style="opacity:.6">(噪聲基準 ${cb[i].median.toFixed(5)})</span>` : '') +
+    ` ${b.n}對`).join('<br>');
+  const drift = d.drift_excess_pct;
+  const driftLine = drift === undefined ? '' :
+    (drift <= Math.max(0.2, sens)
+      ? `各區間離散未超過噪聲基準 → 無明顯形變<br>`
+      : `<span style="color:var(--warn)">各區間離散超出噪聲基準 ${drift.toFixed(2)}% → 仍有形變/彎曲</span><br>`);
   const fo = d.folders.length ? '<br>各資料夾固定偏移(桿臂,非地圖誤差):<br>' +
     d.folders.map(f =>
       `&nbsp;${f.folder} <span style="${fg}">${f.bias_m.toFixed(2)}m</span>` +
       ` · 扣偏移後散布 ${f.spread_m.toFixed(2)}m (n=${f.n})`).join('<br>') : '';
-  // verdict first — a non-expert should know good/bad without reading numbers
-  const sens = Math.max(d.sensitivity_pct, 0.01);
   const bound = Math.max(a, sens);                       // below sensitivity = report the bound
   const verdict =
     col === 'var(--ok)' ? `✅ <b style="color:var(--ok)">地圖尺度正常</b>` :
     col === 'var(--warn)' ? `⚠️ <b style="color:var(--warn)">尺度略有偏差</b>` :
     `❌ <b style="color:var(--err)">尺度異常</b>`;
+  const dimName = d.headline_dims === 'h' ? '水平' : '3D';
   return `${verdict}<br>` +
     `每 100 公尺誤差約 <span style="${fg}">${col === 'var(--ok)' ? '≤' : ''}${(bound * 100).toFixed(0)} 公分</span><br>` +
     `與 GPS 定位差:約 <span style="${fg}">${d.resid_median_m.toFixed(1)} 公尺</span>(多為 GPS 本身噪聲)` +
+    (d.vert_note ? `<br><span style="opacity:.8">ℹ ${d.vert_note}</span>` : '') +
     (d.warning ? `<br><span style="color:var(--err)">⚠ ${d.warning}</span>` : '') +
     `<details style="margin-top:3px"><summary style="cursor:pointer">詳細數據</summary>` +
-    `尺度差 ${d.scale_err_pct >= 0 ? '+' : ''}${d.scale_err_pct.toFixed(2)}%(靈敏度 ±${sens.toFixed(2)}%)<br>` +
+    `尺度差(${dimName}·已扣噪聲偏差) <span style="${fg}">${sgn(d.headline_err_pct)}</span>` +
+    `(靈敏度 ±${sens.toFixed(2)}%)<br>` +
+    `&nbsp;原始比值 3D ${sgn(d.scale_err_pct)}` +
+    (d.scale_err_pct_h !== null && d.scale_err_pct_h !== undefined
+      ? ` · 水平 ${sgn(d.scale_err_pct_h)}` : '') + '<br>' +
+    `&nbsp;噪聲基準線(零誤差模型應得) 3D ${sgn(d.noise_bias_pct)}` +
+    (d.noise_bias_pct_h !== null && d.noise_bias_pct_h !== undefined
+      ? ` · 水平 ${sgn(d.noise_bias_pct_h)}` : '') + '<br>' +
+    `&nbsp;靈敏度來源:噪聲散布 ±${d.calib_scatter_pct.toFixed(2)}% / 架次間偏移 ±${d.folder_floor_pct.toFixed(2)}%<br>` +
+    `GPS 噪聲 σ E/N/U <span style="${fg}">${d.gps_sigma_enu_m.join(' / ')}</span>m` +
+    ` · 垂直${d.vertical_usable ? '採用' : '停用'}(實際變化 ${d.vert_spread_m}m vs σ ${d.vert_sigma_m}m)<br>` +
     `${d.n_cams} 台相機 / ${d.n_pairs} 對基線<br>` +
-    bins + '<br>各區間一致=尺度均勻、無形變<br>' +
+    bins + '<br>' + driftLine +
     `殘差 p90 ${d.resid_p90_m.toFixed(2)}m · 各軸 E/N/U ${d.resid_axis_median_m.join(' / ')}m` +
     fo +
     `<br><span style="opacity:.75">${d.note}</span></details>`;

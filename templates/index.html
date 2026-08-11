@@ -660,10 +660,21 @@
         <label>buffer（邊界外擴;訓練後裁掉避免接縫）</label>
         <input name="buffer" value="120">
         <label>region（minx,miny,maxx,maxy;留空 = 全範圍）</label>
-        <input name="region" placeholder="只要市區就填市區範圍">
-        <label class="chk"><input type="checkbox" name="auto" value="1" checked>
+        <input name="region" id="bs_region" placeholder="只要市區就填市區範圍">
+        <div class="hint">不用手算 —— 開該 job 的 3D 檢視器 → 底部工具列 <b>⬚ 選訓練範圍</b> → 框住要訓練的區域 →
+          <b>▶ 用這個範圍去裁切/分塊</b>,會自動帶回這張表單。</div>
+        <div class="row" style="margin-top:6px">
+          <button type="button" class="ghost" id="bs_crop_preset"
+                  title="只保留 region 範圍、輸出單一塊(不切塊、不切片)">✂️ 只裁切不分塊</button>
+        </div>
+        <div class="hint" id="bs_crop_hint">影像數不多（約 &lt; 500 張）時通常只需要裁切範圍,不需要分塊 ——
+          這顆會設好 auto/rebalance 關、block_size 放大到只剩一格、buffer=0、切片關。</div>
+        <label class="chk"><input type="checkbox" name="auto" value="1" checked id="bs_auto">
           <span>✨ 自動分塊（從相機分佈自動算要切幾塊/塊多大/buffer,下面參數免調）</span></label>
         <div class="hint">開啟時 block_size / buffer / max_images / min_images 全自動推導（目標每塊約 120 張）。要手動調再關掉它。</div>
+        <div class="hint" id="bs_auto_warn" style="display:none;color:var(--warn)">⚠️ 填了 region 又開自動分塊:
+          自動分塊會依<b>全部</b>相機數決定要切幾塊,region 內仍會被切成多塊。只想裁切範圍請按上面的
+          「✂️ 只裁切不分塊」。</div>
         <label class="chk"><input type="checkbox" name="rebalance" value="1" checked>
           <span>自適應分塊平衡（REUrbanGS;依相機密度切,密處多/疏處併。關閉 = 固定網格;自動分塊開啟時由系統接管）</span></label>
         <div class="hint">手動模式:每塊相機數 ≤ max_images、≥ min_images,block_size 當最小塊邊。</div>
@@ -1029,6 +1040,52 @@
     if (which==='train' || which==='mesh') syncBackendParams(which);
   }
   showForm('gcs');   // default landing = the 資料 tab (free navigation, no fixed order)
+
+  // ── blocksplit: region prefill from the viewer + the two guards ────────────
+  // The 3D viewer's ⬚ 選訓練範圍 tool opens /?tool=blocksplit&source=…&region=…&crop=1,
+  // so a framed region lands in this form without the user copying numbers by hand.
+  var bsRegion = document.getElementById('bs_region'), bsAuto = document.getElementById('bs_auto');
+  function bsSyncAutoWarn(){
+    var w = document.getElementById('bs_auto_warn');
+    if (w) w.style.display = (bsRegion && bsRegion.value.trim() && bsAuto && bsAuto.checked) ? '' : 'none';
+  }
+  // "only crop": region-limited, ONE block out. block_size must exceed the region's
+  // longest side or grid_cells would still tile it, so derive it from the region and
+  // fall back to a value larger than any real scene when the region is empty.
+  function bsCropPreset(){
+    var f = document.getElementById('form-blocksplit');
+    if (!f) return;
+    var side = 0, r = (bsRegion && bsRegion.value || '').replace(/,/g, ' ').split(/\s+/).filter(Boolean).map(Number);
+    if (r.length === 4 && r.every(function(v){ return isFinite(v); }))
+      side = Math.max(r[2] - r[0], r[3] - r[1]);
+    if (bsAuto) bsAuto.checked = false;
+    var reb = f.querySelector('[name=rebalance]');  if (reb) reb.checked = false;
+    var tile = f.querySelector('[name=tile]');      if (tile) tile.checked = false;
+    var bsz = f.querySelector('[name=block_size]'); if (bsz) bsz.value = side > 0 ? Math.ceil(side * 1.05) : 1e7;
+    var buf = f.querySelector('[name=buffer]');     if (buf) buf.value = '0';
+    var mi = f.querySelector('[name=min_images]');  if (mi) mi.value = '1';
+    bsSyncAutoWarn();
+    var h = document.getElementById('bs_crop_hint');
+    if (h){ h.style.color = 'var(--ok)';
+            h.textContent = '✅ 已設為「只裁切」:' + (side > 0
+              ? 'block_size 依 region 邊長 ' + Math.ceil(side * 1.05) + ' → 只會出 1 塊。'
+              : 'block_size 放到極大 → 只會出 1 塊。先填 region 再按一次會更精準。'); }
+  }
+  var bsCropBtn = document.getElementById('bs_crop_preset');
+  if (bsCropBtn) bsCropBtn.onclick = bsCropPreset;
+  if (bsRegion) bsRegion.addEventListener('input', bsSyncAutoWarn);
+  if (bsAuto) bsAuto.addEventListener('change', bsSyncAutoWarn);
+
+  (function bsPrefillFromQuery(){
+    var q = new URLSearchParams(location.search);
+    if (q.get('tool') !== 'blocksplit') return;
+    var src = document.getElementById('bs_source');
+    if (src && q.get('source')) src.value = q.get('source');
+    if (bsRegion && q.get('region')) bsRegion.value = q.get('region');
+    showForm('blocksplit');
+    if (q.get('crop') === '1') bsCropPreset(); else bsSyncAutoWarn();
+    history.replaceState(null, '', location.pathname);   // don't re-apply on reload
+  })();
 
   // Show the selected backend's param block within a form; disable inputs in the
   // hidden blocks so only the chosen backend's fields are submitted (no key clash).
