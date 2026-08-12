@@ -24,6 +24,7 @@ from pipeline.model import (
     cull_points,
     ensure_ply,
     frame_delta,
+    horiz_axes,
     image_detail,
     read_images,
     region_stats,
@@ -178,7 +179,7 @@ async def region_check_ep(job_id: str, request: Request):
         raise HTTPException(400, "region 是空的。")
 
     def _resolve() -> tuple[Path, list[str]]:
-        """The Z-up sparse dir blocksplit would grid, mirroring _resolve_zup."""
+        """The sparse dir blocksplit would grid, mirroring _resolve_zup."""
         from pipeline.train import _resolve_dense
         sparse_dir, _images = _resolve_dense(Path(ws))
         notes: list[str] = []
@@ -188,12 +189,24 @@ async def region_check_ep(job_id: str, request: Request):
             if sib != sparse_dir and (sib / "cameras.bin").is_file() and up_axis(sib) == 2:
                 notes.append(f"分塊會改用 Z-up 模型 {sib.name}（{sparse_dir.name} 非 Z-up）")
                 return sib, notes
-        notes.append(f"⚠️ 找不到 Z-up 模型,分塊會沿用 {sparse_dir.name} — X-Y 切格可能塌成一格。")
+        up = up_axis(sparse_dir)
+        if up in (0, 1):
+            # blocksplit rotates a Z-up copy itself; the rotation keeps the
+            # horizontal axes in this order, so the region stays this rectangle.
+            notes.append(f"{sparse_dir.name} 是 {'XYZ'[up]}-up 且沒有 Z-up 兄弟模型 —"
+                         " 分塊時會自動剛體旋轉一份 Z-up 模型（原模型不動）,"
+                         "此範圍會照樣套用。")
+        else:
+            notes.append(f"⚠️ 找不到 Z-up 模型,分塊會沿用 {sparse_dir.name} — X-Y 切格可能塌成一格。")
         return sparse_dir, notes
 
     def _work() -> dict:
         sparse_dir, notes = _resolve()
-        stats = region_stats(sparse_dir, region)
+        # measure on the model's OWN horizontal plane: the region was drawn there,
+        # and blocksplit's auto-rotation maps exactly this pair onto X–Y.
+        up = up_axis(sparse_dir)
+        stats = region_stats(sparse_dir, region,
+                             axes=horiz_axes(up) if up is not None else (0, 1))
         viewer_md = resolve_model(job, body.get("from") or None)
         delta, size, shared = 0.0, 0.0, stats["cameras_total"]
         if viewer_md and viewer_md.resolve() != sparse_dir.resolve():

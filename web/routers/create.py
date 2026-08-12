@@ -21,7 +21,7 @@ from web.services.forms import (
     parse_marker,
     scene_label,
 )
-from web.services.models import prepare_edited_model
+from web.services.models import inspect_workspace, prepare_edited_model
 from web.shared import BROWSE_ROOT, DEST_ROOT, FFMPEG_BIN, GSUTIL_BIN, _page
 
 router = APIRouter()
@@ -246,6 +246,46 @@ async def create_colmap(request: Request):
               params=params, mirror=str(Path(workspace) / "pipeline.log"),
               meta={"image_root": image_root, "workspace": workspace, "subfolders": sub})
     manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/import_colmap", response_class=HTMLResponse)
+async def import_colmap(request: Request):
+    """讀取既有 COLMAP 結果：把磁碟上已經跑完的 workspace 註冊成一筆完成的 job，
+    不重跑任何階段。
+
+    The viewer, the image endpoints and 帶入訓練 all resolve their paths from a job's
+    meta/params, so a workspace produced before the panel existed (or one whose job
+    record was deleted) is unreachable even though the files are right there. This
+    rebuilds just enough of a record to hand it to the same machinery.
+    """
+    form = dict(await request.form())
+    ws = (form.get("workspace") or "").strip().rstrip("/")
+    if not ws or not Path(ws).is_dir():
+        return _page(request, "_error.html", message=f"workspace 不是資料夾: {ws!r}")
+    info = inspect_workspace(Path(ws))
+    if not info:
+        return _page(request, "_error.html",
+                     message=f"{ws} 底下找不到 sparse 模型（sparse/0、sparse/ 或 sparse/<N>/ "
+                             "裡的 images.bin + points3D.bin），不是跑完的 COLMAP workspace。")
+    if existing := manager.find_by_workspace("colmap", ws):
+        return _page(request, "_jobview.html", job=existing.to_dict(), stages=COLMAP_STAGES)
+
+    image_root = (form.get("image_root") or "").strip().rstrip("/") or info["image_root"]
+    mtime = Path(info["model"]).stat().st_mtime      # sort in 歷史 by when it was reconstructed
+    job = Job(id=new_id(), kind="colmap",
+              title=f"{Path(ws).name}（既有結果）",
+              subtitle=f"{ws}  ·  匯入既有 COLMAP 結果（未重跑）",
+              params={"image_root": image_root, "workspace": ws,
+                      "dataset_name": info["dataset_name"], "mapper": info["mapper"],
+                      "resize_max": info["resize_max"], "imported": True},
+              # only the stages the files on disk actually prove
+              stage_status={"mapper": "done", **({"undistort": "done"} if info["dataset"] else {})},
+              meta={"image_root": image_root, "workspace": ws, "subfolders": [],
+                    "imported": True},
+              mirror=str(p) if (p := Path(ws) / "pipeline.log").is_file() else None,
+              status="done", created_at=mtime, started_at=mtime, finished_at=mtime)
+    manager.register(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
 

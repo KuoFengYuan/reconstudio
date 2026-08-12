@@ -940,7 +940,7 @@ function updateRegionPanel(){
     `尺寸 <b>${fmtR(w)} × ${fmtR(h)}</b> ${UNIT} · <b>${area}</b><br>` +
     `框內相機 <b>${nc}</b> / ${imagesData.length} · 框內點 <b>${np.toLocaleString()}</b><br>` +
     `切格平面 <b>${'XYZ'[AX[0]]}–${'XYZ'[AX[1]]}</b>（up=${upName}）` +
-    (UP === 2 ? '' : ` <span style="color:var(--warn)">⚠ 這個模型不是 Z-up,region 需要 Z-up 模型 — 按 🔍 驗證範圍確認</span>`);
+    (UP === 2 ? '' : ` <span style="color:var(--warn)">⚠ 這個模型不是 Z-up — 分塊時會自動旋轉成 Z-up 再切,此範圍照樣有效。按 🔍 驗證範圍確認</span>`);
   drawRegionBox();
 }
 

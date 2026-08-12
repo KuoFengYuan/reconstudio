@@ -185,19 +185,34 @@ def frame_delta(model_a: Path, model_b: Path) -> tuple[float, float, int]:
     return (worst, size, len(shared))
 
 
+def horiz_axes(up: int) -> tuple[int, int]:
+    """The two horizontal axes of a model with this up axis, ascending — the same
+    order the viewer's region tool uses (horizAxes in viz.html) and the order
+    large_scene.to_zup preserves, so a region means the same rectangle in all three
+    places."""
+    return tuple(k for k in (0, 1, 2) if k != up)          # type: ignore[return-value]
+
+
 def region_stats(model_dir: Path, region: tuple[float, float, float, float],
-                 track_min: int = 5) -> dict:
+                 track_min: int = 5, axes: tuple[int, int] = (0, 1)) -> dict:
     """What a blocksplit `region` actually contains, read from `model_dir`.
 
-    Counts cameras whose centre falls inside the X–Y rectangle, points inside it,
-    and the in-region track-length distribution — track length is the multi-view
+    Counts cameras whose centre falls inside the rectangle, points inside it, and
+    the in-region track-length distribution — track length is the multi-view
     coverage signal that decides whether the region is worth training (a region
     full of 2-view points reconstructs badly however large it is).
+
+    `axes` are the two coordinates the rectangle is measured on. blocksplit grids
+    X–Y (the default), but a region picked on a not-yet-rotated model is drawn on
+    that model's own horizontal pair, and measuring it on X–Y instead would report
+    a rectangle the user never drew.
     """
     minx, miny, maxx, maxy = region
+    a0, a1 = axes
     imgs = read_images(model_dir / "images.bin")
     cam_in = sum(1 for im in imgs
-                 if minx <= im["center"][0] <= maxx and miny <= im["center"][1] <= maxy)
+                 if minx <= im["center"][a0] <= maxx and miny <= im["center"][a1] <= maxy)
+    up = ({0, 1, 2} - {a0, a1}).pop()
 
     n_pts = pts_in = trk_sum = trk_ge = 0
     z_lo = z_hi = None
@@ -205,14 +220,15 @@ def region_stats(model_dir: Path, region: tuple[float, float, float, float],
         n_pts = struct.unpack("<Q", f.read(8))[0]
         for _ in range(n_pts):
             head = f.read(43)                    # id + xyz + rgb + error
-            x, y, z = struct.unpack("<3d", head[8:32])
+            xyz = struct.unpack("<3d", head[8:32])
             tl = struct.unpack("<Q", f.read(8))[0]
             f.seek(tl * 8, 1)                    # skip the track
-            if minx <= x <= maxx and miny <= y <= maxy:
+            if minx <= xyz[a0] <= maxx and miny <= xyz[a1] <= maxy:
                 pts_in += 1
                 trk_sum += tl
                 if tl >= track_min:
                     trk_ge += 1
+                z = xyz[up]
                 z_lo = z if z_lo is None or z < z_lo else z_lo
                 z_hi = z if z_hi is None or z > z_hi else z_hi
     return {

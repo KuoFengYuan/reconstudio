@@ -509,3 +509,43 @@ def test_run_blocksplit_no_blocks_raises(tmp_path):
     with pytest.raises(ValueError, match="min_images"):
         run_blocksplit(_params(ws, tmp_path / "out_none", min_images="99"),
                        _Runner())
+
+
+# --------------------------------------------------------------------------- #
+# non-Z-up sources: blocksplit grids X–Y, so a Y-up model would collapse every
+# block into one cell. It rotates a Z-up copy itself; the rotation must keep the
+# region — picked on the viewer's horizontal plane — selecting the same ground.
+# --------------------------------------------------------------------------- #
+def test_run_blocksplit_auto_rotates_a_yup_source(tmp_path):
+    from pipeline.large_scene import zup_to_yup
+    from pipeline.model import up_axis
+
+    ws = _scene(tmp_path)
+    zup_out = tmp_path / "out_zup"
+    run_blocksplit(_params(ws, zup_out), _Runner())
+    zup_manifest = json.loads((zup_out / "manifest.json").read_text())
+
+    # same reconstruction, expressed Y-up (zup_to_yup is to_zup's inverse, so the
+    # region numbers carry over unchanged — exactly the viewer's situation)
+    zup_to_yup(ws / "sparse", tmp_path / "yup_sparse")
+    for f in ("cameras.bin", "images.bin", "points3D.bin"):
+        (tmp_path / "yup_sparse" / f).replace(ws / "sparse" / f)
+    assert up_axis(ws / "sparse") == 1
+
+    out = tmp_path / "out_yup"
+    r = _Runner()
+    run_blocksplit(_params(ws, out), r)
+
+    assert (out / "_zup_model" / "images.bin").is_file()      # rotated copy, not the source
+    assert up_axis(out / "_zup_model") == 2
+    assert any("自動剛體旋轉" in ln for ln in r.lines)
+    manifest = json.loads((out / "manifest.json").read_text())
+    # the same region over the same scene must yield the same blocks as the Z-up run
+    assert ({b["name"] for b in manifest["blocks"]}
+            == {b["name"] for b in zup_manifest["blocks"]} == {"block_0_0", "block_1_0"})
+    keys = ("src_images", "train_views", "points")
+    assert ({b["name"]: [b[k] for k in keys] for b in manifest["blocks"]}
+            == {b["name"]: [b[k] for k in keys] for b in zup_manifest["blocks"]})
+    # and each block still holds only its own cluster's views
+    _c, imgs, _p = read_model(str(out / "block_0_0" / "sparse"))
+    assert all(Path(im.name).name.startswith("camA") for im in imgs.values())

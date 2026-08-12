@@ -13,10 +13,32 @@ import time
 from pathlib import Path
 
 
+def _is_model(d: Path) -> bool:
+    """A readable sparse model = the two binaries the viewer parses."""
+    return (d / "images.bin").exists() and (d / "points3D.bin").exists()
+
+
 def _block_model(d: Path) -> Path | None:
     """A blocksplit block dir holds a flat sparse/ (no /0)."""
     md = d / "sparse"
-    return md if (md / "images.bin").exists() and (md / "points3D.bin").exists() else None
+    return md if _is_model(md) else None
+
+
+def workspace_model(ws: Path) -> Path | None:
+    """The sparse model under a workspace. This panel's COLMAP writes sparse/0, but
+    a model reconstructed elsewhere (GLOMAP, a COLMAP GUI export, an undistorted
+    copy) is just as often a flat sparse/ — and a mapper that dropped its first
+    submodel leaves sparse/1 instead. Probe in that order rather than 404-ing on a
+    reconstruction that is sitting right there."""
+    if _is_model(sub := ws / "sparse" / "0"):
+        return sub
+    if _is_model(flat := ws / "sparse"):
+        return flat
+    for d in sorted((p for p in (ws / "sparse").glob("*") if p.is_dir() and p.name.isdigit()),
+                    key=lambda p: int(p.name)):
+        if _is_model(d):
+            return d
+    return None
 
 
 def model_dir(job) -> Path | None:
@@ -30,10 +52,7 @@ def model_dir(job) -> Path | None:
                 return md
         return None
     ws = (job.meta or {}).get("workspace")
-    if not ws:
-        return None
-    md = Path(ws) / "sparse" / "0"
-    return md if (md / "images.bin").exists() and (md / "points3D.bin").exists() else None
+    return workspace_model(Path(ws)) if ws else None
 
 
 def dense_dir(job) -> Path | None:
@@ -70,6 +89,40 @@ def resolve_model(job, sub: str | None) -> Path | None:
     if cand != cleaned and not str(cand).startswith(str(cleaned) + os.sep):
         return None
     return cand if (cand / "images.bin").exists() and (cand / "points3D.bin").exists() else None
+
+
+_MAPPER_DIR_RE = re.compile(r"^(?P<name>.+)_(?P<mapper>global|hierarchical)_mapper$")
+_RESIZE_DIR_RE = re.compile(r"^images_(?P<max>\d+)$")
+
+
+def inspect_workspace(ws: Path) -> dict | None:
+    """Read an existing COLMAP workspace off disk and recover the few fields a job
+    record needs to serve it: dataset_name/mapper (dense_dir rebuilds the
+    undistorted dir name from them), resize_max and image_root (_source_image walks
+    those to find an image file). Everything is inferred from directory names, so a
+    workspace produced outside the panel — or one whose job record is gone — can
+    still be viewed. None when the workspace holds no readable sparse model."""
+    md = workspace_model(ws)
+    if not md:
+        return None
+    dataset_name, mapper, dataset = "training_dataset", "global", ""
+    for d in sorted(ws.glob("*_mapper")):
+        m = _MAPPER_DIR_RE.match(d.name)
+        if m and (d / "sparse" / "cameras.bin").is_file() and (d / "images").is_dir():
+            dataset_name, mapper, dataset = m["name"], m["mapper"], str(d)
+            break
+    # image_root: the resized copy the pipeline fed COLMAP is the best guess (it is
+    # what the undistorted model was built from); fall back to a plain images/ dir.
+    resize_max, image_root = "1920", ""
+    sized = sorted((d for d in ws.glob("images_*") if _RESIZE_DIR_RE.match(d.name)),
+                   key=lambda d: int(_RESIZE_DIR_RE.match(d.name)["max"]), reverse=True)
+    if sized:
+        resize_max = _RESIZE_DIR_RE.match(sized[0].name)["max"]
+        image_root = str(sized[0])
+    elif (ws / "images").is_dir():
+        image_root = str(ws / "images")
+    return {"model": str(md), "dataset": dataset, "dataset_name": dataset_name,
+            "mapper": mapper, "resize_max": resize_max, "image_root": image_root}
 
 
 def block_list(job) -> list[dict]:

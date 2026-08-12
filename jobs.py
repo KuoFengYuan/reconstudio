@@ -378,6 +378,21 @@ class JobManager:
         job.save()
         self.queue.put_nowait(job.id)
 
+    def register(self, job: Job) -> None:
+        """Record an already-finished job (a COLMAP workspace imported from disk)
+        without queueing any work — submit() would re-run the pipeline over it."""
+        self.jobs[job.id] = job
+        job.save()
+
+    def find_by_workspace(self, kind: str, workspace: str) -> Job | None:
+        """Newest finished job of `kind` whose meta points at this workspace, so
+        re-importing the same folder reuses its record instead of piling up
+        duplicates in 歷史."""
+        hits = [j for j in self.jobs.values()
+                if j.kind == kind and j.status == "done"
+                and (j.meta or {}).get("workspace") == workspace]
+        return max(hits, key=lambda j: j.created_at, default=None)
+
     def list(self) -> list[dict]:
         return [j.to_dict() for j in sorted(self.jobs.values(),
                                             key=lambda j: j.created_at, reverse=True)]
