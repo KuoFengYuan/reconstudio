@@ -286,13 +286,19 @@ def _up_axis(sparse_dir: Path) -> int | None:
     return model_up_axis(sparse_dir)
 
 
-def _resolve_zup(src: Path, r: Runner) -> tuple[Path, Path]:
+def _resolve_zup(src: Path, r: Runner, out: Path | None = None) -> tuple[Path, Path]:
     """blocksplit grids on the X–Y plane, so it must read a *Z-up* model. The
     undistort/align step often emits both a reoriented model (…/sparse, Y-up
     after REORIENT) and the pre-reorient …/sparse_unaligned (Z-up). _resolve_dense
     returns the former; here we auto-swap to a Z-up sibling when the resolved one
     isn't Z-up — so source can just be the workspace / *_mapper, no hand-picking.
-    Image names match across siblings (same reconstruction), so images_dir stays."""
+    Image names match across siblings (same reconstruction), so images_dir stays.
+
+    With no Z-up sibling on disk (a workspace that never ran REORIENT), rotate one
+    ourselves into `out` rather than gridding a sideways model and collapsing every
+    block into one cell. The rotation is rigid and keeps the horizontal axes in the
+    viewer's order, so a region picked in the viewer still selects the same
+    rectangle; the source model is only read."""
     sparse_dir, images_dir = _resolve_dense(src)
     if _up_axis(sparse_dir) == 2:
         return sparse_dir, images_dir                       # already Z-up
@@ -301,9 +307,22 @@ def _resolve_zup(src: Path, r: Runner) -> tuple[Path, Path]:
             r.log(f"[blocksplit] 自動改用 Z-up 模型 {sib.name}"
                   f"（{sparse_dir.name} 非 Z-up,X-Y 切格會塌成一格）")
             return sib, images_dir
-    r.log(f"[blocksplit] ⚠️ 找不到 Z-up 模型,沿用 {sparse_dir.name};"
-          " 若切格塌成 1 格請改餵未 reorient 的模型。")
-    return sparse_dir, images_dir
+    up = _up_axis(sparse_dir)
+    if out is None or up not in (0, 1):
+        r.log(f"[blocksplit] ⚠️ 找不到 Z-up 模型,沿用 {sparse_dir.name};"
+              " 若切格塌成 1 格請改餵未 reorient 的模型。")
+        return sparse_dir, images_dir
+    from .large_scene import to_zup
+    zup = out / "_zup_model"
+    if not (zup / "images.bin").is_file():
+        r.log(f"[blocksplit] {sparse_dir.name} 是 {'XYZ'[up]}-up,沒有 Z-up 兄弟模型 →"
+              f" 自動剛體旋轉一份到 {zup.name}/（只讀原模型,不動它）")
+        n_cam, n_pt = to_zup(sparse_dir, zup, up)
+        r.log(f"[blocksplit] 已轉成 Z-up: {n_cam} cams / {n_pt} points")
+    if _up_axis(zup) != 2:                    # rotation must actually have fixed it
+        r.log(f"[blocksplit] ⚠️ 轉出來的模型仍不是 Z-up,沿用 {sparse_dir.name}")
+        return sparse_dir, images_dir
+    return zup, images_dir
 
 
 # --------------------------------------------------------------------------- #
@@ -346,7 +365,7 @@ def run_blocksplit(p: dict, r: Runner) -> None:
         out.mkdir(parents=True, exist_ok=True)
         stamp.write_text(json.dumps(stamp_params, ensure_ascii=False))
 
-    sparse_dir, images_dir = _resolve_zup(src, r)
+    sparse_dir, images_dir = _resolve_zup(src, r, out)
     r.banner(f"blocksplit start | model={sparse_dir} images={images_dir}")
     t0 = time.time()
     cameras, images, points3D = read_model(str(sparse_dir))

@@ -281,6 +281,42 @@ def test_region_stats_counts_only_what_is_inside_the_rectangle(tmp_path):
     assert s["z_range"] == [5.0, 7.0]                              # up-axis span of in-region pts
 
 
+def test_horiz_axes_is_ascending_and_drops_up():
+    # must match viz.html's horizAxes ([0,1,2] minus up) and the axis order
+    # large_scene.to_zup preserves — a region is only portable if all three agree.
+    assert m.horiz_axes(0) == (1, 2)
+    assert m.horiz_axes(1) == (0, 2)
+    assert m.horiz_axes(2) == (0, 1)
+
+
+def test_region_stats_measures_on_the_given_axes(tmp_path):
+    # Same scene as the X-Y test, but authored Y-up: every point/camera has its
+    # Y and Z swapped. Measured on (0,2) — the model's own horizontal pair — the
+    # rectangle must select exactly what it selected on the Z-up model, while the
+    # default X-Y reading picks up a different (wrong) set.
+    model = tmp_path / "yup_region"
+    model.mkdir()
+    _write_cameras(model / "cameras.bin", [(1, 1, 8, 8, [1.0, 1.0, 4.0, 4.0])])
+    _write_images(model / "images.bin", [
+        (1, _IDENTITY_Q, (-1.0, 0.0, -1.0), 1, "in.png", []),      # (x,z) = (1,1) inside
+        (2, _IDENTITY_Q, (-9.0, 0.0, -9.0), 1, "out.png", []),     # (x,z) = (9,9) outside
+    ])
+    _write_points(model / "points3D.bin", [
+        (1, (1.0, 5.0, 1.0), (0, 0, 0), 0.5, [(1, 0)] * 6),
+        (2, (2.0, 7.0, 2.0), (0, 0, 0), 0.5, [(1, 0)] * 4),
+        (3, (9.0, 9.0, 9.0), (0, 0, 0), 0.5, [(1, 0)] * 9),
+        (4, (1.0, 9.0, 9.0), (0, 0, 0), 0.5, [(1, 0)] * 9),        # x in, z out -> excluded
+    ])
+    s = m.region_stats(model, (0.0, 0.0, 3.0, 3.0), track_min=5, axes=(0, 2))
+    assert (s["cameras_in"], s["points_in"]) == (1, 2)
+    assert s["mean_track_in"] == pytest.approx((6 + 4) / 2)
+    assert s["z_range"] == [5.0, 7.0]                              # spans the UP axis (Y here)
+    # the default X-Y reading is a different rectangle: point 4 (x=1,y=9) is out,
+    # but points 1/2 are in only because their Y is the height, not a coordinate
+    # the user framed — this is exactly the mismatch `axes` exists to prevent.
+    assert m.region_stats(model, (0.0, 0.0, 3.0, 3.0), axes=(0, 1))["points_in"] == 0
+
+
 def test_region_stats_empty_region_reports_zeros_not_a_crash(tmp_path):
     model = tmp_path / "empty_region"
     model.mkdir()

@@ -291,25 +291,14 @@ def auto_reorient(input_path, output_path, upscale: float = 0.0,
     return scale, len(images_out), len(points_out)
 
 
-def zup_to_yup(input_path, output_path, ext: str = "bin"):
-    """Rigidly rotate a COLMAP model Z-up -> Y-up, with NO scaling and NO gravity
-    guessing — a fixed +90° about X: (x,y,z) -> (x,-z,y).
-
-    Use this instead of auto_reorient when the model is already metric and
-    gravity-aligned by GPS (model_aligner's ENU frame, up=+Z): it only fixes the
-    up-axis convention for reconstudio's viewer (which flips COLMAP Y-down -> three
-    Y-up), so ENU up (+Z) lands on -Y and the viewer shows it upright, while GPS's
-    metric scale is preserved exactly. Reads input_path, writes output_path; drops
-    frames.bin/rigs.bin so the rotated images.bin poses are authoritative — both
-    COLMAP's own loaders and LichtFeld (which reads pose straight from images.bin)
-    then consume the rotated poses. Returns (n_cams, n_points)."""
+def _rigid_rotate(input_path, output_path, R, ext: str = "bin"):
+    """Rewrite a COLMAP model through the rigid rotation `R` (row-vector
+    convention, p' = p @ R): points, camera centres and orientations, nothing
+    else — no scaling, no re-triangulation, so the reconstruction is unchanged
+    apart from the frame it is expressed in. Drops frames/rigs so the rotated
+    images.bin poses stay authoritative (see auto_reorient).
+    Returns (n_cams, n_points)."""
     cameras, images_in, points_in = read_model(str(input_path), ext=f".{ext}")
-
-    # row-vector convention (p' = p @ R), matching auto_reorient / _rotate_camera:
-    # column j = image of basis axis j, so (x,y,z) -> (x, -z, y); +Z (ENU up) -> -Y.
-    R = np.array([[1.0, 0.0, 0.0],
-                  [0.0, 0.0, 1.0],
-                  [0.0, -1.0, 0.0]])
 
     positions = np.array([points_in[k].xyz for k in points_in])
     rotated = positions @ R
@@ -328,9 +317,56 @@ def zup_to_yup(input_path, output_path, ext: str = "bin"):
     out = Path(output_path)
     out.mkdir(parents=True, exist_ok=True)
     write_model(cameras, images_out, points_out, str(out), f".{ext}")
-    for f in ("frames", "rigs"):   # see auto_reorient: keep images.bin poses authoritative
+    for f in ("frames", "rigs"):
         (out / f"{f}.{ext}").unlink(missing_ok=True)
     return len(images_out), len(points_out)
+
+
+# Rotation onto a Z-up frame, keyed by the model's current up axis. Each one is a
+# proper rotation (det +1, no mirroring) chosen so that the two horizontal axes
+# land on X and Y *in ascending order* — the same order the viewer's region tool
+# uses (horizAxes = [0,1,2] minus up). That is what makes a region picked on a
+# non-Z-up model still mean the same rectangle after the rotation: new X = old
+# horizAxes[0], new Y = old horizAxes[1]. The Z direction (up vs down) is left
+# unconstrained — blocksplit grids X–Y and never looks at its sign.
+_ZUP_ROT = {
+    0: np.array([[0.0, 0.0, 1.0],       # up=X: (x,y,z) -> (y, z, x)
+                 [1.0, 0.0, 0.0],
+                 [0.0, 1.0, 0.0]]),
+    1: np.array([[1.0, 0.0, 0.0],       # up=Y: (x,y,z) -> (x, z, -y)
+                 [0.0, 0.0, -1.0],
+                 [0.0, 1.0, 0.0]]),
+}
+
+
+def to_zup(input_path, output_path, up: int, ext: str = "bin"):
+    """Rigidly rotate a model whose up axis is `up` (0=X, 1=Y) onto a Z-up frame,
+    preserving the horizontal axis order so an X–Y region stays valid. up=2 is
+    already Z-up and is rejected — the caller should skip the conversion instead
+    of writing a redundant copy. Returns (n_cams, n_points)."""
+    if up not in _ZUP_ROT:
+        raise ValueError(f"up 需為 0(X) 或 1(Y)，得到 {up!r}（2 已經是 Z-up)")
+    return _rigid_rotate(input_path, output_path, _ZUP_ROT[up], ext)
+
+
+def zup_to_yup(input_path, output_path, ext: str = "bin"):
+    """Rigidly rotate a COLMAP model Z-up -> Y-up, with NO scaling and NO gravity
+    guessing — a fixed +90° about X: (x,y,z) -> (x,-z,y).
+
+    Use this instead of auto_reorient when the model is already metric and
+    gravity-aligned by GPS (model_aligner's ENU frame, up=+Z): it only fixes the
+    up-axis convention for reconstudio's viewer (which flips COLMAP Y-down -> three
+    Y-up), so ENU up (+Z) lands on -Y and the viewer shows it upright, while GPS's
+    metric scale is preserved exactly. Reads input_path, writes output_path; drops
+    frames.bin/rigs.bin so the rotated images.bin poses are authoritative — both
+    COLMAP's own loaders and LichtFeld (which reads pose straight from images.bin)
+    then consume the rotated poses. Returns (n_cams, n_points)."""
+    # row-vector convention (p' = p @ R), matching auto_reorient / _rotate_camera:
+    # column j = image of basis axis j, so (x,y,z) -> (x, -z, y); +Z (ENU up) -> -Y.
+    R = np.array([[1.0, 0.0, 0.0],
+                  [0.0, 0.0, 1.0],
+                  [0.0, -1.0, 0.0]])
+    return _rigid_rotate(input_path, output_path, R, ext)
 
 
 # --------------------------------------------------------------------------- #
