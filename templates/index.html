@@ -347,7 +347,10 @@
         <div class="row">
           <input name="workspace" id="workspace" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('workspace')">瀏覽</button>
+          <button type="button" class="ghost" onclick="importColmap()"
+                  title="不重跑,直接讀 workspace/sparse/0 顯示點雲 + 相機位置">📂 讀取既有結果</button>
         </div>
+        <div class="hint">workspace 已經跑過 COLMAP(有 <code>sparse/0</code>)的話,按<b>讀取既有結果</b>就能直接看 3D、接著訓練,不用重跑。</div>
         <label>影像解析度</label>
         <select name="resize">
           <option value="1920" selected>等比縮小 — 長邊 ≤ 1920（FullHD,傾斜攝影甜蜜點）</option>
@@ -1211,6 +1214,16 @@
       if (f && f.id.indexOf('form-') === 0) syncVoxelMode(f.id.slice(5));
     }
   });
+  // 讀取既有結果: register an already-reconstructed workspace as a finished job and
+  // show its job view (with 檢視 3D 結果 / 接著訓練). Posted on its own so the COLMAP
+  // form's required fields (image_root) don't block it — only workspace matters here.
+  function importColmap(){
+    var ws = (document.getElementById('workspace').value || '').trim();
+    if (!ws){ alert('請先填 workspace(已經跑完 COLMAP 的資料夾)'); return; }
+    htmx.ajax('POST', '/ui/import_colmap', {target:'#main', swap:'innerHTML',
+      values:{workspace: ws, image_root: (document.getElementById('image_root').value || '').trim()}});
+    window.scrollTo(0, 0);
+  }
   // chain: COLMAP done -> training, prefilled (source = workspace; resolver finds
   // the undistorted *_mapper dir; output defaults to <workspace>_gs2m).
   function fillTrain(workspace){
