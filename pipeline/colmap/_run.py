@@ -22,6 +22,7 @@ from pathlib import Path
 
 from ..config import settings
 from ..runner import Runner
+from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, inject_pose_priors
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
@@ -49,6 +50,25 @@ COLMAP_DEFAULTS = {
     "gps_align": False, "gps_align_type": "enu", "gps_align_max_error": "3.0",
     # pose_prior_mapper: GPS position uncertainty (metres). Consumer GPS ~3-5 m; RTK ~0.02.
     "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
+    # --- surveyor-supplied exterior orientation (EO) CSV ---
+    # Path to a CSV of ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA (the adjusted
+    # EO an aerial vendor ships alongside the imagery). Positions overwrite the EXIF-derived
+    # pose priors in the DB; ω/φ/κ can only enter as the `gravity` column (COLMAP has no
+    # rotation prior), which global_mapper uses via POSE_PRIOR_GRAVITY below. Empty = off.
+    "pose_prior_csv": "",
+    # CRS the CSV's EASTING/NORTHING are in — see _eo.TM_PRESETS ("twd97_tm2_121" =
+    # EPSG:3826). Inverse-projected to WGS84 so COLMAP builds the local ENU frame itself.
+    # "cartesian" writes the projected metres straight in instead (bakes in the grid scale
+    # factor and curvature; only sensible for small blocks).
+    "pose_prior_crs": "twd97_tm2_121",
+    # Propagate each CSV station to the other heads of a multi-camera rig, matched by
+    # nearest EXIF GPS. Needed for full prior coverage when the CSV covers one head only.
+    "pose_prior_rig_match": True,
+    # Write ω/φ/κ as a gravity (down-in-camera) prior for the exactly-name-matched images.
+    # Only global_mapper consumes it, via --GlobalMapper.ra_use_gravity (RA_USE_GRAVITY).
+    "pose_prior_gravity": True,
+    # global_mapper: use the DB gravity priors in rotation averaging.
+    "ra_use_gravity": False, "ra_max_rotation_error_deg": "10",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
     # BA solver backend: "ceres" (default; the ba_gpu flag above then chooses CPU vs
@@ -146,12 +166,19 @@ class _Ctx:
     hm_leaf: str
     hm_overlap: str
     hm_workers: str
+    eo_csv: str
+    eo_crs: str
+    eo_rig_match: bool
+    eo_gravity: bool
+    ra_use_gravity: bool
     db: Path
     lst: Path
     dense_dir: Path
     lines: list[str] = field(default_factory=list)
     gps_present: bool = False
     gps_opts: list[str] = field(default_factory=list)
+    # image name -> (EO row, exact-name-match?) from the EO CSV; empty when no CSV.
+    eo_map: dict = field(default_factory=dict)
     # img_root before the FullHD resize rebases it — the originals still carry EXIF GPS,
     # which the resized copies don't, so gps_inject reads priors from here.
     orig_root: str = ""
@@ -192,6 +219,21 @@ def _setup(p: dict, r: Runner) -> _Ctx:
     if matcher not in ("sequential", "vocab", "both", "spatial", "custom"):
         raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', 'spatial', or "
                          f"'custom' (got: {matcher})")
+
+    # EO CSV (optional): validate path + CRS up front — a wrong projection would put every
+    # prior kilometres away, and we'd rather fail before extraction than after.
+    eo_csv = str(d["pose_prior_csv"]).strip()
+    eo_crs = ""
+    if eo_csv:
+        if not Path(eo_csv).is_file():
+            raise FileNotFoundError(f"pose_prior_csv not found: {eo_csv}")
+        eo_crs = resolve_crs(str(d["pose_prior_crs"]))
+        if bool(d["ra_use_gravity"]) and mapper != "global":
+            r.log(f"WARNING: RA_USE_GRAVITY is on but MAPPER={mapper} — only global_mapper "
+                  "uses gravity priors (in rotation averaging); it will be ignored.")
+    elif bool(d["ra_use_gravity"]):
+        r.log("WARNING: RA_USE_GRAVITY is on but no POSE_PRIOR_CSV is set — nothing writes "
+              "the gravity column, so rotation averaging will fall back to no gravity.")
 
     if not Path(img_root).is_dir():
         raise FileNotFoundError(f"image_root not found: {img_root}")
@@ -247,6 +289,10 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         hm_leaf=str(d["hm_leaf_max_num_images"]).strip(),
         hm_overlap=str(d["hm_image_overlap"]).strip(),
         hm_workers=str(d["hm_num_workers"]).strip(),
+        eo_csv=eo_csv, eo_crs=eo_crs,
+        eo_rig_match=bool(d["pose_prior_rig_match"]),
+        eo_gravity=bool(d["pose_prior_gravity"]),
+        ra_use_gravity=bool(d["ra_use_gravity"]),
         db=db, lst=lst, dense_dir=dense_dir,
     )
 
@@ -300,6 +346,23 @@ def _build_image_list(c: _Ctx) -> None:
     c.lines = lines
 
 
+def _resolve_eo_csv(c: _Ctx) -> None:
+    """Parse the EO CSV and map its rows onto the image list. Runs BEFORE the coverage
+    check (which counts EO-covered images as covered) and before the FullHD resize, so
+    the rig matching reads EXIF off the originals."""
+    if not c.eo_csv:
+        return
+    rows = parse_eo_csv(Path(c.eo_csv))
+    c.r.log(f"EO CSV: {len(rows)} rows from {c.eo_csv} (CRS={c.eo_crs})")
+    c.eo_map = map_names_to_eo(c.lines, rows, c.img_root, c.eo_crs,
+                               c.eo_rig_match, c.r)
+    if not c.eo_map:
+        raise RuntimeError(
+            f"EO CSV {c.eo_csv} matched none of the {len(c.lines)} images. The CSV `ID` "
+            "column must equal the image filename stem (rig-mate images are then matched "
+            "by EXIF GPS). Check the ID format or set POSE_PRIOR_CSV='' to disable.")
+
+
 def _check_gps_coverage(c: _Ctx) -> None:
     # EXIF GPS coverage. COLMAP reads EXIF GPS into the DB pose priors that
     # spatial_matcher / pose_prior_mapper / model_aligner consume. The GPS pipeline
@@ -307,7 +370,13 @@ def _check_gps_coverage(c: _Ctx) -> None:
     # or anchored — so any GPS option needs FULL coverage, checked here before any work
     # runs. The FullHD resize still runs (so we keep the downscale); it just preserves
     # the EXIF GPS through the re-encode (see preserve_exif below).
-    n_gps, n_total = gps_coverage(c.img_root, c.lines, c.r, resize_workers())
+    # An EO CSV supplies priors directly, so its images count as covered without needing
+    # EXIF at all (and its positions overwrite any EXIF-derived prior). Only the images
+    # the CSV missed still have to fall back to EXIF, so scan just those.
+    rest = [ln for ln in c.lines if ln not in c.eo_map]
+    n_rest, _ = gps_coverage(c.img_root, rest, c.r, resize_workers()) if rest else (0, 0)
+    n_total = len(c.lines)
+    n_gps = len(c.eo_map) + n_rest
     c.gps_present = (n_total > 0 and n_gps == n_total)   # GPS flow valid only at 100%
     c.gps_opts = [name for name, on in (("MATCHER=spatial", c.matcher == "spatial"),
                                         ("MAPPER=pose_prior", c.mapper == "pose_prior"),
@@ -316,13 +385,16 @@ def _check_gps_coverage(c: _Ctx) -> None:
         if not c.gps_present:
             raise RuntimeError(
                 f"GPS option(s) selected ({', '.join(c.gps_opts)}) but only {n_gps}/{n_total} "
-                "inputs carry EXIF GPS — the GPS pipeline needs GPS on EVERY image, so it "
-                "aborts before any work runs. Provide GPS-tagged photos for all inputs, or "
-                "switch to a non-GPS setup (MATCHER=vocab/both, MAPPER=global/incremental, "
-                "GPS 對齊 off). Note: video frames carry no per-frame GPS — it lives in the "
-                "container, not the frames.")
-        c.r.log(f"EXIF GPS on all {n_total} inputs -> GPS flow enabled ({', '.join(c.gps_opts)}); "
-                "JPEG priors read by COLMAP, TIFF priors via gps_inject"
+                "inputs have a pose prior (EO CSV or EXIF GPS) — the GPS pipeline needs one "
+                "on EVERY image, so it aborts before any work runs. Provide GPS-tagged photos "
+                "for all inputs (or an EO CSV covering them), or switch to a non-GPS setup "
+                "(MATCHER=vocab/both, MAPPER=global/incremental, GPS 對齊 off). Note: video "
+                "frames carry no per-frame GPS — it lives in the container, not the frames.")
+        c.r.log(f"pose priors on all {n_total} inputs -> GPS flow enabled "
+                f"({', '.join(c.gps_opts)}); "
+                + (f"{len(c.eo_map)} from the EO CSV, {n_rest} from EXIF"
+                   if c.eo_map else
+                   "JPEG priors read by COLMAP, TIFF priors via gps_inject")
                 + (" (FullHD resize keeps JPEG EXIF; TIFF GPS is read from the originals)"
                    if c.fullhd else ""))
     elif n_gps:
@@ -389,6 +461,25 @@ def _stage_gps_inject(c: _Ctx) -> None:
     # spatial_matcher reads priors too. Idempotent: only fills images lacking a prior.
     if not c.stage_on("gps_inject"):
         return
+    # 1a. EO CSV priors first: the surveyor's adjusted exterior orientation beats whatever
+    # EXIF fix COLMAP already read at extraction, so these OVERWRITE existing rows; the
+    # EXIF pass below then only fills images the CSV didn't cover. Runs whenever a CSV is
+    # given, independent of the GPS-option gate — the CSV is an explicit user request.
+    if c.eo_map and c.db.exists():
+        std = (float(c.d["prior_std_x"]), float(c.d["prior_std_y"]), float(c.d["prior_std_z"]))
+        if min(std) >= 1.0:
+            c.r.log(f"note: PRIOR_STD={std} m is a consumer-GPS uncertainty, but an EO CSV "
+                    "is post-processed airborne POS (typically 0.03-0.20 m). Leaving it "
+                    "this loose lets BA largely ignore the priors you just supplied.")
+        n_eo, n_grav, n_miss = inject_eo_priors(
+            c.db, c.eo_map, c.eo_crs, std, c.eo_gravity, c.r)
+        c.r.banner(f"EO pose priors: wrote {n_eo} from {Path(c.eo_csv).name} "
+                   f"(CRS={c.eo_crs}, std={std} m) -> {c.db}")
+        c.r.log(f"  gravity written for {n_grav} image(s)"
+                + ("" if c.ra_use_gravity else
+                   " — set RA_USE_GRAVITY=1 with MAPPER=global to actually use it")
+                + f"; {n_miss} image(s) left to the EXIF pass")
+
     # same trigger as the resize EXIF-preserve: any hard GPS option, or the custom
     # matcher's GPS-neighbour pairs. JPEG-only GPS runs need nothing here (COLMAP already
     # populated them), and the call no-ops in that case anyway.
@@ -487,11 +578,21 @@ def _stage_mapper(c: _Ctx) -> None:
             extra: list[str] = []
             if c.mapper == "global":
                 sub, label = "global_mapper", "colmap global_mapper"
+                if c.ra_use_gravity:
+                    # Rotation averaging can use the DB's per-image gravity (down in the
+                    # camera frame, written by the EO CSV inject) to pin 2 of the 3
+                    # rotation DOF. Heading is still solved from the view graph — the DB
+                    # has no rotation prior. COLMAP solves the mixed case in strata, so
+                    # only some images needing gravity is fine.
+                    extra = ["--GlobalMapper.ra_use_gravity", "1",
+                             "--GlobalMapper.ra_max_rotation_error_deg",
+                             str(c.d["ra_max_rotation_error_deg"])]
+                    label += " [gravity-aided RA]"
                 if c.ba_backend == "caspar":
                     # Caspar GPU solver, exposed to global_mapper since COLMAP main@2fe2b41
                     # (#4484). Same SIMPLE_RADIAL/PINHOLE-only restriction as below (warned
                     # about in _setup); Caspar always runs on GPU, no separate toggle needed.
-                    extra = ["--GlobalMapper.ba_backend", "CASPAR"]
+                    extra += ["--GlobalMapper.ba_backend", "CASPAR"]
                     label += " [Caspar GPU BA]"
             elif c.mapper == "pose_prior":
                 # GPS priors folded into BA -> the output is already georeferenced
@@ -712,6 +813,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     c = _setup(p, r)
     _stage_nested(c)            # 0. NESTED staging (rebases img_root)
     _build_image_list(c)        # image_list.txt + c.lines
+    _resolve_eo_csv(c)          # optional EO CSV -> c.eo_map (name -> EO row)
     _check_gps_coverage(c)      # c.gps_present / c.gps_opts (may abort)
     c.orig_root = c.img_root    # capture pre-resize originals (intact EXIF) for gps_inject
     _maybe_resize_fullhd(c)     # FullHD downscale (rebases img_root)

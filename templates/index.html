@@ -481,6 +481,16 @@
               <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
             </div>
           </div>
+          <!-- 外方位參數 CSV:測繪廠商交付的 EO。位置寫進 DB pose_priors 蓋掉 EXIF;
+               ω/φ/κ 只能降成 gravity 欄(COLMAP DB 沒有旋轉先驗),僅 global_mapper 會用。 -->
+          <div class="hint" style="margin-top:14px;">外方位參數 CSV(選填):欄位 ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA。ID 需等於影像檔名(不含副檔名);同一次曝光的其他鏡頭會用 EXIF GPS 自動配對。位置會覆蓋 EXIF 先驗;ω/φ/κ 只能以重力向量進 DB(COLMAP 沒有旋轉先驗欄位),要真正吃到完整姿態請走 point_triangulator。</div>
+          <label>POSE_PRIOR_CSV（留空 = 不用）</label>
+          <input name="POSE_PRIOR_CSV" value="{{ colmap_defaults.POSE_PRIOR_CSV }}" placeholder="/path/to/外方位參數.csv">
+          <label>POSE_PRIOR_CRS（EASTING/NORTHING 的投影;twd97_tm2_121 = EPSG:3826)</label>
+          <input name="POSE_PRIOR_CRS" value="{{ colmap_defaults.POSE_PRIOR_CRS }}" placeholder="twd97_tm2_121">
+          <label class="chk"><input type="checkbox" name="POSE_PRIOR_RIG_MATCH" {% if colmap_defaults.POSE_PRIOR_RIG_MATCH %}checked{% endif %}>把 CSV 站心用 EXIF GPS 配到同機組其他鏡頭</label>
+          <label class="chk"><input type="checkbox" name="POSE_PRIOR_GRAVITY" {% if colmap_defaults.POSE_PRIOR_GRAVITY %}checked{% endif %}>由 ω/φ/κ 寫入重力先驗(僅檔名精確對到的影像)</label>
+          <label class="chk pgrp" data-p="global"><input type="checkbox" name="RA_USE_GRAVITY" {% if colmap_defaults.RA_USE_GRAVITY %}checked{% endif %}>RA_USE_GRAVITY:global_mapper 旋轉平均時使用重力先驗</label>
           <!-- 參數:僅 hierarchical 用得到（留空=COLMAP 預設） -->
           <div class="pgrp" data-p="hierarchical">
             <div class="hint" style="margin-top:10px;">分區參數(留空用 COLMAP 4.0.4 預設)。</div>
