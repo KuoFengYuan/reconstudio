@@ -15,17 +15,34 @@ behaviour-preserving: these pass identically before and after.
 """
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from pipeline.colmap import _run
 
+# The slice of COLMAP's DB schema the pose-prior injectors touch, so the fake
+# feature_extractor can hand the later stages a database they can actually write to.
+_DB_SCHEMA = """
+CREATE TABLE cameras (camera_id INTEGER PRIMARY KEY, model INTEGER, width INTEGER,
+                      height INTEGER, params BLOB, prior_focal_length INTEGER);
+CREATE TABLE images (image_id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+                     camera_id INTEGER NOT NULL);
+CREATE TABLE pose_priors (pose_prior_id INTEGER PRIMARY KEY NOT NULL,
+                          corr_data_id INTEGER NOT NULL, corr_sensor_id INTEGER NOT NULL,
+                          corr_sensor_type INTEGER NOT NULL, position BLOB,
+                          position_covariance BLOB, gravity BLOB,
+                          coordinate_system INTEGER NOT NULL);
+"""
+
 
 # --------------------------------------------------------------------------- #
 # fake Runner: records colmap calls + simulates their outputs
 # --------------------------------------------------------------------------- #
 class FakeRunner:
+    cancelled = False                         # the prior injectors poll this per image
+
     def __init__(self) -> None:
         self.calls: list[list[str]] = []      # every argv passed to .run()
         self.banners: list[str] = []
@@ -53,7 +70,17 @@ class FakeRunner:
         if sub == "feature_extractor":
             db = self._arg_after(argv, "--database_path")
             if db:
-                Path(db).write_bytes(b"")
+                # a real (if minimal) COLMAP DB: enough schema + one images row per
+                # entry of image_list.txt for the pose-prior injectors to work against.
+                con = sqlite3.connect(db)
+                con.executescript(_DB_SCHEMA)
+                con.execute("INSERT INTO cameras VALUES(1,2,100,100,X'',1)")
+                lst = self._arg_after(argv, "--image_list_path")
+                names = Path(lst).read_text().split() if lst else []
+                for i, name in enumerate(names, 1):
+                    con.execute("INSERT INTO images VALUES(?,?,1)", (i, name))
+                con.commit()
+                con.close()
         elif sub in ("global_mapper", "mapper", "pose_prior_mapper", "hierarchical_mapper"):
             out = self._arg_after(argv, "--output_path")        # ws/sparse
             if out:
@@ -303,3 +330,80 @@ def test_gps_option_without_coverage_aborts(patched, imgroot, vocab, tmp_path):
     with pytest.raises(RuntimeError):
         _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="pose_prior"), r)
     assert r.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# exterior-orientation (EO) CSV priors
+# --------------------------------------------------------------------------- #
+def _eo_csv(tmp_path: Path, stems: list[str]) -> Path:
+    """An EO CSV whose IDs are the (fake) image stems, positioned inside TWD97 TM2 121."""
+    p = tmp_path / "eo.csv"
+    rows = "\n".join(f"{s},215160.{i},2648079.{i},1610.4,0.0,0.0,180.0"
+                     for i, s in enumerate(stems))
+    p.write_text("ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA\n" + rows + "\n")
+    return p
+
+
+def test_eo_csv_injects_priors_and_satisfies_the_gps_coverage_gate(
+        patched, imgroot, vocab, tmp_path):
+    # patched.gps stays at "no EXIF GPS anywhere", so pose_prior would normally abort —
+    # the CSV alone must be enough to cover every image.
+    csv = _eo_csv(tmp_path, [f"img_{i:03d}" for i in range(3)])
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="pose_prior",
+                            pose_prior_csv=str(csv)), r)
+    assert "pose_prior_mapper" in r.subcommands()
+    assert any("EO pose priors: wrote 3" in b for b in r.banners)
+    # the priors really landed in the DB COLMAP was handed
+    con = sqlite3.connect(tmp_path / "ws" / "database.db")
+    assert con.execute("SELECT count(*) FROM pose_priors").fetchone()[0] == 3
+    assert [x[0] for x in con.execute(
+        "SELECT DISTINCT coordinate_system FROM pose_priors")] == [0]
+    con.close()
+
+
+def test_eo_csv_that_matches_nothing_aborts_before_any_colmap_call(
+        patched, imgroot, vocab, tmp_path):
+    csv = _eo_csv(tmp_path, ["not_an_image"])
+    r = FakeRunner()
+    with pytest.raises(RuntimeError, match="matched none"):
+        _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                                pose_prior_csv=str(csv)), r)
+    assert r.calls == []
+
+
+def test_bad_eo_crs_aborts_before_any_colmap_call(patched, imgroot, vocab, tmp_path):
+    csv = _eo_csv(tmp_path, ["img_000"])
+    r = FakeRunner()
+    with pytest.raises(ValueError, match="unknown POSE_PRIOR_CRS"):
+        _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                                pose_prior_csv=str(csv), pose_prior_crs="epsg:4326"), r)
+    assert r.calls == []
+
+
+def test_ra_use_gravity_adds_the_global_mapper_flag(patched, imgroot, vocab, tmp_path):
+    csv = _eo_csv(tmp_path, [f"img_{i:03d}" for i in range(3)])
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global",
+                            pose_prior_csv=str(csv), ra_use_gravity=True), r)
+    argv = r.argv_for("global_mapper")
+    assert "--GlobalMapper.ra_use_gravity" in argv
+    assert argv[argv.index("--GlobalMapper.ra_use_gravity") + 1] == "1"
+
+
+def test_ra_use_gravity_composes_with_the_caspar_backend(patched, imgroot, vocab, tmp_path):
+    csv = _eo_csv(tmp_path, [f"img_{i:03d}" for i in range(3)])
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global",
+                            pose_prior_csv=str(csv), ra_use_gravity=True,
+                            ba_backend="caspar"), r)
+    argv = r.argv_for("global_mapper")
+    assert "--GlobalMapper.ra_use_gravity" in argv       # not clobbered by the backend flag
+    assert "--GlobalMapper.ba_backend" in argv
+
+
+def test_no_eo_csv_leaves_the_pipeline_untouched(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert not any("EO pose priors" in b for b in r.banners)
+    assert "--GlobalMapper.ra_use_gravity" not in r.argv_for("global_mapper")

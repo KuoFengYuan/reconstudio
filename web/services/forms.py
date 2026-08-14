@@ -138,6 +138,14 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "prior_std_y": g("PRIOR_STD_Y", "3.0"),
         "prior_std_z": g("PRIOR_STD_Z", "5.0"),
         "prior_robust_loss": "1",
+        # Surveyor exterior-orientation CSV (ID,E,N,H,OMEGA,PHI,KAPPA): positions overwrite
+        # the EXIF pose priors, ω/φ/κ enter only as the gravity column (global_mapper).
+        "pose_prior_csv": (form.get("POSE_PRIOR_CSV") or "").strip(),
+        "pose_prior_crs": g("POSE_PRIOR_CRS", "twd97_tm2_121"),
+        "pose_prior_rig_match": bool(form.get("POSE_PRIOR_RIG_MATCH")),
+        "pose_prior_gravity": bool(form.get("POSE_PRIOR_GRAVITY")),
+        "ra_use_gravity": bool(form.get("RA_USE_GRAVITY")),
+        "ra_max_rotation_error_deg": g("RA_MAX_ROTATION_ERROR_DEG", "10"),
         "ba_gpu": bool(form.get("MAPPER_BA_GPU")),
         "ba_backend": g("BA_BACKEND", "ceres"),
         "colmap_gpu": (form.get("COLMAP_GPU") or "").strip(),
@@ -184,6 +192,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
     for key in ("spatial_max_distance", "prior_std_x", "prior_std_y", "prior_std_z",
+                "ra_max_rotation_error_deg",
                 "gps_align_max_error", "simplify_mult_min_dist",
                 "reorient_target_med_dist", "reorient_upscale"):
         try:

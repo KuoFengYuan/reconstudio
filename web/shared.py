@@ -55,6 +55,12 @@ COLMAP_DEFAULTS = {
     "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
     # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
     "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
+    # Surveyor exterior-orientation CSV (optional): positions overwrite the EXIF pose
+    # priors; ω/φ/κ can only enter the DB as the gravity column (global_mapper's
+    # rotation averaging). Rig matching + gravity default on, RA_USE_GRAVITY opt-in.
+    "POSE_PRIOR_CSV": "", "POSE_PRIOR_CRS": "twd97_tm2_121",
+    "POSE_PRIOR_RIG_MATCH": "1", "POSE_PRIOR_GRAVITY": "1",
+    "RA_USE_GRAVITY": "0", "RA_MAX_ROTATION_ERROR_DEG": "10",
     # GPU bundle adjustment (incremental / pose_prior / hierarchical) — on by default.
     # global_mapper isn't in this set: its Ceres BA defaults to GPU on its own.
     "MAPPER_BA_GPU": "1",
