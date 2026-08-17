@@ -420,8 +420,14 @@ REGION_IN = "-5,-5,15,15"
 
 
 def _ref_model(model_dir: Path) -> Path:
-    """A 3-image / 6-point COLMAP model for the region tests (names match `imgroot`)."""
-    import numpy as np
+    """A 3-image / 6-point COLMAP model for the region tests (names match `imgroot`).
+
+    Writing a model needs numpy, which the panel deliberately keeps out of its base/CI
+    install (region selection imports it lazily for the same reason). Skip per-test
+    rather than per-module here: the rest of this file is numpy-free and must keep
+    running in CI. Mirrors test_blocksplit.py / test_scale_check.py, which skip whole.
+    """
+    np = pytest.importorskip("numpy")
 
     from pipeline.vendor.read_write_model import (
         Camera,
