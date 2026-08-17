@@ -18,7 +18,7 @@ import shutil
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ..config import settings
 from ..runner import Runner
@@ -96,6 +96,15 @@ COLMAP_DEFAULTS = {
     "max_image_size": "",
     # optional foreground masks: undistort them through the same cameras as the images.
     "masks_dir": "",
+    # --- region subset: re-run the whole pipeline over an area picked in the viewer ---
+    # `region` is the "minx,miny,maxx,maxy" rectangle the ⬚ 選訓練範圍 tool produces,
+    # measured on `region_model`'s own horizontal axes. When both are set the image list
+    # is filtered to the images that area needs (see _region.py) and every stage from
+    # extraction to undistortion runs on that subset — unlike blocksplit, which crops an
+    # already-reconstructed model, this re-solves the geometry for the area, so align
+    # pins it back into the same reference frame and the result stays comparable.
+    # `region_buffer` (外擴) grows only the point mask feeding the visibility test.
+    "region": "", "region_model": "", "region_buffer": "0", "region_vis_thresh": "0.1667",
     # simplify_images (drop pose-outlier cameras + trim observations) and auto_reorient
     # (PCA gravity-align + scale). Both off unless ticked; h3dgs runs both.
     "simplify": False, "simplify_mult_min_dist": "10",
@@ -156,6 +165,10 @@ class _Ctx:
     sift_max_image_size: str
     max_image_size: str
     masks_dir: str
+    region: str
+    region_model: str
+    region_buffer: float
+    region_vis_thresh: float
     simplify: bool
     reorient: bool
     cm_n_seq: str
@@ -235,6 +248,49 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         r.log("WARNING: RA_USE_GRAVITY is on but no POSE_PRIOR_CSV is set — nothing writes "
               "the gravity column, so rotation averaging will fall back to no gravity.")
 
+    # Region subset (optional): validate the rectangle and the model it was drawn on
+    # before extraction. Both must be present — a region without a model has no frame to
+    # be measured in, and a model without a region would silently filter nothing.
+    region = str(d["region"]).strip()
+    region_model = str(d["region_model"]).strip()
+    region_buffer = region_vis_thresh = 0.0
+    if region or region_model:
+        if not region:
+            raise ValueError("region_model 有設但 region 是空的 — 請框選一個範圍,或把兩者都清空。")
+        if not region_model:
+            raise ValueError("region 有設但 region_model 是空的 — 需要指定這個範圍是在哪個 "
+                             "COLMAP 模型的座標系上框的。")
+        if not (Path(region_model) / "images.bin").is_file():
+            raise FileNotFoundError(
+                f"region_model 不是 COLMAP 模型目錄（缺 images.bin）: {region_model}")
+        from ._region import parse_region  # numpy path: import only when used
+        parse_region(region)                     # raises zh ValueError on a bad rectangle
+        # A region run MUST get its own workspace. Pointed at the original one it would
+        # find that database.db / sparse/0 already exist, skip extraction and mapping on
+        # the sentinel checks, and hand back the FULL-dataset model as if the region had
+        # been honoured — or with force=1, overwrite the original reconstruction. Both are
+        # silent, so refuse here rather than let either happen.
+        if (ws / "database.db").exists():
+            raise FileNotFoundError(
+                f"workspace 已經有 database.db（{ws}）— 框選範圍重跑必須用一個新的 workspace。"
+                "沿用舊的會讓抽特徵/mapper 因為 sentinel 直接跳過,結果拿到的是「整個資料集」"
+                "的舊模型(看起來像 region 沒生效);開 FORCE 則會覆蓋掉原本的重建。"
+                "請改一個新的 workspace 路徑(例如原本的加上 _region 後綴)。")
+        if Path(region_model).resolve() == ws.resolve() or ws.resolve() in Path(
+                region_model).resolve().parents:
+            raise ValueError(
+                f"region_model（{region_model}）在 workspace（{ws}）底下 — "
+                "重跑會覆寫它,而它正是這次選片要讀的參考模型。請把 workspace 換成別的路徑。")
+        try:
+            region_buffer = float(str(d["region_buffer"]) or 0)
+            region_vis_thresh = float(str(d["region_vis_thresh"]) or 0.1667)
+        except ValueError:
+            raise ValueError("region_buffer / region_vis_thresh 需為數字") from None
+        if region_buffer < 0:
+            raise ValueError("region_buffer 需 ≥ 0")
+        if not 0 < region_vis_thresh <= 1:
+            raise ValueError("region_vis_thresh 需在 0–1（論文用 1/6 ≈ 0.1667）")
+
     if not Path(img_root).is_dir():
         raise FileNotFoundError(f"image_root not found: {img_root}")
     folders, nested, layout_name = resolve_layout(
@@ -282,6 +338,8 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         sift_max_image_size=str(d["sift_max_image_size"]).strip(),
         max_image_size=str(d["max_image_size"]).strip(),
         masks_dir=str(d["masks_dir"]).strip(),
+        region=region, region_model=region_model,
+        region_buffer=region_buffer, region_vis_thresh=region_vis_thresh,
         simplify=bool(d["simplify"]), reorient=bool(d["reorient"]),
         cm_n_seq=str(d["cm_n_seq"]), cm_n_quad=str(d["cm_n_quad"]), cm_n_loop=str(d["cm_n_loop"]),
         cm_n_gps=int(str(d["cm_n_gps"]) or 0),
@@ -334,11 +392,58 @@ def _stage_nested(c: _Ctx) -> None:
         c.r.log(f"rebased IMG_ROOT={c.img_root}")
 
 
+def _region_subset(c: _Ctx, lines: list[str]) -> list[str]:
+    """Narrow `lines` to the images a picked viewer region needs.
+
+    Names come out of `region_model`, so they must be the names this run's image list
+    uses. They agree when both point at the same folder layout; when they don't, a bare
+    name (basename) match is tried before giving up, because the common mismatch is a
+    model built from a differently-nested staging of the same files. Either way the
+    counts are logged rather than silently applied — a wholesale name mismatch would
+    otherwise read as "the region is empty", which sends you hunting the wrong bug.
+    """
+    from ._region import parse_region, select_region_images  # numpy path: import when used
+
+    names, _stats = select_region_images(
+        Path(c.region_model), parse_region(c.region), buffer=c.region_buffer,
+        vis_thresh=c.region_vis_thresh, log=c.r.log)
+    want = set(names)
+    by_base: dict[str, str] = {}
+    for n in names:
+        by_base.setdefault(PurePosixPath(n).name, n)
+
+    kept: list[str] = []
+    exact = base = 0
+    for ln in lines:
+        if ln in want:
+            kept.append(ln)
+            exact += 1
+        elif PurePosixPath(ln).name in by_base:
+            kept.append(ln)
+            base += 1
+    if base:
+        c.r.log(f"region 選片: {base} 張是以檔名（非完整路徑）對上的 — "
+                "region_model 與這次的資料夾結構不同,已照檔名採用。")
+    missing = len(want) - exact - base
+    if missing > 0:
+        c.r.log(f"region 選片: {missing} 張在 region_model 裡選中,但這次的影像清單裡找不到"
+                "（來源資料夾不同或檔案已移除）。")
+    if not kept:
+        raise FileNotFoundError(
+            f"region 選中 {len(want)} 張影像,但沒有一張出現在這次的影像清單裡 — "
+            f"region_model（{c.region_model}）與 image_root（{c.img_root}）"
+            "很可能不是同一批影像。")
+    c.r.log(f"region 選片: 影像清單 {len(lines)} → {len(kept)} 張")
+    return kept
+
+
 def _build_image_list(c: _Ctx) -> None:
     # image_list.txt (paths relative to img_root)
     lines: list[str] = []
     for f in c.folders:
         lines += list_images(Path(c.img_root) / f, f)
+    if c.region:
+        lines = _region_subset(c, lines)
     c.lst.write_text("\n".join(lines) + ("\n" if lines else ""))
     c.r.log(f"image_list: {len(lines)} images across {len(c.folders)} folder(s): {' '.join(c.folders)}")
     if not lines:

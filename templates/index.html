@@ -370,6 +370,32 @@
         <div class="hint">透過 CUDA_VISIBLE_DEVICES 套用到<b>所有 COLMAP 階段</b>（抽特徵 / 匹配 / mapper / BA / Caspar / 對齊）。「全部 GPU」= COLMAP 預設(-1)。</div>
       </fieldset>
 
+      {# Region subset — only shown when the viewer's ⬚ 選訓練範圍 hands one over. Unlike
+         blocksplit (which crops an already-solved model) this re-solves the area, so
+         align pins it back into the same frame and results stay comparable. #}
+      <fieldset id="cm-region-grp" style="display:none;border-color:var(--accent)">
+        <legend style="color:var(--accent)">⬚ 只重跑框選範圍</legend>
+        <label>region（minx,miny,maxx,maxy）</label>
+        <input name="region" id="cm_region" placeholder="留空 = 整個資料集">
+        <label>region_model（這個範圍是在哪個模型的座標系上框的）</label>
+        <input name="region_model" id="cm_region_model" placeholder="…/sparse 或 …/sparse/0">
+        <div class="row">
+          <div style="flex:1"><label>外擴（buffer）</label>
+            <input name="region_buffer" id="cm_region_buffer" value="0"></div>
+          <div style="flex:1"><label>vis_thresh</label>
+            <input name="region_vis_thresh" id="cm_region_vis" value="0.1667"></div>
+        </div>
+        <div class="hint">選片用 blocksplit 那套已驗證的兩階段規則:<b>相機中心在框內</b> OR
+          <b>可見度 V_ij/V_i ≥ vis_thresh</b> — 所以框外但拍進框內的傾斜鏡頭會一起帶上,
+          不會只留飛過頭頂的那幾張。<b>外擴</b>只放大餵給可見度測試的點遮罩(與 blocksplit 一致,
+          相機中心那一關永遠用原始框)。整條流程(抽特徵→比對→mapper→<b>align</b>→去畸變)
+          都只跑選中的影像;align 會把新模型釘回同一個參考框架,可直接與舊結果疊比。
+          <b>清空 region 就回到跑整個資料集。</b></div>
+        <div class="rg-btns" style="margin-top:6px">
+          <button type="button" class="ghost" onclick="cmRegionClear()">清除範圍（改跑全部）</button>
+        </div>
+      </fieldset>
+
       <details class="grp" id="fmt-grp">
         <summary>輸入格式（手動指定 layout / subfolders）</summary>
         <div class="gbody">
@@ -1100,6 +1126,32 @@
     showForm('blocksplit');
     if (q.get('crop') === '1') bsCropPreset(); else bsSyncAutoWarn();
     history.replaceState(null, '', location.pathname);   // don't re-apply on reload
+  })();
+
+  // ── COLMAP: region prefill from the viewer's ▶ 用這個範圍重跑 COLMAP ──────────
+  // Same idiom as the blocksplit prefill above, but it lands in the COLMAP form and
+  // re-solves the area instead of cropping the existing model. The fieldset stays
+  // hidden until a region actually arrives, so the normal full-dataset run is unchanged.
+  function cmRegionClear(){
+    ['cm_region', 'cm_region_model'].forEach(function(id){
+      var el = document.getElementById(id); if (el) el.value = '';
+    });
+    var g = document.getElementById('cm-region-grp'); if (g) g.style.display = 'none';
+  }
+  window.cmRegionClear = cmRegionClear;
+
+  (function cmPrefillFromQuery(){
+    var q = new URLSearchParams(location.search);
+    if (q.get('tool') !== 'colmap' || !q.get('region')) return;
+    var set = function(id, v){ var el = document.getElementById(id); if (el && v) el.value = v; };
+    set('cm_region', q.get('region'));
+    set('cm_region_model', q.get('region_model'));
+    set('image_root', q.get('image_root'));
+    set('workspace', q.get('workspace'));
+    set('cm_region_buffer', q.get('region_buffer'));
+    var g = document.getElementById('cm-region-grp'); if (g) g.style.display = '';
+    showForm('colmap');
+    history.replaceState(null, '', location.pathname);
   })();
 
   // Show the selected backend's param block within a form; disable inputs in the

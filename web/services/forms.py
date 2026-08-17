@@ -170,6 +170,12 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "hm_leaf_max_num_images": (form.get("HM_LEAF_MAX_NUM_IMAGES") or "").strip(),
         "hm_image_overlap": (form.get("HM_IMAGE_OVERLAP") or "").strip(),
         "hm_num_workers": (form.get("HM_NUM_WORKERS") or "").strip(),
+        # region subset (⬚ 選訓練範圍 → 重跑 COLMAP): blank = whole dataset. The rectangle
+        # is measured on region_model's frame, so the two travel together.
+        "region": (form.get("region") or "").strip(),
+        "region_model": (form.get("region_model") or "").strip(),
+        "region_buffer": g("region_buffer", "0"),
+        "region_vis_thresh": g("region_vis_thresh", "0.1667"),
     }
     # Split the single 影像解析度 selection into the pipeline's mode + cap. "keep" = no
     # resize; a number = downscale to that longest side. "fullhd" is the pre-merge legacy
@@ -223,4 +229,23 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         raise ValueError("CM_LOOP_MATCHES must be space/comma-separated integers") from None
     if len(loop_ints) % 2 != 0:
         raise ValueError("CM_LOOP_MATCHES needs an even count of integers (a b pairs)")
+    # region subset: reject a half-filled pair here (the pipeline checks again, but the
+    # form is where the user can still fix it), and parse the rectangle for its zh error.
+    if params["region"] or params["region_model"]:
+        if not params["region"]:
+            raise ValueError("region_model 有設但 region 是空的 — 請框選一個範圍,或把兩者都清空。")
+        if not params["region_model"]:
+            raise ValueError("region 有設但 region_model 是空的 — 需要指定這個範圍是在哪個 "
+                             "COLMAP 模型的座標系上框的。")
+        from pipeline.blocksplit import parse_region  # zh errors, shared with pipeline
+        parse_region(params["region"])
+        for key, label in (("region_buffer", "外擴"), ("region_vis_thresh", "vis_thresh")):
+            try:
+                float(params[key])
+            except ValueError:
+                raise ValueError(f"{label} 需為數字") from None
+        if float(params["region_buffer"]) < 0:
+            raise ValueError("外擴需 ≥ 0")
+        if not 0 < float(params["region_vis_thresh"]) <= 1:
+            raise ValueError("vis_thresh 需在 0–1（論文用 1/6 ≈ 0.1667）")
     return params

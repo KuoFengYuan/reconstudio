@@ -192,6 +192,8 @@
     <button id="region-clear">清除</button>
   </div>
   <div class="rg-btns"><button id="region-go" style="border-color:var(--accent);color:var(--accent)">▶ 用這個範圍去裁切/分塊</button></div>
+  <div class="rg-btns"><button id="region-recolmap" style="border-color:var(--accent);color:var(--accent)"
+       title="用框內影像重跑整條 COLMAP(抽特徵→比對→mapper→align→去畸變),而不是在既有模型上裁切">▶ 用這個範圍重跑 COLMAP</button></div>
   <div id="region-msg"></div>
 </div>
 <div id="rband"></div>
@@ -770,6 +772,7 @@ document.getElementById('delpts-deselect').onclick = clearSelection;
 // default('') so a stale server process (templates are re-read per request, router
 // code is not) degrades to "no source" instead of 500-ing the whole viewer page.
 const BS_SOURCE = {{ bs_source | default('') | tojson }};
+const CM_IMAGE_ROOT = {{ cm_image_root | default('') | tojson }};
 const UNIT = {{ 'true' if scale_ok else 'false' }} ? '公尺' : '模型單位';
 let regionRaw = null;              // [min0, min1, max0, max1] on the horizontal axes, pre-grow
 let regionZ = null;                // [lo, hi] on the up axis, for drawing the box
@@ -986,6 +989,30 @@ document.getElementById('region-go').onclick = () => {
   if (regionVerified && !regionVerified.frame_match &&
       !confirm('驗證顯示座標系不符,這個 region 很可能是錯的。仍要帶入分塊表單?')) return;
   const q = new URLSearchParams({tool:'blocksplit', source: BS_SOURCE, region: s, crop: '1'});
+  open('/?' + q, '_blank');
+};
+
+// ▶ 用這個範圍重跑 COLMAP — re-solve the area instead of cropping the solved model.
+// region_model must be the model the rectangle was measured against: 驗證範圍 reports
+// exactly that path, so prefer it and fall back to <workspace>/sparse when unverified.
+document.getElementById('region-recolmap').onclick = () => {
+  const s = regionStr(), msg = document.getElementById('region-msg');
+  if (!s){ msg.textContent = '先框選一個範圍。'; return; }
+  if (!BS_SOURCE){ msg.textContent = '此 job 沒有 workspace,無法帶入 COLMAP 表單 — 請用 📋 複製手動貼。'; return; }
+  if (regionVerified && !regionVerified.frame_match &&
+      !confirm('驗證顯示座標系不符,這個 region 很可能是錯的。仍要帶入 COLMAP 表單?')) return;
+  const model = (regionVerified && regionVerified.sparse) || (BS_SOURCE + '/sparse');
+  const grow = parseFloat(document.getElementById('region-grow').value) || 0;
+  // A NEW workspace, never the one being viewed: re-running into it would skip
+  // extraction/mapper on their sentinels and return the full-dataset model, or with
+  // FORCE overwrite the original. The pipeline refuses either way; this just proposes
+  // a sane sibling so the user isn't left guessing.
+  const ws = BS_SOURCE.replace(/\/+$/, '') + '_region';
+  const q = new URLSearchParams({tool:'colmap', region: s, region_model: model,
+                                 workspace: ws, region_buffer: String(grow)});
+  if (CM_IMAGE_ROOT) q.set('image_root', CM_IMAGE_ROOT);
+  if (!regionVerified)
+    msg.textContent = '提示:沒先按🔍 驗證範圍,region_model 用推測值 ' + model + ' — 請在表單確認。';
   open('/?' + q, '_blank');
 };
 
