@@ -407,3 +407,138 @@ def test_no_eo_csv_leaves_the_pipeline_untouched(patched, imgroot, vocab, tmp_pa
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
     assert not any("EO pose priors" in b for b in r.banners)
     assert "--GlobalMapper.ra_use_gravity" not in r.argv_for("global_mapper")
+
+
+# --------------------------------------------------------------------------- #
+# region subset: re-run the pipeline over an area picked in the viewer
+# --------------------------------------------------------------------------- #
+# The reference model is built so all three selection paths are exercised at once:
+#   img_000  centre INSIDE  the region                  -> phase 1 (camera centre)
+#   img_001  centre outside, sees only in-region points  -> phase 2 (visibility 1.0)
+#   img_002  centre outside, sees only far-away points   -> dropped (in-region hull 0)
+REGION_IN = "-5,-5,15,15"
+
+
+def _ref_model(model_dir: Path) -> Path:
+    """A 3-image / 6-point COLMAP model for the region tests (names match `imgroot`)."""
+    import numpy as np
+
+    from pipeline.vendor.read_write_model import (
+        Camera,
+        Image,
+        Point3D,
+        write_cameras_binary,
+        write_images_binary,
+        write_points3D_binary,
+    )
+    model_dir.mkdir(parents=True, exist_ok=True)
+    qvec = np.array([1.0, 0.0, 0.0, 0.0])              # identity R -> centre = -tvec
+    near = [(0.0, 0.0, 0.0), (10.0, 0.0, 0.0), (5.0, 10.0, 0.0)]     # inside REGION_IN
+    far = [(100.0, 100.0, 0.0), (110.0, 100.0, 0.0), (105.0, 110.0, 0.0)]
+    pts, tri = {}, np.array([[0.0, 0.0], [100.0, 0.0], [50.0, 100.0]])   # non-collinear
+    for i, xyz in enumerate(near + far, start=1):
+        pts[i] = Point3D(id=i, xyz=np.array(xyz), rgb=np.array([1, 2, 3]), error=1.0,
+                         image_ids=np.array([1]), point2D_idxs=np.array([0]))
+    spec = [("img_000.jpg", (5.0, 5.0, 50.0), [1, 2, 3]),      # centre inside
+            ("img_001.jpg", (100.0, 100.0, 50.0), [1, 2, 3]),  # outside, sees in-region
+            ("img_002.jpg", (200.0, 200.0, 50.0), [4, 5, 6])]  # outside, sees far only
+    images = {}
+    for iid, (name, centre, ids) in enumerate(spec, start=1):
+        images[iid] = Image(id=iid, qvec=qvec, tvec=-np.array(centre), camera_id=1,
+                            name=name, xys=tri.copy(),
+                            point3D_ids=np.array(ids, dtype=np.int64))
+    write_cameras_binary({1: Camera(id=1, model="PINHOLE", width=64, height=64,
+                                    params=np.array([50.0, 50.0, 32.0, 32.0]))},
+                         str(model_dir / "cameras.bin"))
+    write_images_binary(images, str(model_dir / "images.bin"))
+    write_points3D_binary(pts, str(model_dir / "points3D.bin"))
+    return model_dir
+
+
+def test_region_narrows_the_image_list_by_both_phases(patched, imgroot, vocab, tmp_path):
+    model = _ref_model(tmp_path / "refmodel")
+    ws = tmp_path / "ws_region"
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, region=REGION_IN,
+                            region_model=str(model)), r)
+    # img_002 is the only one neither test keeps
+    assert (ws / "image_list.txt").read_text().split() == ["img_000.jpg", "img_001.jpg"]
+    assert any("框內相機 1" in m and "另收 1" in m for m in r.logs)
+    assert any("影像清單 3 → 2 張" in m for m in r.logs)
+
+
+def test_region_still_extracts_only_the_subset(patched, imgroot, vocab, tmp_path):
+    """The filter must reach COLMAP, not just image_list.txt — extraction is driven
+    by --image_list_path, so the subset propagates to every downstream stage."""
+    model = _ref_model(tmp_path / "refmodel")
+    ws = tmp_path / "ws_region"
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, region=REGION_IN,
+                            region_model=str(model)), r)
+    argv = r.argv_for("feature_extractor")
+    listed = Path(argv[argv.index("--image_list_path") + 1]).read_text().split()
+    assert listed == ["img_000.jpg", "img_001.jpg"]
+
+
+def test_region_buffer_widens_the_visibility_test_only(patched, imgroot, vocab, tmp_path):
+    """buffer grows the point mask, never the phase-1 rectangle (blocksplit's rule).
+    img_002's points sit 85+ units out, so a buffer that reaches them pulls it in via
+    phase 2 while the camera-centre count stays at 1."""
+    model = _ref_model(tmp_path / "refmodel")
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws_region", vocab, region=REGION_IN,
+                            region_model=str(model), region_buffer="200"), r)
+    assert any("框內相機 1" in m for m in r.logs)          # phase 1 unchanged
+    assert (tmp_path / "ws_region" / "image_list.txt").read_text().split() == [
+        "img_000.jpg", "img_001.jpg", "img_002.jpg"]
+
+
+def test_region_refuses_a_workspace_that_already_has_a_database(patched, imgroot, vocab,
+                                                               tmp_path):
+    """Re-running into the original workspace would skip extract/mapper on their
+    sentinels and hand back the FULL-dataset model as if the region had applied."""
+    model = _ref_model(tmp_path / "refmodel")
+    ws = tmp_path / "ws_used"
+    ws.mkdir()
+    (ws / "database.db").write_bytes(b"x")
+    with pytest.raises(FileNotFoundError, match="必須用一個新的 workspace"):
+        _run.run_colmap(_params(imgroot, ws, vocab, region=REGION_IN,
+                                region_model=str(model)), FakeRunner())
+
+
+def test_region_refuses_a_model_inside_the_workspace(patched, imgroot, vocab, tmp_path):
+    ws = tmp_path / "ws_region"
+    model = _ref_model(ws / "sparse")           # the run would overwrite its own reference
+    with pytest.raises(ValueError, match="在 workspace"):
+        _run.run_colmap(_params(imgroot, ws, vocab, region=REGION_IN,
+                                region_model=str(model)), FakeRunner())
+
+
+@pytest.mark.parametrize("over, msg", [
+    ({"region": REGION_IN}, "region_model 是空的"),
+    ({"region_model": "x"}, "region 是空的"),
+])
+def test_region_and_model_must_travel_together(patched, imgroot, vocab, tmp_path, over, msg):
+    with pytest.raises((ValueError, FileNotFoundError), match=msg):
+        _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, **over), FakeRunner())
+
+
+def test_region_reports_a_wholesale_name_mismatch(patched, vocab, tmp_path):
+    """A model built from different files selects names this run has none of. That must
+    say so, not read as "the region is empty" and send you hunting the wrong bug."""
+    other = tmp_path / "other"
+    _make_images(other, 2)
+    for p in sorted(other.iterdir()):
+        p.rename(other / f"zz_{p.name}")        # names that cannot match the model's
+    model = _ref_model(tmp_path / "refmodel")
+    with pytest.raises(FileNotFoundError, match="沒有一張出現在這次的影像清單裡"):
+        _run.run_colmap(_params(other, tmp_path / "ws_region", vocab, region=REGION_IN,
+                                region_model=str(model)), FakeRunner())
+
+
+def test_no_region_leaves_the_image_list_whole(patched, imgroot, vocab, tmp_path):
+    ws = tmp_path / "ws"
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab), r)
+    assert len((ws / "image_list.txt").read_text().split()) == 3
+    assert not any("region 選片" in m for m in r.logs)

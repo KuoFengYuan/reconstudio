@@ -71,10 +71,15 @@ async def viz(request: Request, job_id: str, m: str | None = None):
     # workspace — blocksplit's _resolve_dense finds the undistorted model under it).
     # Empty for blocksplit's own results: you can't pick a region out of a block.
     bs_source = "" if job.kind == "blocksplit" else ((job.meta or {}).get("workspace") or "")
+    # ▶ 用這個範圍重跑 COLMAP needs the ORIGINAL images, not the undistorted ones the
+    # viewer is showing — a re-run re-extracts features, so it wants the source the first
+    # run consumed. Only a prefill: for an imported workspace `image_root` points at the
+    # undistorted copies, which is the wrong input, so the form field stays editable.
+    cm_image_root = "" if job.kind == "blocksplit" else ((job.meta or {}).get("image_root") or "")
     return _page(request, "viz.html", job=job.to_dict(), has_model=bool(md),
                  model_sub=(m or ""), clean_dir=clean_dir, clean_dataset=clean_dataset,
                  scale_ok=scale_ok, blocks=blocks, cur_block=cur_block,
-                 bs_source=bs_source)
+                 bs_source=bs_source, cm_image_root=cm_image_root)
 
 
 @router.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
