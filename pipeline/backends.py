@@ -157,6 +157,11 @@ BUILTIN_BACKENDS: dict[str, dict] = {
             {"key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)"},
             {"key": "resize_factor", "flag": "--resize_factor", "type": "select",
              "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣"},
+            {"key": "max_width", "flag": "--max-width", "type": "int", "default": "3840",
+             "label": "影像寬度上限 px (0 = 不設限)",
+             "hint": "超過這個寬度就縮到這個寬度,和「影像降採樣」是兩道獨立的關卡。"
+                     "LichtFeld 內建預設就是 3840,而且不會警告 —— 航拍原圖 14204 px 會被砍成 3840,"
+                     "6 cm 的 GSD 變成 23 cm。要用原生解析度訓練一定要填 0。"},
             {"key": "use_16bit", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
              "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit "
                      "JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。"},
@@ -214,6 +219,11 @@ BUILTIN_BACKENDS: dict[str, dict] = {
             {"key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)"},
             {"key": "resize_factor", "flag": "--resize_factor", "type": "select",
              "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣"},
+            {"key": "max_width", "flag": "--max-width", "type": "int", "default": "3840",
+             "label": "影像寬度上限 px (0 = 不設限)",
+             "hint": "超過這個寬度就縮到這個寬度,和「影像降採樣」是兩道獨立的關卡。"
+                     "LichtFeld 內建預設就是 3840,而且不會警告 —— 航拍原圖 14204 px 會被砍成 3840,"
+                     "6 cm 的 GSD 變成 23 cm。要用原生解析度訓練一定要填 0。"},
             {"key": "use_16bit", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
              "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit "
                      "JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。"},
