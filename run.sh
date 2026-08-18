@@ -23,7 +23,7 @@ MODE=serve
 . ./tools/detect.sh
 
 : "${HOST:=127.0.0.1}"
-: "${PORT:=8077}"
+: "${PORT:=8074}"
 : "${CONDA_ENV:=rec}"
 : "${CONDA_ROOT:=$(detect_conda_root)}"
 

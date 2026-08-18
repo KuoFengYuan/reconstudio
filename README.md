@@ -165,8 +165,7 @@ rsync -a 舊機器:~/repo/reconstudio/static/supersplat/ static/supersplat/
 ```
 
 `local.env` **不要整份複製** —— 路徑、磁碟、port 都是機器專屬的。跑 `./setup.sh` 讓它重新
-偵測,只把真正跨機器通用的那幾行搬過去(例如 `CLOUDSDK_CORE_PROJECT`)。複製整份最常見的
-後果就是留下一堆指向不存在路徑的變數,而**打錯字或失效的變數不會報錯**(見下一節)。
+偵測,只把真正跨機器通用的那幾行搬過去(例如 `CLOUDSDK_CORE_PROJECT`)。
 
 ## 5. 這台機器的設定
 
@@ -256,7 +255,7 @@ worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航�
 檢查品質,或 **🧠 接著訓練**。
 
 > 航拍 / RTK 有 GPS 的資料,展開「GPS 對齊 + 大場景」可以更快更穩,見
-> [三、進階 — GPS](#gps--大場景航拍-rtk)。有「RTK 大場景」一鍵預設可直接套。
+> [三、進階 — GPS](#gps--大場景航拍-rtk)。
 
 ## 訓練(重建 → 3DGS 模型)
 

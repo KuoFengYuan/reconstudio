@@ -165,9 +165,6 @@
     font-family:ui-sans-serif,system-ui,"Noto Sans CJK TC","Hiragino Sans",sans-serif;
   }
 
-  /* the interactive ink-butterflies canvas — fixed behind the whole UI */
-  #suminagashi{ position:fixed; inset:0; width:100%; height:100%;
-                z-index:0; pointer-events:none; display:block; }
   header, .wrap{ position:relative; z-index:1; }
   .modal{ z-index:60; }
 
@@ -244,7 +241,6 @@
 </style>
 </head>
 <body>
-<canvas id="suminagashi" aria-hidden="true"></canvas>
 <header>
   <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示左側設定面板">◀</button>
   <h1>Recon Studio</h1>
@@ -326,16 +322,6 @@
 
     <!-- ----- colmap form ----- -->
     <form id="form-colmap" style="display:none" hx-post="/ui/jobs" hx-target="#main" hx-swap="innerHTML">
-      <fieldset>
-        <legend>預設組（一鍵套用）</legend>
-        <button type="button" class="ghost" onclick="applyRtkPreset()"
-                title="MATCHER=spatial、MAPPER=hierarchical、GPS 對齊 + max_error 0.1、REORIENT、CAMERA_MODE=single">
-          🛰️ RTK 無人機（大場景 + 公分級 GPS）
-        </button>
-        <div class="hint">一鍵填好大場景 RTK/PPK 流程：<b>spatial</b> 比對 + <b>hierarchical</b> mapper + <b>GPS 對齊</b>（公制，max_error <b>0.1</b>）+ <b>REORIENT</b> 正立 + <b>單相機</b>。只填這個表單、不動全域預設，填完仍可手動微調。資料需每張帶 RTK EXIF GPS（100% 覆蓋）。</div>
-        <div id="rtk-preset-status" style="display:none;margin-top:8px;padding:8px 10px;border-radius:6px;background:#e7f7e7;border:1px solid #9bd39b;color:#1a6b1a;font-size:13px;"></div>
-      </fieldset>
-
       <fieldset>
         <legend>Inputs</legend>
         <label>image_root</label>
@@ -628,7 +614,6 @@
       {% endif %}
     {% endmacro %}
 
-    <!-- ----- blocksplit form ----- -->
     <!-- ----- depth/normal form (LichtFeld-Studio `preprocess` -> depth/ + normals/) ----- -->
     <form id="form-depth" style="display:none" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
@@ -680,6 +665,7 @@
       <button class="submit" type="submit" {{ '' if depth_ready else 'disabled' }}>▶ 產生深度/法向量圖</button>
     </form>
 
+    <!-- ----- blocksplit form ----- -->
     <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>分塊（大場景 → 每塊獨立訓練）</legend>
@@ -1235,40 +1221,6 @@
       e.style.display = (e.dataset.p.split(' ').indexOf(m) >= 0) ? '' : 'none';
     });
   }
-  // One-click preset for large-scene RTK/PPK drone data: fills the fields that
-  // matter — spatial matcher (GPS-pruned pairs) + hierarchical mapper (scales to
-  // big scenes) + GPS metric alignment at a tight cm threshold + Y-up reorient +
-  // one shared camera — WITHOUT touching the global defaults, then re-runs the
-  // matcher/mapper visibility sync so the spatial/hierarchical param groups show.
-  function applyRtkPreset(){
-    var f = document.getElementById('form-colmap'); if (!f) return;
-    var touched = [];
-    function setVal(name, v){ var el = f.querySelector('[name="' + name + '"]'); if (el){ el.value = v; touched.push(el); } }
-    function setChk(name, on){ var el = f.querySelector('[name="' + name + '"]'); if (el){ el.checked = on; touched.push(el); } }
-    setVal('CAMERA_MODE', 'single');           // same M3E lens across flights -> one shared intrinsic
-    setVal('MATCHER', 'spatial');              // GPS proximity prunes the match pairs
-    setVal('MAPPER', 'hierarchical');          // partition/merge -> scales to the large scene
-    setChk('GPS_ALIGN', true);                 // hierarchical ignores GPS; this anchors the result to metres
-    setVal('GPS_ALIGN_MAX_ERROR', '0.1');      // cm-grade RTK -> tight 0.1 m RANSAC inlier gate
-    setChk('REORIENT', true);                  // with GPS on: fixed Z-up->Y-up, keeps metric scale
-    syncMatcher(); syncMapper();               // reveal the spatial / hierarchical param groups
-    // Visible feedback: the targeted fields sit inside collapsed <details>, so the
-    // user sees nothing change. Expand every group, flash the touched fields, and
-    // show a persistent confirmation so it's obvious the preset was applied.
-    f.querySelectorAll('details.grp').forEach(function(d){ d.open = true; });
-    touched.forEach(function(el){
-      var box = el.closest('label') || el;
-      var prevBg = box.style.backgroundColor, prevTr = box.style.transition;
-      box.style.transition = 'background-color .25s';
-      box.style.backgroundColor = '#fff3bf';
-      setTimeout(function(){ box.style.backgroundColor = prevBg; box.style.transition = prevTr; }, 1500);
-    });
-    var s = document.getElementById('rtk-preset-status');
-    if (s){
-      s.textContent = '✅ 已套用 RTK 預設：MATCHER=spatial、MAPPER=hierarchical、GPS 對齊(max_error 0.1)、REORIENT、CAMERA_MODE=single。下方各組已展開，可檢視/微調後啟動。';
-      s.style.display = '';
-    }
-  }
   syncMatcher(); syncMapper();   // set initial visibility from the prefilled defaults
   document.addEventListener('change', function(e){
     if (e.target && e.target.name === 'auto_voxel'){
@@ -1673,273 +1625,6 @@
       else if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // left the job view → stop tailing
     }
   });
-</script>
-
-<!-- ============================ 水墨蝴蝶 ink-wash butterflies ============================
-  A drift of sumi / indigo / vermilion butterflies, brush-painted at runtime: each
-  wing is a bezier silhouette filled with a graded ink wash (dense at the root,
-  pooling at the tip), soft-edged like ink bleeding into washi. They ride the same
-  divergence-free CURL-NOISE flow field the old marbling used, each tethered to its
-  own anchor so the kigumi stays a loose cluster over the output pane. Wings flap by
-  squashing the mirrored wing sprite toward the body axis; a faint ink wake trails
-  into a slowly-dissipating buffer. Butterflies occasionally alight (slow open-close),
-  shy away from the pointer, and a click blooms ink + sets a few more on the wing.
-  Paper is the CSS <body> wash behind us; this canvas is fixed and pointer-events:none. -->
-<script>
-(function(){
-  var cv = document.getElementById('suminagashi');
-  if(!cv || !cv.getContext){ return; }
-  var ctx = cv.getContext('2d');
-  var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-  // ---- palette: same inks as the washi theme ----
-  var SUMI='#17120d', SUMI2='#231c14', AI='#21466e', AI2='#1b3a5c', SHU='#b23020';
-  var BAG=[SUMI,SUMI,SUMI2,AI,AI,AI2,SHU,SHU];
-
-  // ---- tunables ----
-  var FL=10, SPRING=0.0022, JIT=0.16, VMAX=1.9, TRAIL=0.085, FADE=0.012;
-
-  var W=0,H=0,DPR=1, ink=null, ictx=null;
-
-  function hexA(hex,a){ var n=parseInt(hex.slice(1),16);
-    return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
-
-  // ---------- sprites ----------
-  // wing sprite space: 120x120. Wing ROOT (the body joint) at (114,60); the
-  // left wing-pair extends toward -x. Composited twice (mirrored) per butterfly.
-  var SPRITES={};
-  function mulberry(seed){ var s=seed|0; return function(){ s=(Math.imul(s,1664525)+1013904223)|0; return ((s>>>9)&0x7FFFFF)/8388608; }; }
-
-  function wingSprite(col, seed){
-    var key=col+'|'+seed; if(SPRITES[key]) return SPRITES[key];
-    var S=120, c=document.createElement('canvas'); c.width=c.height=S;
-    var g=c.getContext('2d'), R=mulberry(seed*2654435761);
-    var rx=114, ry=60;
-    var ax=20+R()*10, ay=8+R()*8;                // forewing apex
-    var fw=function(){ g.beginPath();
-      g.moveTo(rx,ry-2);
-      g.bezierCurveTo(92,24, 60,2, ax,ay);                    // leading edge
-      g.bezierCurveTo(ax-14,ay+10, ax-12,ay+28, ax+4,ay+40);  // broad outer margin
-      g.bezierCurveTo(56,58, 92,60, rx,ry);                   // inner margin
-      g.closePath(); };
-    var hx=42+R()*8, hy=96+R()*8;                // hindwing lobe
-    var hw=function(){ g.beginPath();
-      g.moveTo(rx,ry+2);
-      g.bezierCurveTo(90,56, 62,52, 46,60);
-      g.bezierCurveTo(20,70, 22,92, hx,hy);
-      g.bezierCurveTo(68,108, 96,86, rx,ry+8);
-      g.closePath(); };
-    [hw,fw].forEach(function(path,i){
-      g.save(); path(); g.clip();
-      g.filter='blur(2.5px)';
-      var gr=g.createRadialGradient(rx,ry,4, rx,ry,112);      // dense ink at the root
-      gr.addColorStop(0,hexA(col,0.95)); gr.addColorStop(0.5,hexA(col,0.5)); gr.addColorStop(1,hexA(col,0.1));
-      g.fillStyle=gr; g.fillRect(0,0,S,S);
-      var px=i? ax+6:hx, py=i? ay+16:hy-10;                   // ink pooling at the stroke's end
-      var g2=g.createRadialGradient(px,py,1, px,py,32);
-      g2.addColorStop(0,hexA(col,0.55)); g2.addColorStop(1,hexA(col,0));
-      g.fillStyle=g2; g.fillRect(0,0,S,S);
-      g.filter='none';
-      g.strokeStyle=hexA(col,0.38); g.lineWidth=1.1; g.filter='blur(0.5px)';  // veins
-      var vn=i?4:3;
-      for(var v=0;v<vn;v++){ var t=(v+0.5)/vn;
-        var tx,ty;
-        if(i){ tx=ax+4+t*44; ty=ay+8+t*34; } else { tx=hx-14+t*40; ty=hy-6-t*26; }
-        g.beginPath(); g.moveTo(rx-4, ry+(i?-2:4));
-        g.quadraticCurveTo((rx+tx)/2, (ry+ty)/2+(i?-6:6), tx, ty); g.stroke(); }
-      g.filter='none';
-      g.restore();
-      g.save(); path(); g.filter='blur(1.6px)'; g.globalAlpha=0.5;            // bleed edge
-      g.strokeStyle=hexA(col,0.55); g.lineWidth=1.6; g.stroke(); g.restore();
-    });
-    if(R()<0.6){ g.save(); g.globalCompositeOperation='destination-out'; g.filter='blur(1px)';
-      var nd=2+((R()*2)|0);
-      for(var d=0;d<nd;d++){ var sx=24+R()*34, sy=12+R()*26, sr=2+R()*3.5;
-        g.globalAlpha=0.75; g.beginPath(); g.arc(sx,sy,sr,0,6.2832); g.fill(); }
-      g.restore(); }
-    return (SPRITES[key]=c);
-  }
-
-  var BODY=null;
-  function bodySprite(){
-    if(BODY) return BODY;
-    var c=document.createElement('canvas'); c.width=28; c.height=76;
-    var g=c.getContext('2d');
-    g.filter='blur(0.7px)';
-    g.fillStyle=hexA(SUMI,0.92);
-    g.beginPath(); g.ellipse(14,42,3.6,20,0,0,6.2832); g.fill();  // abdomen
-    g.beginPath(); g.arc(14,22,4.6,0,6.2832); g.fill();           // thorax
-    g.beginPath(); g.arc(14,14,3.1,0,6.2832); g.fill();           // head
-    g.filter='none';
-    g.strokeStyle=hexA(SUMI,0.8); g.lineWidth=1.1; g.lineCap='round';
-    g.beginPath(); g.moveTo(12,12); g.quadraticCurveTo(6,2, 2,4); g.stroke();
-    g.beginPath(); g.moveTo(16,12); g.quadraticCurveTo(22,2, 26,4); g.stroke();
-    return (BODY=c);
-  }
-
-  var TRS={};
-  function trailSprite(col){
-    if(TRS[col]) return TRS[col];
-    var r=26, c=document.createElement('canvas'); c.width=c.height=r*2;
-    var g=c.getContext('2d');
-    var gr=g.createRadialGradient(r,r,0,r,r,r);
-    gr.addColorStop(0,hexA(col,0.5)); gr.addColorStop(1,hexA(col,0));
-    g.fillStyle=gr; g.beginPath(); g.arc(r,r,r,0,6.2832); g.fill();
-    return (TRS[col]=c);
-  }
-
-  function resize(){
-    DPR=Math.min(window.devicePixelRatio||1, 1.75);
-    W=window.innerWidth; H=window.innerHeight;
-    cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
-    cv.style.width=W+'px'; cv.style.height=H+'px';
-    ctx.setTransform(DPR,0,0,DPR,0,0);
-    ink=document.createElement('canvas'); ink.width=cv.width; ink.height=cv.height;
-    ictx=ink.getContext('2d'); ictx.setTransform(DPR,0,0,DPR,0,0);
-  }
-
-  // ---- curl-noise flow field (same construction as the old ink backdrop) ----
-  function hash(x,y){
-    var h=Math.imul(x|0,374761393) ^ Math.imul(y|0,668265263);
-    h^=h>>13; h=Math.imul(h,1274126177); h^=h>>16;
-    return (h>>>0)/4294967295;
-  }
-  function sm(t){ return t*t*(3-2*t); }
-  function vn(x,y){
-    var x0=Math.floor(x), y0=Math.floor(y), fx=sm(x-x0), fy=sm(y-y0);
-    var a=hash(x0,y0)   + (hash(x0+1,y0)  -hash(x0,y0))  *fx;
-    var b=hash(x0,y0+1) + (hash(x0+1,y0+1)-hash(x0,y0+1))*fx;
-    return a+(b-a)*fy;
-  }
-  var T=0;
-  function pot(x,y){ return vn(x*0.0024+T*0.6, y*0.0024-T*0.3) + 0.95*vn(x*0.013-T*0.8, y*0.013+T*0.5); }
-  var _vx=0,_vy=0;
-  function flow(x,y){ var e=1.2; _vx=(pot(x,y+e)-pot(x,y-e)); _vy=-(pot(x+e,y)-pot(x-e,y)); }
-
-  // ---------- butterflies ----------
-  var flies=[], EPH=new Array(10), ephHead=0;
-  function gauss(){ return (Math.random()+Math.random()+Math.random()-1.5)/1.5; }
-  function mkFly(x,y,col,size,ax,ay,eph){
-    return {x:x,y:y,vx:0,vy:0,ax:ax,ay:ay,col:col,size:size,
-            spr:wingSprite(col,(Math.random()*1e9)|0), head:-1.2+Math.random()*0.8,
-            phase:Math.random()*6.28, fs:0.10+Math.random()*0.05,
-            rest:0, life:eph? (420+Math.random()*240)|0 : -1, age:0, dead:false};
-  }
-  function seed(){
-    flies.length=0;
-    var n=Math.max(10, Math.min(18, Math.round(W*H/95000))), pts=[];
-    for(var i=0;i<n;i++){
-      var col=BAG[i%BAG.length], ax=0, ay=0;
-      for(var k=0;k<24;k++){                    // keep anchors loosely spaced
-        ax=W*0.62+gauss()*W*0.19; ay=H*0.47+gauss()*H*0.24;
-        ax=Math.max(W*0.36,Math.min(W*0.95,ax)); ay=Math.max(H*0.1,Math.min(H*0.88,ay));
-        var ok=true;
-        for(var q=0;q<pts.length;q++){ var qx=pts[q][0]-ax, qy=pts[q][1]-ay;
-          if(qx*qx+qy*qy<95*95){ ok=false; break; } }
-        if(ok) break;
-      }
-      pts.push([ax,ay]);
-      flies.push(mkFly(ax+(Math.random()-0.5)*80, ay+(Math.random()-0.5)*80,
-                       col, 13+Math.random()*23, ax, ay, false));
-    }
-    flies.sort(function(a,b){ return a.size-b.size; });  // small (far) drawn first
-  }
-
-  var startle={x:-1e4,y:-1e4,t:0};
-  function stepFly(b){
-    b.age++;
-    if(b.life>0 && b.age>b.life){ b.dead=true; return; }
-    if(startle.t>0){
-      var dx=b.x-startle.x, dy=b.y-startle.y, d2=dx*dx+dy*dy;
-      if(d2<160*160){ var d=Math.sqrt(d2)||1, k=(1-d/160)*0.9;
-        b.vx+=dx/d*k; b.vy+=dy/d*k; b.rest=0; }
-    }
-    if(b.rest>0){ b.rest--; b.vx*=0.82; b.vy*=0.82; b.phase+=0.028; return; }
-    flow(b.x,b.y);
-    b.vx += (_vx*FL-b.vx)*0.05 + (b.ax-b.x)*SPRING + (Math.random()-0.5)*JIT;
-    b.vy += (_vy*FL-b.vy)*0.05 + (b.ay-b.y)*SPRING + (Math.random()-0.5)*JIT
-            - Math.abs(Math.sin(b.phase))*0.05 + 0.028;
-    var sp=Math.sqrt(b.vx*b.vx+b.vy*b.vy), cap=b.life>0?3.2:VMAX;
-    if(sp>cap){ b.vx*=cap/sp; b.vy*=cap/sp; sp=cap; }
-    b.x+=b.vx; b.y+=b.vy;
-    if(sp>0.12){ var h=Math.atan2(b.vy,b.vx), dh=h-b.head;
-      while(dh>3.1416) dh-=6.2832; while(dh<-3.1416) dh+=6.2832; b.head+=dh*0.12; }
-    b.phase += b.fs*(0.55+sp*0.5);
-    if(b.life<0 && sp<0.5 && Math.random()<0.0012){ b.rest=(200+Math.random()*320)|0; }
-    var fl=Math.abs(Math.sin(b.phase));                       // faint ink wake
-    ictx.globalAlpha=TRAIL*fl*(b.size/32);
-    var tr=trailSprite(b.col), R2=b.size*0.55;
-    ictx.drawImage(tr, b.x-R2/2, b.y-R2/2, R2, R2);
-    ictx.globalAlpha=1;
-  }
-
-  function drawFly(g,b){
-    var flap=Math.sin(b.phase), wsx=0.2+0.8*Math.abs(flap), s=b.size/96, env=1;
-    if(b.life>0){ var t=b.age/b.life; env = t<0.12? t/0.12 : (t>0.75? (1-t)/0.25 : 1); if(env<0) env=0; }
-    g.save(); g.translate(b.x,b.y); g.rotate(b.head+1.5708); g.scale(s,s);
-    g.globalAlpha=env*(0.8+0.15*(1-wsx));
-    g.save(); g.scale(wsx,1);  g.drawImage(b.spr,-114,-60); g.restore();
-    g.save(); g.scale(-wsx,1); g.drawImage(b.spr,-114,-60); g.restore();
-    g.globalAlpha=env;
-    g.drawImage(bodySprite(), -14, -26);
-    g.restore();
-  }
-
-  function fadeInk(){
-    ictx.globalCompositeOperation='copy'; ictx.filter='blur(0.5px)';
-    ictx.drawImage(ink,0,0,W,H); ictx.filter='none';
-    ictx.globalCompositeOperation='destination-out';
-    ictx.globalAlpha=FADE; ictx.fillStyle='#000'; ictx.fillRect(0,0,W,H);
-    ictx.globalCompositeOperation='source-over'; ictx.globalAlpha=1;
-  }
-  function paint(){
-    ctx.clearRect(0,0,W,H);
-    ctx.filter='blur(1px)'; ctx.drawImage(ink,0,0,W,H); ctx.filter='none';
-    for(var i=0;i<flies.length;i++) drawFly(ctx,flies[i]);
-    for(i=0;i<EPH.length;i++){ var e=EPH[i]; if(e && !e.dead) drawFly(ctx,e); }
-  }
-  function frame(ts){
-    if(!document.hidden){
-      T=ts*0.00006;
-      if(startle.t>0) startle.t--;
-      fadeInk();
-      for(var i=0;i<flies.length;i++) stepFly(flies[i]);
-      for(i=0;i<EPH.length;i++){ if(EPH[i] && !EPH[i].dead) stepFly(EPH[i]); }
-      paint();
-    }
-    requestAnimationFrame(frame);
-  }
-
-  var lastPtr=0;
-  function onMove(e){
-    var now=e.timeStamp||0; if(now-lastPtr<40) return; lastPtr=now;
-    startle.x=e.clientX; startle.y=e.clientY; startle.t=8;
-  }
-  function onDown(e){
-    var burst=trailSprite(BAG[(Math.random()*BAG.length)|0]), R=54;   // small ink bloom
-    ictx.globalAlpha=0.4; ictx.drawImage(burst, e.clientX-R/2, e.clientY-R/2, R, R); ictx.globalAlpha=1;
-    for(var i=0;i<3;i++){
-      var col=BAG[(Math.random()*BAG.length)|0];
-      EPH[ephHead]=mkFly(e.clientX+(Math.random()-0.5)*30, e.clientY+(Math.random()-0.5)*30,
-                         col, 12+Math.random()*14, W*(0.5+Math.random()*0.4), H*(0.2+Math.random()*0.5), true);
-      ephHead=(ephHead+1)%EPH.length;
-    }
-  }
-
-  window.addEventListener('resize', function(){ resize(); seed(); });
-  window.addEventListener('pointermove', onMove, {passive:true});
-  window.addEventListener('pointerdown', onDown, {passive:true});
-
-  resize();
-
-
-  seed();
-  if(reduce){
-    for(var i=0;i<flies.length;i++){ var b=flies[i];
-      b.phase=1.2+Math.random()*0.37; b.head=-2.4+Math.random()*1.7; }
-    paint();
-  } else requestAnimationFrame(frame);
-})();
 </script>
 </body>
 </html>
