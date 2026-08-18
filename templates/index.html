@@ -327,16 +327,6 @@
     <!-- ----- colmap form ----- -->
     <form id="form-colmap" style="display:none" hx-post="/ui/jobs" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
-        <legend>預設組（一鍵套用）</legend>
-        <button type="button" class="ghost" onclick="applyRtkPreset()"
-                title="MATCHER=spatial、MAPPER=hierarchical、GPS 對齊 + max_error 0.1、REORIENT、CAMERA_MODE=single">
-          🛰️ RTK 無人機（大場景 + 公分級 GPS）
-        </button>
-        <div class="hint">一鍵填好大場景 RTK/PPK 流程：<b>spatial</b> 比對 + <b>hierarchical</b> mapper + <b>GPS 對齊</b>（公制，max_error <b>0.1</b>）+ <b>REORIENT</b> 正立 + <b>單相機</b>。只填這個表單、不動全域預設，填完仍可手動微調。資料需每張帶 RTK EXIF GPS（100% 覆蓋）。</div>
-        <div id="rtk-preset-status" style="display:none;margin-top:8px;padding:8px 10px;border-radius:6px;background:#e7f7e7;border:1px solid #9bd39b;color:#1a6b1a;font-size:13px;"></div>
-      </fieldset>
-
-      <fieldset>
         <legend>Inputs</legend>
         <label>image_root</label>
         <div class="row">
@@ -628,7 +618,6 @@
       {% endif %}
     {% endmacro %}
 
-    <!-- ----- blocksplit form ----- -->
     <!-- ----- depth/normal form (LichtFeld-Studio `preprocess` -> depth/ + normals/) ----- -->
     <form id="form-depth" style="display:none" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
@@ -680,6 +669,7 @@
       <button class="submit" type="submit" {{ '' if depth_ready else 'disabled' }}>▶ 產生深度/法向量圖</button>
     </form>
 
+    <!-- ----- blocksplit form ----- -->
     <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>分塊（大場景 → 每塊獨立訓練）</legend>
@@ -1234,40 +1224,6 @@
     document.querySelectorAll('.phint,.pgrp').forEach(function(e){
       e.style.display = (e.dataset.p.split(' ').indexOf(m) >= 0) ? '' : 'none';
     });
-  }
-  // One-click preset for large-scene RTK/PPK drone data: fills the fields that
-  // matter — spatial matcher (GPS-pruned pairs) + hierarchical mapper (scales to
-  // big scenes) + GPS metric alignment at a tight cm threshold + Y-up reorient +
-  // one shared camera — WITHOUT touching the global defaults, then re-runs the
-  // matcher/mapper visibility sync so the spatial/hierarchical param groups show.
-  function applyRtkPreset(){
-    var f = document.getElementById('form-colmap'); if (!f) return;
-    var touched = [];
-    function setVal(name, v){ var el = f.querySelector('[name="' + name + '"]'); if (el){ el.value = v; touched.push(el); } }
-    function setChk(name, on){ var el = f.querySelector('[name="' + name + '"]'); if (el){ el.checked = on; touched.push(el); } }
-    setVal('CAMERA_MODE', 'single');           // same M3E lens across flights -> one shared intrinsic
-    setVal('MATCHER', 'spatial');              // GPS proximity prunes the match pairs
-    setVal('MAPPER', 'hierarchical');          // partition/merge -> scales to the large scene
-    setChk('GPS_ALIGN', true);                 // hierarchical ignores GPS; this anchors the result to metres
-    setVal('GPS_ALIGN_MAX_ERROR', '0.1');      // cm-grade RTK -> tight 0.1 m RANSAC inlier gate
-    setChk('REORIENT', true);                  // with GPS on: fixed Z-up->Y-up, keeps metric scale
-    syncMatcher(); syncMapper();               // reveal the spatial / hierarchical param groups
-    // Visible feedback: the targeted fields sit inside collapsed <details>, so the
-    // user sees nothing change. Expand every group, flash the touched fields, and
-    // show a persistent confirmation so it's obvious the preset was applied.
-    f.querySelectorAll('details.grp').forEach(function(d){ d.open = true; });
-    touched.forEach(function(el){
-      var box = el.closest('label') || el;
-      var prevBg = box.style.backgroundColor, prevTr = box.style.transition;
-      box.style.transition = 'background-color .25s';
-      box.style.backgroundColor = '#fff3bf';
-      setTimeout(function(){ box.style.backgroundColor = prevBg; box.style.transition = prevTr; }, 1500);
-    });
-    var s = document.getElementById('rtk-preset-status');
-    if (s){
-      s.textContent = '✅ 已套用 RTK 預設：MATCHER=spatial、MAPPER=hierarchical、GPS 對齊(max_error 0.1)、REORIENT、CAMERA_MODE=single。下方各組已展開，可檢視/微調後啟動。';
-      s.style.display = '';
-    }
   }
   syncMatcher(); syncMapper();   // set initial visibility from the prefilled defaults
   document.addEventListener('change', function(e){
