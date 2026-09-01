@@ -112,13 +112,13 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
     params = {
         "image_root": image_root, "workspace": workspace, "folders": folders,
         "stages": stages,
-        "camera_model": g("CAMERA_MODEL", "SIMPLE_RADIAL"),
+        "camera_model": g("CAMERA_MODEL", "OPENCV"),
         "camera_mode": g("CAMERA_MODE", "per_folder"),
         "max_features": g("MAX_FEATURES", "4096"),
         "matcher": g("MATCHER", "vocab"),
         # --- multi-camera rig (see pipeline/colmap/_rig.py) ---
         "rig_enable": bool(form.get("RIG_ENABLE")),
-        "rig_mode": g("RIG_MODE", "folder"),
+        "rig_mode": g("RIG_MODE", "auto"),
         "rig_regex": g("RIG_REGEX", ""),
         "rig_ref_camera": g("RIG_REF_CAMERA", ""),
         "rig_gps_tol": g("RIG_GPS_TOL", "0.5"),
@@ -140,9 +140,11 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "spatial_max_distance": g("SPATIAL_MAX_DISTANCE", "100"),
         "spatial_ignore_z": "1" if form.get("SPATIAL_IGNORE_Z") else "0",
         # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
-        "prior_std_x": g("PRIOR_STD_X", "3.0"),
-        "prior_std_y": g("PRIOR_STD_Y", "3.0"),
-        "prior_std_z": g("PRIOR_STD_Z", "5.0"),
+        # "auto" = pick from the prior source (EO CSV vs bare EXIF GPS); see
+        # pipeline.colmap._run._resolve_prior_std.
+        "prior_std_x": g("PRIOR_STD_X", "auto"),
+        "prior_std_y": g("PRIOR_STD_Y", "auto"),
+        "prior_std_z": g("PRIOR_STD_Z", "auto"),
         "prior_robust_loss": "1",
         # Surveyor exterior-orientation CSV (ID,E,N,H,OMEGA,PHI,KAPPA): positions overwrite
         # the EXIF pose priors, ω/φ/κ enter only as the gravity column (global_mapper).
@@ -164,7 +166,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "cm_n_loop": g("CM_N_LOOP", "5"), "cm_n_gps": g("CM_N_GPS", "25"),
         "cm_loop_matches": (form.get("CM_LOOP_MATCHES") or "").strip(),
         "focal_factor": (form.get("FOCAL_FACTOR") or "").strip(),
-        "sift_max_image_size": (form.get("SIFT_MAX_IMAGE_SIZE") or "").strip(),
+        "sift_max_image_size": (form.get("SIFT_MAX_IMAGE_SIZE") or "auto").strip(),
         "max_image_size": (form.get("MAX_IMAGE_SIZE") or "").strip(),
         "masks_dir": (form.get("MASKS_DIR") or "").strip().rstrip("/"),
         "simplify": bool(form.get("SIMPLIFY")),
@@ -203,7 +205,8 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
                 "cm_n_seq", "cm_n_quad", "cm_n_loop", "cm_n_gps", "resize_max"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
-    for key in ("spatial_max_distance", "prior_std_x", "prior_std_y", "prior_std_z",
+    # the prior stds also take "auto", so they are checked separately below
+    for key in ("spatial_max_distance",
                 "ra_max_rotation_error_deg",
                 "gps_align_max_error", "simplify_mult_min_dist",
                 "reorient_target_med_dist", "reorient_upscale"):
@@ -211,13 +214,26 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
             float(params[key])
         except ValueError:
             raise ValueError(f"{key} must be a number") from None
+    for key in ("prior_std_x", "prior_std_y", "prior_std_z"):
+        if str(params[key]).strip().lower() == "auto":
+            continue
+        try:
+            float(params[key])
+        except ValueError:
+            raise ValueError(f"{key} must be a number or 'auto'") from None
     # optional numerics: validated only when provided (blank = "use COLMAP default")
     for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
-                       ("sift_max_image_size", "SIFT_MAX_IMAGE_SIZE"),
                        ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),
                        ("hm_image_overlap", "HM_IMAGE_OVERLAP")):
         if params[key] and not params[key].isdigit():
             raise ValueError(f"{label} must be a positive integer (or blank)")
+    # SIFT size also takes "auto" (follow the undistort cap) and -1 (COLMAP's own
+    # default). Without this the "auto" the panel now pre-fills would be rejected
+    # here before the pipeline ever saw it.
+    sift = params["sift_max_image_size"].lower()
+    if sift and sift not in ("auto", "-1") and not sift.isdigit():
+        raise ValueError(
+            "SIFT_MAX_IMAGE_SIZE must be a positive integer, 'auto', -1, or blank")
     if params["hm_num_workers"]:  # -1 = auto, so allow a leading minus
         try:
             int(params["hm_num_workers"])

@@ -24,9 +24,18 @@ from ..config import settings
 from ..runner import PipelineError, Runner
 from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
+from ._intrinsics import discover_calibrations, match_to_cameras
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
-from ._rig import RIG_DEFAULTS, build_staging, group_images, summarize, write_rig_config
+from ._rig import (
+    RIG_DEFAULTS,
+    build_staging,
+    group_auto,
+    group_images,
+    recommend_ref_camera,
+    summarize,
+    write_rig_config,
+)
 
 COLMAP_STAGES = ["stage", "extract", "rig", "gps_inject", "match", "calibrate", "mapper",
                  "simplify", "align", "undistort", "reorient"]
@@ -36,7 +45,11 @@ COLMAP_BIN = settings.colmap_bin
 COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
     "vocab_tree_url": "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words256K.bin",
-    "camera_model": "SIMPLE_RADIAL", "max_features": "4096", "camera_mode": "per_folder",
+    # OPENCV (k1,k2,p1,p2) describes a real lens far better than SIMPLE_RADIAL's single
+    # parameter, which matters for metric/aerial work. Note the Caspar BA backend only
+    # accepts SIMPLE_RADIAL/PINHOLE and silently skips every image otherwise — _setup
+    # warns when that combination is selected.
+    "camera_model": "OPENCV", "max_features": "4096", "camera_mode": "per_folder",
     "matcher": "vocab", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",
@@ -50,7 +63,11 @@ COLMAP_DEFAULTS = {
     # sparse model into a local ENU frame in real-world metres.
     "gps_align": False, "gps_align_type": "enu", "gps_align_max_error": "3.0",
     # pose_prior_mapper: GPS position uncertainty (metres). Consumer GPS ~3-5 m; RTK ~0.02.
-    "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
+    # "auto" picks the uncertainty from the source of the priors: an EO CSV is
+    # post-processed airborne POS, so metre-level values would tell BA to ignore it.
+    # A number pins it. See _resolve_prior_std.
+    "prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "auto",
+    "prior_robust_loss": "1",
     # --- surveyor-supplied exterior orientation (EO) CSV ---
     # Path to a CSV of ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA (the adjusted
     # EO an aerial vendor ships alongside the imagery). Positions overwrite the EXIF-derived
@@ -89,10 +106,11 @@ COLMAP_DEFAULTS = {
     "cm_loop_matches": "",
     # feature_extractor focal seed for uncalibrated large scenes (h3dgs uses 0.5); "" = COLMAP default.
     "focal_factor": "",
-    # feature_extractor SIFT extraction longest-side cap. "" = COLMAP's built-in default of
-    # 3200 (it silently downscales above that before detecting SIFT). Set higher to extract
-    # at full detail, or lower to force coarser, more viewpoint-robust features.
-    "sift_max_image_size": "",
+    # feature_extractor SIFT extraction longest-side cap. "auto" (default) follows the
+    # undistort cap, bounded by SIFT_MAX_PX — COLMAP's own default silently extracts at
+    # 3200 px, which throws away the resolution a high-res run deliberately keeps. Use a
+    # number to pin it (lower = coarser, more viewpoint-robust), or -1 for COLMAP's default.
+    "sift_max_image_size": "auto",
     # image_undistorter longest-side cap (h3dgs uses 2048); "" = no cap.
     "max_image_size": "",
     # optional foreground masks: undistort them through the same cameras as the images.
@@ -205,6 +223,12 @@ class _Ctx:
     orig_root: str = ""
     # rig_config.json written by the rig staging stage; consumed by rig_configurator.
     rig_config: Path | None = None
+    # staged relative name -> original relative name (rig restaging renames
+    # files, and the EO CSV is keyed by the vendor's original filenames).
+    rig_orig_names: dict[str, str] = field(default_factory=dict)
+    # camera id -> (model, params) taken from a vendor calibration, when the
+    # dataset shipped one. Empty means nothing was calibrated.
+    rig_intrinsics: dict[str, tuple[str, list[float]]] = field(default_factory=dict)
 
     def stage_on(self, s: str) -> bool:
         return s in self.stages
@@ -474,7 +498,8 @@ def _resolve_eo_csv(c: _Ctx) -> None:
     rows = parse_eo_csv(Path(c.eo_csv))
     c.r.log(f"EO CSV: {len(rows)} rows from {c.eo_csv} (CRS={c.eo_crs})")
     c.eo_map = map_names_to_eo(c.lines, rows, c.img_root, c.eo_crs,
-                               c.eo_rig_match, c.r)
+                               c.eo_rig_match, c.r,
+                               orig_names=c.rig_orig_names)
     if not c.eo_map:
         raise RuntimeError(
             f"EO CSV {c.eo_csv} matched none of the {len(c.lines)} images. The CSV `ID` "
@@ -556,10 +581,10 @@ def _stage_extract(c: _Ctx) -> None:
             # invisible unless set. Option is FeatureExtraction.max_image_size on COLMAP
             # 4.x (was SiftExtraction.* on older builds). Pass only when set; higher = more
             # detail but slower and can OOM on huge aerials, lower = coarser/viewpoint-robust.
-            sift_size = (["--FeatureExtraction.max_image_size", c.sift_max_image_size]
-                         if c.sift_max_image_size else [])
-            if c.sift_max_image_size:
-                c.r.log(f"FeatureExtraction.max_image_size={c.sift_max_image_size} "
+            sift_px = _resolve_sift_size(c)
+            sift_size = ["--FeatureExtraction.max_image_size", sift_px] if sift_px else []
+            if sift_px:
+                c.r.log(f"FeatureExtraction.max_image_size={sift_px} "
                         "(COLMAP default -1 behaves like 3200)")
             c.r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(c.db),
                      "--image_path", c.img_root, "--image_list_path", str(c.lst), *cam,
@@ -568,6 +593,69 @@ def _stage_extract(c: _Ctx) -> None:
                      *sift_size])
         else:
             c.r.log("skip extract (database.db exists; set FORCE=1 to redo)")
+
+
+# SiftGPU is handed EffMaxImageSize() * (1 << -min(0, first_octave)) as its -maxd
+# (feature/sift.cc), and first_octave defaults to -1, so whatever we ask for is
+# DOUBLED before it reaches the GPU. 8192 therefore already means -maxd 16384,
+# which is the practical ceiling; above it extraction fails on large aerials.
+SIFT_MAX_PX = 8192
+
+
+# Position-prior uncertainty in metres, by where the priors came from. A surveyor's
+# adjusted EO is post-processed airborne POS; declaring consumer-GPS metres for it
+# makes BA weight it to nothing, which silently wastes the priors.
+PRIOR_STD_EO = (0.05, 0.05, 0.10)
+PRIOR_STD_GPS = (3.0, 3.0, 5.0)
+
+
+def _resolve_prior_std(c: _Ctx) -> tuple[float, float, float]:
+    """(x, y, z) metres for the pose-position priors.
+
+    Each axis is taken from the form when it is a number, and otherwise ("auto",
+    the default) from the prior source: EO CSV -> centimetre-level, bare EXIF GPS
+    -> metre-level. Mixing is allowed, so a user can pin only Z.
+    """
+    src = PRIOR_STD_EO if c.eo_csv else PRIOR_STD_GPS
+    out = []
+    for key, fallback in zip(("prior_std_x", "prior_std_y", "prior_std_z"), src,
+                             strict=True):
+        raw = str(c.d[key]).strip().lower()
+        if raw in ("", "auto"):
+            out.append(fallback)
+        else:
+            out.append(float(raw))
+    return (out[0], out[1], out[2])
+
+
+def _resolve_sift_size(c: _Ctx) -> str:
+    """The --FeatureExtraction.max_image_size to pass, or "" to leave it default.
+
+    "auto" ties feature extraction to the resolution the run actually keeps: it is
+    incoherent to train on 8192 px imagery while solving the poses at COLMAP's
+    silent 3200 px default. It follows the undistort cap when there is one, else
+    goes as high as is safe, and never exceeds SIFT_MAX_PX.
+
+    Deliberately NOT the default: for a wide-baseline oblique rig, coarser
+    features are often the more robust choice across the nadir/oblique viewpoint
+    gap, so raising this is a judgement call rather than a free win.
+    """
+    want = (c.sift_max_image_size or "").strip().lower()
+    if not want:
+        return ""
+    if want != "auto":
+        return c.sift_max_image_size
+    cap = SIFT_MAX_PX
+    if c.max_image_size:
+        try:
+            undistort_px = int(c.max_image_size)
+        except ValueError:
+            undistort_px = 0
+        if undistort_px > 0:
+            cap = min(undistort_px, SIFT_MAX_PX)
+    c.r.log(f"SIFT_MAX_IMAGE_SIZE=auto -> {cap} px "
+            f"(undistort cap={c.max_image_size or 'none'}, ceiling={SIFT_MAX_PX})")
+    return str(cap)
 
 
 def _stage_rig_stage(c: _Ctx) -> None:
@@ -580,7 +668,19 @@ def _stage_rig_stage(c: _Ctx) -> None:
     """
     if not c.rig_enable:
         return
-    names = list_image_names(Path(c.img_root))
+    # Same listing as _build_image_list: names must be "<folder>/<file>", because
+    # the folder IS the camera. list_image_names() would return bare filenames
+    # from img_root itself, which for a multi layout is empty (images live one
+    # level down) and would leave every mode with nothing to group.
+    names: list[str] = []
+    for folder in c.folders:
+        names += list_images(Path(c.img_root) / folder, folder)
+    # No folder-count check here: auto also splits cameras by filename prefix, so
+    # a flat dataset can still be a rig. Whether the split worked is judged by the
+    # grouping below, which aborts when no exposure is covered by every camera.
+    c.r.log(f"rig: {len(names)} images across {len(c.folders)} folder(s): "
+            f"{' '.join(f or '.' for f in c.folders)}")
+
     gps_map = None
     if c.rig_mode == "gps":
         gps_map = {}
@@ -591,8 +691,14 @@ def _stage_rig_stage(c: _Ctx) -> None:
         c.r.log(f"rig: EXIF GPS found for {len(gps_map)}/{len(names)} images")
 
     try:
-        grouping = group_images(names, c.rig_mode, regex=c.rig_regex,
-                                gps=gps_map, gps_tol=c.rig_gps_tol)
+        if c.rig_mode == "auto":
+            # auto reports which field it picked; that guess must be visible.
+            grouping, notes = group_auto(names)
+            for line in notes:
+                c.r.log(line)
+        else:
+            grouping = group_images(names, c.rig_mode, regex=c.rig_regex,
+                                    gps=gps_map, gps_tol=c.rig_gps_tol)
     except ValueError as exc:
         raise PipelineError(f"rig grouping failed: {exc}") from exc
 
@@ -604,13 +710,67 @@ def _stage_rig_stage(c: _Ctx) -> None:
             "rig would constrain nothing. Check 遮罩/regex 設定 (rig_mode="
             f"{c.rig_mode!r}, regex={c.rig_regex!r}) or turn the rig off.")
 
+    # Reference sensor: honour an explicit choice, else recommend one. The EO CSV
+    # is the strongest available signal (the head it measures is the head whose
+    # angles may become gravity priors), so read its IDs when there is one.
+    ref_camera = c.rig_ref_camera
+    if not ref_camera:
+        eo_stems: set[str] = set()
+        if c.eo_csv:
+            try:
+                eo_stems = {row.stem for row in parse_eo_csv(Path(c.eo_csv))}
+            except Exception as exc:                    # noqa: BLE001
+                # A bad CSV is _resolve_eo_csv's problem to report; here it only
+                # costs us the better recommendation.
+                c.r.log(f"rig: could not read the EO CSV for the reference-sensor "
+                        f"recommendation ({exc}); falling back to exposure count")
+        ref_camera, why = recommend_ref_camera(grouping, eo_stems)
+        c.r.log(f"rig: auto-selected reference sensor '{ref_camera}' — {why}")
+        if not eo_stems:
+            c.r.log("rig: that choice is a weak guess; set 參考鏡頭 (RIG_REF_CAMERA) "
+                    "to the nadir/most stable head if you know which it is")
+
+    # Known interior orientation, if the dataset shipped a calibration certificate.
+    # Scanned for rather than configured: vendors drop it in with the imagery under
+    # arbitrary names, and a document either parses as a calibration or it does not.
+    intrinsics: dict[str, tuple[str, list[float]]] = {}
+    cals, src = discover_calibrations([Path(c.orig_root or c.img_root),
+                                      Path(c.orig_root or c.img_root).parent])
+    if cals:
+        model = str(c.d["camera_model"]).upper()
+        hit, missed = match_to_cameras(cals, grouping.cameras)
+        c.r.log(f"intrinsics: {len(cals)} calibrated head(s) found in {Path(src).name}")
+        for cam, cal in sorted(hit.items()):
+            params = cal.colmap_params(model)
+            intrinsics[cam] = (model, params)
+            cx, cy = cal.principal_point_px()
+            c.r.log(f"intrinsics:   {cam} <- '{cal.name}' f={cal.focal_px:.1f} px "
+                    f"(C={cal.c_mm} mm / {cal.pixel_size_mm * 1000:.2f} um), "
+                    f"pp=({cx:.1f}, {cy:.1f}) vs centre "
+                    f"({cal.width / 2:.1f}, {cal.height / 2:.1f}) — {cal.detail}")
+        if missed:
+            c.r.log(f"intrinsics: no calibration matched {missed} — those heads keep "
+                    "COLMAP's EXIF-derived guess")
+        c.r.log("intrinsics: distortion is left at zero for the bundle to solve; only "
+                "focal length and principal point come from the certificate")
+
     stage_root = c.ws / "rig_images"
     stage_root.mkdir(parents=True, exist_ok=True)
-    n = build_staging(grouping, Path(c.img_root), stage_root)
+    c.rig_orig_names = build_staging(grouping, Path(c.img_root), stage_root)
+    n = len(c.rig_orig_names)
     c.rig_config = c.ws / "rig_config.json"
-    ref = write_rig_config(grouping, c.rig_config, c.rig_ref_camera)
+    c.rig_intrinsics = intrinsics
+    ref = write_rig_config(grouping, c.rig_config, ref_camera, intrinsics)
     c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")
-    c.img_root = str(stage_root)          # everything downstream reads the rig layout
+
+    # The staged tree IS the dataset from here on, and its shape is always one
+    # folder per camera — whatever the input layout was. The rest of the run has
+    # to be told, or _build_image_list looks for images in the wrong place and
+    # extraction assigns one camera to the whole rig.
+    c.img_root = str(stage_root)
+    c.folders = grouping.cameras
+    c.layout_name = "multi"
+    c.camera_mode = "per_folder"   # rig_configurator requires one camera per prefix
 
 
 def _stage_rig_configure(c: _Ctx) -> None:
@@ -623,6 +783,13 @@ def _stage_rig_configure(c: _Ctx) -> None:
     needed to seed them from an existing rig-less solve.
     """
     if not c.rig_enable or not c.stage_on("rig"):
+        return
+    if c.mapper != "global":
+        # The incremental family refuses to start while sensor_from_rig is unknown
+        # (incremental_pipeline.cc:563), so those mappers get their rig from
+        # _stage_rig_calibrate instead, which can pass --input_path.
+        c.r.log(f"rig: deferring rig_configurator — MAPPER={c.mapper} needs known "
+                "extrinsics, so they are derived from an initial reconstruction first")
         return
     c.r.banner(f"rig_configurator -> {c.db}")
     c.r.run([COLMAP_BIN, "rig_configurator",
@@ -645,8 +812,10 @@ def _stage_gps_inject(c: _Ctx) -> None:
     # EXIF pass below then only fills images the CSV didn't cover. Runs whenever a CSV is
     # given, independent of the GPS-option gate — the CSV is an explicit user request.
     if c.eo_map and c.db.exists():
-        std = (float(c.d["prior_std_x"]), float(c.d["prior_std_y"]), float(c.d["prior_std_z"]))
-        if min(std) >= 1.0:
+        std = _resolve_prior_std(c)
+        if std == PRIOR_STD_EO:
+            c.r.log(f"PRIOR_STD=auto -> {std} m (EO CSV = post-processed airborne POS)")
+        elif min(std) >= 1.0:
             c.r.log(f"note: PRIOR_STD={std} m is a consumer-GPS uncertainty, but an EO CSV "
                     "is post-processed airborne POS (typically 0.03-0.20 m). Leaving it "
                     "this loose lets BA largely ignore the priors you just supplied.")
@@ -669,7 +838,7 @@ def _stage_gps_inject(c: _Ctx) -> None:
         return
     # write a real covariance from the form's GPS uncertainty (metres) so the in-BA prior
     # alignment works for any mapper, not just pose_prior with --overwrite_priors_covariance.
-    std = (float(c.d["prior_std_x"]), float(c.d["prior_std_y"]), float(c.d["prior_std_z"]))
+    std = _resolve_prior_std(c)
     n_inj, n_have = inject_pose_priors(c.db, c.orig_root or c.img_root, c.lines, c.r, std)
     if n_inj:
         c.r.banner(f"GPS pose priors: injected {n_inj} from EXIF (TIFF/non-JPEG; "
@@ -749,6 +918,46 @@ def _stage_calibrate(c: _Ctx) -> None:
             c.r.log("skip calibrate (sentinel exists; set FORCE=1 to redo)")
 
 
+def _stage_rig_calibrate(c: _Ctx) -> None:
+    """3b. Derive sensor_from_rig for the mappers that need it known in advance.
+
+    Our rig config carries no extrinsics, and only the global pipeline calibrates
+    them itself; `mapper` / `pose_prior_mapper` / `hierarchical_mapper` abort with
+    UNKNOWN_SENSOR_FROM_RIG (incremental_pipeline.cc:563). COLMAP's own remedy is
+    the two-pass route named in that error: reconstruct once WITHOUT rigs, then
+    hand that reconstruction to rig_configurator, which averages the relative
+    poses between registered sensors into sensor_from_rig and writes them to the
+    database (scene/rig.cc UpdateRigAndCameraCalibsFromReconstruction).
+
+    The first pass is throwaway — it only has to register enough frames for that
+    average — so it runs a bare global_mapper rather than the configured one. It
+    lands in its own directory so the real mapper's sparse/ is untouched.
+    """
+    if not c.rig_enable or c.mapper == "global" or not c.stage_on("rig"):
+        return
+    init = c.ws / "sparse_rig_init"
+    if c.need(init / "0" / "cameras.bin"):
+        c.r.banner(f"rig calibration pass 1/2: global_mapper without rigs -> {init}")
+        init.mkdir(parents=True, exist_ok=True)
+        c.r.run([COLMAP_BIN, "global_mapper", "--database_path", str(c.db),
+                 "--image_path", c.img_root, "--output_path", str(init)])
+    else:
+        c.r.log(f"skip rig init pass ({init.name}/0 exists; set FORCE=1 to redo)")
+    if not (init / "0" / "cameras.bin").exists():
+        raise PipelineError(
+            f"the rig calibration pass produced no model in {init}/0, so "
+            "sensor_from_rig cannot be derived. Reconstruction is failing before the "
+            "rig is even involved — check the matches, or set MAPPER=global to let it "
+            "calibrate the rig itself in one pass.")
+
+    c.r.banner(f"rig calibration pass 2/2: rig_configurator --input_path {init / '0'} "
+               f"-> {c.db}")
+    c.r.run([COLMAP_BIN, "rig_configurator",
+             "--database_path", str(c.db),
+             "--rig_config_path", str(c.rig_config),
+             "--input_path", str(init / "0")])
+
+
 def _stage_mapper(c: _Ctx) -> None:
     # 4. mapper -> sparse/0
     if c.stage_on("mapper"):
@@ -780,9 +989,11 @@ def _stage_mapper(c: _Ctx) -> None:
                 sub, label = "pose_prior_mapper", "colmap pose_prior_mapper (GPS)"
                 extra = ["--use_robust_loss_on_prior_position", str(c.d["prior_robust_loss"]),
                          "--overwrite_priors_covariance", "1",
-                         "--prior_position_std_x", str(c.d["prior_std_x"]),
-                         "--prior_position_std_y", str(c.d["prior_std_y"]),
-                         "--prior_position_std_z", str(c.d["prior_std_z"])]
+                         *[a for pair in zip(("--prior_position_std_x",
+                                              "--prior_position_std_y",
+                                              "--prior_position_std_z"),
+                                             map(str, _resolve_prior_std(c)),
+                                             strict=True) for a in pair]]
             elif c.mapper == "hierarchical":
                 # h3dgs large-scene mapper: partition into overlapping sub-models,
                 # reconstruct in parallel, then merge — scales where global/incremental
@@ -819,6 +1030,15 @@ def _stage_mapper(c: _Ctx) -> None:
                 elif c.ba_gpu:
                     extra += ["--Mapper.ba_use_gpu", "1"]
                     label += " [GPU BA]"
+            if c.rig_intrinsics:
+                # ba_refine_principal_point defaults to 0, so an injected principal
+                # point would be HELD — and its y sign is the one convention this
+                # pipeline has to guess (certificate y up vs image y down). Letting
+                # the bundle move it means a wrong guess self-corrects instead of
+                # propagating; the focal length is already refined by default.
+                prefix = "GlobalMapper" if c.mapper == "global" else "Mapper"
+                extra += [f"--{prefix}.ba_refine_principal_point", "1"]
+                label += " [calibrated intrinsics, PP refinable]"
             c.r.banner(f"{label} -> {c.ws / 'sparse'}")
             c.r.run([COLMAP_BIN, sub, "--database_path", str(c.db),
                      "--image_path", c.img_root, "--output_path", str(c.ws / "sparse"), *extra])
@@ -832,6 +1052,56 @@ def _stage_mapper(c: _Ctx) -> None:
                 (c.ws / "sparse" / "0" / stale).unlink(missing_ok=True)
         else:
             c.r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
+
+
+def _stage_intrinsics_report(c: _Ctx) -> None:
+    """4a'. Compare what the bundle converged to against the certificate.
+
+    This is the check on the one convention the calibration import has to guess:
+    the principal-point y sign. If the seed was right the bundle should barely
+    move it; a shift of roughly twice the certificate's offset, in the opposite
+    direction, is the signature of a flipped sign. The focal length is reported
+    for the same reason — it says whether a 2-year-old certificate still matches
+    the camera.
+    """
+    if not c.rig_intrinsics:
+        return
+    model_dir = c.ws / "sparse" / "0"
+    if not (model_dir / "cameras.bin").exists():
+        return
+    try:
+        from ..vendor.read_write_model import read_cameras_binary
+        solved = read_cameras_binary(str(model_dir / "cameras.bin"))
+    except Exception as exc:                            # noqa: BLE001
+        c.r.log(f"intrinsics check: could not read {model_dir}/cameras.bin ({exc})")
+        return
+
+    # The rig config assigns cameras in the order written: ref first, then the rest
+    # alphabetically — the same order rig_configurator walks.
+    ref = next((cam for cam in sorted(c.rig_intrinsics) if cam == c.rig_ref_camera), "")
+    order = ([ref] if ref else []) + [x for x in sorted(c.rig_intrinsics) if x != ref]
+    by_id = {cid: cam for cid, cam in zip(sorted(solved), order, strict=False)}
+
+    c.r.banner("intrinsics check: bundle vs certificate")
+    c.r.log("  camera      f (cert -> solved)          cx (cert -> solved)   "
+            "cy (cert -> solved)")
+    for cid in sorted(solved):
+        cam = by_id.get(cid)
+        seed = c.rig_intrinsics.get(cam or "")
+        if not seed:
+            continue
+        s = solved[cid].params
+        _, want = seed
+        # OPENCV order: fx fy cx cy ...; the shorter models put f first then cx cy
+        wf, wcx, wcy = ((want[0], want[2], want[3]) if len(want) >= 4
+                        else (want[0], want[1], want[2]))
+        gf, gcx, gcy = ((s[0], s[2], s[3]) if len(s) >= 4 else (s[0], s[1], s[2]))
+        c.r.log(f"  {cam:<11} {wf:9.1f} -> {gf:9.1f} ({gf - wf:+7.1f})  "
+                f"{wcx:8.1f} -> {gcx:8.1f} ({gcx - wcx:+6.1f})  "
+                f"{wcy:8.1f} -> {gcy:8.1f} ({gcy - wcy:+6.1f})")
+    c.r.log("  a small drift is expected (the certificate predates the mission); a cy "
+            "shift near twice the certificate's own offset, with the sign reversed, "
+            "would instead mean the principal-point y convention was read backwards")
 
 
 def _stage_simplify(c: _Ctx) -> None:
@@ -1005,7 +1275,9 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_gps_inject(c)        # 1b. inject TIFF/non-JPEG EXIF GPS into DB pose_priors
     _stage_match(c)             # 2. matcher
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)
+    _stage_rig_calibrate(c)     # 3b. derive sensor_from_rig for non-global mappers
     _stage_mapper(c)            # 4. mapper -> sparse/0
+    _stage_intrinsics_report(c) # 4a'. calibrated vs solved intrinsics
     _stage_simplify(c)          # 4a. simplify_images (optional)
     _stage_align(c)             # 4b. model_aligner (optional GPS)
     _stage_undistort(c)         # 5. image_undistorter -> dense_dir (+ optional masks)

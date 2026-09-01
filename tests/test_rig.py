@@ -10,13 +10,17 @@ unforgiving in two specific ways (both verified against the real binary):
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from pipeline.colmap._rig import (
+    RigGrouping,
     build_staging,
     compile_rig_regex,
+    group_auto,
     group_images,
+    recommend_ref_camera,
     summarize,
     write_rig_config,
 )
@@ -85,7 +89,7 @@ def test_staging_normalises_names_so_colmap_can_group(tmp_path):
         p.write_bytes(b"x")
     g = group_images(OBLIQUE, "regex", regex=OBLIQUE_RX)
 
-    assert build_staging(g, root, tmp_path / "stage") == len(OBLIQUE)
+    assert len(build_staging(g, root, tmp_path / "stage")) == len(OBLIQUE)
     # the stem is identical across cameras; the extension is kept
     for cam in ("N", "F", "B"):
         assert (tmp_path / "stage" / cam / "00000.jpg").is_symlink()
@@ -108,7 +112,113 @@ def test_rig_config_puts_the_ref_sensor_first(tmp_path):
     assert [c["image_prefix"] for c in cams[1:]] == ["B/", "F/"]
 
 
+def test_staging_reports_the_original_name_of_every_symlink(tmp_path):
+    """The EO CSV is keyed by the vendor's filenames, which restaging throws away.
+    Losing this map silently drops every *exact* match, and with it the gravity
+    priors, which are only written for exactly-name-matched images."""
+    root = tmp_path / "img"
+    for n in OBLIQUE:
+        p = root / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    g = group_images(OBLIQUE, "regex", regex=OBLIQUE_RX)
+
+    mapping = build_staging(g, root, tmp_path / "stage")
+    assert len(mapping) == len(OBLIQUE)
+    assert mapping["N/00000.jpg"] == "N/N-1_0-61214_00000.jpg"
+    # keys are the staged names, values the originals, and nothing is lost
+    assert sorted(mapping.values()) == sorted(OBLIQUE)
+
+
 def test_rig_config_rejects_an_unknown_ref_camera(tmp_path):
     g = group_images(OBLIQUE, "regex", regex=OBLIQUE_RX)
     with pytest.raises(ValueError, match="ref camera"):
         write_rig_config(g, tmp_path / "c.json", ref_camera="ZZZ")
+
+
+# --- auto mode -------------------------------------------------------------
+# Shape of a real oblique block: <cam>-<strip>_<index>-<serial>.jpg, where the
+# serial differs per body AND per image, so only <strip>_<index> is shared.
+def _oblique_block():
+    names = []
+    for cam, base in (("nadir", 61214), ("forward", 61294), ("backward", 70924)):
+        for strip in (1, 2):
+            for idx in range(3):
+                names.append(f"{cam}/{cam[0].upper()}-{strip}_{idx}-{base + strip * 10 + idx}.jpg")
+    return names
+
+
+def test_auto_discovers_the_shared_exposure_key_without_config():
+    g, notes = group_auto(_oblique_block())
+    assert g.cameras == ["backward", "forward", "nadir"]
+    # strip+index, i.e. the two leading digit fields — found, not supplied
+    assert g.complete_frames() == ["1_0", "1_1", "1_2", "2_0", "2_1", "2_2"]
+    assert any("auto picked digit field(s) [0, 1]" in n for n in notes)
+
+
+def test_auto_drops_keys_that_repeat_within_a_camera():
+    # a duplicated <strip>_<index> cannot identify an exposure; binding it would
+    # pair images from different shots, so both copies are dropped everywhere.
+    names = _oblique_block() + [f"{c}/{c[0].upper()}-1_0-{9000 + i}.jpg"
+                                for i, c in enumerate(("nadir", "forward", "backward"))]
+    g, notes = group_auto(names)
+    assert "1_0" not in g.complete_frames()
+    assert any("ambiguous" in n for n in notes)
+    assert len(g.unmatched) == 6          # the original 1_0 trio plus the clashing trio
+
+
+def test_auto_reports_failure_when_no_key_is_shared():
+    # disjoint numbering per camera: no digit field can ever line up
+    names = ([f"N/N_{100 + i}.jpg" for i in range(3)]
+             + [f"F/F_{200 + i}.jpg" for i in range(3)])
+    g, notes = group_auto(names)
+    assert g.complete_frames() == []
+    assert any("could not find a shared exposure key" in n for n in notes)
+
+
+def test_auto_falls_back_to_a_filename_prefix_when_there_are_no_folders():
+    # flat dataset, camera only distinguishable by the leading prefix
+    names = [f"{cam}_{i}-{base + i}.jpg"
+             for cam, base in (("alpha", 500), ("bravo", 900)) for i in range(3)]
+    g, notes = group_auto(names)
+    assert g.cameras == ["alpha", "bravo"]
+    assert g.complete_frames() == ["0", "1", "2"]
+    assert any("by filename prefix" in n for n in notes)
+
+
+def test_auto_reports_when_only_one_camera_can_be_identified():
+    # one folder AND one filename prefix: nothing to constrain against
+    g, notes = group_auto([f"N/img_{i}.jpg" for i in range(3)])
+    assert g.complete_frames() == []
+    assert any("only one camera" in n for n in notes)
+
+
+# --- reference sensor recommendation --------------------------------------
+def test_ref_camera_recommendation_follows_the_eo_csv():
+    """The surveyed head is the right reference: it is the best-determined camera
+    and the only one whose omega/phi/kappa may become gravity priors. Identified
+    by data, not by name — the folder here is deliberately not called "nadir"."""
+    g, _ = group_auto(_oblique_block())
+    # pretend the CSV covers the "forward" head's own filenames
+    eo = {Path(n).stem for n in g.frames["forward"].values()}
+    cam, why = recommend_ref_camera(g, eo)
+    assert cam == "forward"
+    assert "EO CSV" in why
+
+
+def test_ref_camera_recommendation_falls_back_to_exposure_count():
+    g, _ = group_auto(_oblique_block())
+    g.frames["forward"].pop(next(iter(g.frames["forward"])))   # a dropped shot
+    cam, why = recommend_ref_camera(g, set())
+    assert cam != "forward"
+    assert "most exposures" in why
+
+
+def test_ref_camera_recommendation_is_deterministic_on_a_tie():
+    g, _ = group_auto(_oblique_block())
+    assert recommend_ref_camera(g, set())[0] == recommend_ref_camera(g, set())[0]
+    assert recommend_ref_camera(g, set())[0] == g.cameras[0]   # first in sorted order
+
+
+def test_ref_camera_recommendation_handles_an_empty_grouping():
+    assert recommend_ref_camera(RigGrouping(), set()) == ("", "no cameras")

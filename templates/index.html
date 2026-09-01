@@ -476,7 +476,13 @@
           <div class="fhint" id="h_cm_rig_enable">開啟後會多兩個階段:先把影像重新整理成
             <code>&lt;相機&gt;/&lt;曝光編號&gt;</code> 的符號連結樹(原始檔不動),抽完特徵再跑
             <code>rig_configurator</code> 把 rig/frames 寫進資料庫。分組結果會印在 log,
-            <b>沒有任何一個曝光被所有相機覆蓋時會直接中止</b>(那種 rig 等於沒有約束力)。</div>
+            <b>沒有任何一個曝光被所有相機覆蓋時會直接中止</b>(那種 rig 等於沒有約束力)。<br>
+            <b>跟 MAPPER 的關係 —— 自動處理,不用你設定:</b>產生的 rig 設定不帶鏡頭外參。
+            <code>global</code> 能自己把未知外參標定出來,所以是<b>單遍</b>重建。
+            <code>pose_prior</code> / <code>incremental</code> / <code>hierarchical</code>
+            要求外參必須已知,會自動改走<b>兩遍</b>:先不帶 rig 重建一次 →
+            <code>rig_configurator --input_path</code> 從那個重建平均出外參寫回資料庫 →
+            再用你選的 mapper 正式重建。代價是重建時間約兩倍。</div>
           <div class="prow">
             <label class="plabel" for="cm_rig_mode"><span class="ptext">分組方式</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_mode')" title="說明">?</span>
@@ -487,32 +493,40 @@
               </select>
             </div>
           </div>
-          <div class="fhint" id="h_cm_rig_mode">怎麼判斷「哪幾張是同一次曝光」:<br>
-            ‧ <b>folder</b> — 相機 = 第一層資料夾,曝光 = 後面的檔名。各鏡頭檔名<b>本來就一致</b>時用這個。<br>
-            ‧ <b>regex</b> — 用下面的正規表示式從檔名拆出相機與曝光編號。<b>各鏡頭檔名帶自己機身序號時用這個</b>
-            (COLMAP 原生的 <code>image_prefix</code> 對這種檔名分不了組,這就是它會 SIGABRT 的原因)。<br>
-            ‧ <b>gps</b> — 相機仍取自資料夾,但用 EXIF GPS 位置分群:同一次曝光的各鏡頭共用同一個座標。
-            檔名完全沒有共通鍵時的退路。</div>
+          <div class="fhint" id="h_cm_rig_mode">怎麼判斷「哪幾張是同一次曝光」。<b>維持 auto 就好</b>:<br>
+            ‧ <b>auto(預設,建議)</b> — 相機 = 第一層資料夾,曝光編號<b>自動從檔名找出來</b>。
+            作法是把檔名裡的每個數字欄位都試一遍,選「能讓最多次曝光被所有相機同時涵蓋」的那個。
+            像 <code>B-1_0-70924.jpg</code> / <code>N-1_0-61214.jpg</code>(機身流水號不同)這種它會自己認出
+            <code>1_0</code> 是共用鍵。<b>不用填下面任何一格。</b><br>
+            ‧ <b>folder</b> — 曝光 = 資料夾後面的整個檔名。各鏡頭檔名本來就完全一致時才用。<br>
+            ‧ <b>regex</b> — auto 猜錯時的手動指定(見下欄)。<br>
+            ‧ <b>gps</b> — 用 EXIF GPS 位置分群。檔名毫無規律可循時的退路。<br>
+            不管哪種模式,分組結果都會印在 log,<b>沒有任何曝光被所有相機覆蓋時會直接中止</b>。</div>
           <div class="prow stack">
-            <label class="plabel" for="cm_rig_regex"><span class="ptext">RIG_REGEX（regex 模式）</span>
+            <label class="plabel" for="cm_rig_regex"><span class="ptext">RIG_REGEX(僅 regex 模式)</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_regex')" title="說明">?</span>
             </label>
-            <div class="pctl"><input id="cm_rig_regex" name="RIG_REGEX" value="{{ colmap_defaults.RIG_REGEX }}" placeholder="^(?P&lt;cam&gt;[NFBLR])-\d+_0-\d+_(?P&lt;frame&gt;\d+)\.jpg$"></div>
+            <div class="pctl"><input id="cm_rig_regex" name="RIG_REGEX" value="{{ colmap_defaults.RIG_REGEX }}" placeholder="auto 模式請留空"></div>
           </div>
-          <div class="fhint" id="h_cm_rig_regex">必須含兩個具名群組:<code>(?P&lt;cam&gt;…)</code> 相機代號、
-            <code>(?P&lt;frame&gt;…)</code> 同一次曝光共用的編號。先對檔名(不含路徑)比對,不中再對完整相對路徑。<br>
-            例:檔名 <code>N-1_0-61214_00042.jpg</code> / <code>F-1_0-61294_00042.jpg</code>(機身序號不同、末段編號相同)→
-            <code>^(?P&lt;cam&gt;[NFBLR])-\d+_0-\d+_(?P&lt;frame&gt;\d+)\.jpg$</code>。
-            分組結果一定要看 log 確認再往下跑。</div>
+          <div class="fhint" id="h_cm_rig_regex"><b>auto / folder / gps 模式請留空。</b>
+            這格只在「分組方式 = regex」時才會被讀取。<br>
+            填的是<b>正規表示式,不是檔名</b>,而且必須含兩個具名群組:<code>(?P&lt;cam&gt;…)</code> 相機代號、
+            <code>(?P&lt;frame&gt;…)</code> 同一次曝光共用的編號。<br>
+            例:檔名長 <code>B-1_0-70924.jpg</code> / <code>N-1_0-61214.jpg</code>,要抓中間的 <code>1_0</code> 當共用鍵 →
+            <code>^(?P&lt;cam&gt;[A-Z])-(?P&lt;frame&gt;\d+_\d+)-\d+\.jpg$</code></div>
           <div class="prow">
             <label class="plabel" for="cm_rig_ref"><span class="ptext">RIG_REF_CAMERA(參考鏡頭)</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_ref')" title="說明">?</span>
             </label>
-            <div class="pctl"><input id="cm_rig_ref" name="RIG_REF_CAMERA" value="{{ colmap_defaults.RIG_REF_CAMERA }}" placeholder="留空 = 依字母序第一台"></div>
+            <div class="pctl"><input id="cm_rig_ref" name="RIG_REF_CAMERA" value="{{ colmap_defaults.RIG_REF_CAMERA }}" placeholder="留空 = 自動推薦"></div>
           </div>
-          <div class="fhint" id="h_cm_rig_ref">rig 的基準鏡頭,其他鏡頭的外參都相對它表示。
-            <b>傾斜攝影請填正射(nadir)那台</b>,它視角最穩、觀測最多。填相機代號(即資料夾名或 regex 的 cam 群組值)。
-            留空 = 依字母序取第一台。</div>
+          <div class="fhint" id="h_cm_rig_ref">rig 的基準鏡頭,其他鏡頭的外參都相對它表示,
+            所以要挑幾何最穩的那台(傾斜攝影就是正射那顆)。<br>
+            <b>留空 = 自動推薦,一般不用填。</b>推薦邏輯:<br>
+            ‧ 有填「外方位參數 CSV」時 → 選<b>檔名能對上 CSV ID 的那台</b>。那顆就是廠商實測的頭,
+            也是唯一有資格把 ω/φ/κ 寫成重力先驗的頭 —— 這是不靠名稱的直接判定。<br>
+            ‧ 沒有 CSV 時 → 選曝光數最多的那台,並在 log 標明「這是弱猜測」,提醒你手動指定。<br>
+            要手動填的話,填相機代號(資料夾名,或 regex 的 cam 群組值)。選擇結果都會印在 log。</div>
           <div class="prow">
             <label class="plabel" for="cm_rig_gps_tol"><span class="ptext">RIG_GPS_TOL（gps 模式,公尺）</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_gps_tol')" title="說明">?</span>
@@ -529,9 +543,21 @@
         <summary>Camera</summary>
         <div class="gbody">
           <div class="prow">
-            <label class="plabel" for="cm_camera_model"><span class="ptext">CAMERA_MODEL</span></label>
+            <label class="plabel" for="cm_camera_model"><span class="ptext">CAMERA_MODEL</span>
+              <span class="info" onclick="togHint(event,'h_cm_camera_model')" title="說明">?</span>
+            </label>
             <div class="pctl"><input id="cm_camera_model" name="CAMERA_MODEL" value="{{ colmap_defaults.CAMERA_MODEL }}"></div>
           </div>
+          <div class="fhint" id="h_cm_camera_model">鏡頭畸變模型。<b>預設 OPENCV</b>(k1,k2,p1,p2)——
+            比 SIMPLE_RADIAL 的單一參數更貼近真實鏡頭,測繪/航拍用這個。<br>
+            <b>兩個要注意的地方:</b><br>
+            ‧ <b>BA 後端選 caspar 時必須改成 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過每一張影像、
+            完全不做 BA(面板會在開跑前警告,但不會阻止)。<br>
+            ‧ 自率定發散時,COLMAP 的 <code>Mapper.max_extra_param</code>(預設 1.0)會把任何畸變參數
+            絕對值 &gt; 1 的相機判定為壞相機並<b>靜默丟棄</b>。正常鏡頭的 k1/k2 遠小於 1 所以不會踩到,
+            但**開了 rig 的話影響會放大** —— 一個 frame 裡只要有一顆鏡頭被判壞,整次曝光(全部鏡頭)
+            都會被一起退掉。registered images 數量異常少時,往這個方向查。<br>
+            其他可用值:PINHOLE(無畸變)、SIMPLE_RADIAL、RADIAL、FULL_OPENCV(參數多、更容易自率定發散)。</div>
           <div class="prow">
             <label class="plabel" for="cm_camera_mode"><span class="ptext">CAMERA_MODE</span>
               <span class="info" onclick="togHint(event,'h_cm_camera_mode')" title="說明">?</span>
@@ -551,9 +577,21 @@
             <label class="plabel" for="cm_sift_size"><span class="ptext">SIFT_MAX_IMAGE_SIZE</span>
               <span class="info" onclick="togHint(event,'h_cm_sift_size')" title="說明">?</span>
             </label>
-            <div class="pctl"><input id="cm_sift_size" name="SIFT_MAX_IMAGE_SIZE" value="{{ colmap_defaults.SIFT_MAX_IMAGE_SIZE }}" placeholder="留空=預設(~3200)"></div>
+            <div class="pctl"><input id="cm_sift_size" name="SIFT_MAX_IMAGE_SIZE" value="{{ colmap_defaults.SIFT_MAX_IMAGE_SIZE }}" placeholder="auto / 數值 / -1"></div>
           </div>
-          <div class="fhint" id="h_cm_sift_size">抽 SIFT 的長邊上限;留空 = COLMAP 預設,行為等同 3200。COLMAP 抽 SIFT 前會把長邊縮到此值,留空時這個縮放是「隱形」的。注意：<b>-1 不是「全跑」</b>，它就是預設(=3200)。真要全解析得填大數值(如 8000+)，但對大張航拍會 <b>GPU OOM 直接 crash</b>。調小(如 1920)=更粗、跨大視角(傾斜攝影)更穩。傾斜 rig 建議搭 FullHD resize，別硬拉大。</div>
+          <div class="fhint" id="h_cm_sift_size">抽 SIFT 前會把影像長邊縮到此值。
+            <b>預設 <code>auto</code></b> —— 跟著下面「去畸變輸出」的 MAX_IMAGE_SIZE 走(沒設就取上限),
+            並且**永遠不超過 8192**。為什麼是 8192:COLMAP 送給 SiftGPU 的 <code>-maxd</code> 是
+            這個值 × 2(<code>first_octave</code> 預設 -1 的補償),所以 8192 已經等於 16384,
+            再往上大張航拍會 <b>GPU OOM 直接 crash</b>。<br>
+            <b>但不是越大越好。</b>調小(例如 1920)會得到更粗、對大視角變化更穩健的特徵 ——
+            <b>傾斜 rig 跨正射↔斜視的匹配常常反而更好</b>。所以 auto 不是預設值:
+            要不要拉高是取捨,不是免費的。<br>
+            填數值 = 釘死在該值。填 <code>-1</code> = 交還給 COLMAP 自己決定
+            (那等同 3200 px,而且不會有任何提示 —— 注意 <b>-1 不是「全解析」</b>)。<br>
+            判斷方式:如果你保留了高解析影像卻用 -1,姿態就是在 3200 px 上解出來的,
+            跟你留的解析度不相稱;但若匹配數本來就吃緊(斜鏡頭觀測少),就往下調而不是往上。
+            實際採用的數值每次都會印在 log。</div>
           <div class="prow">
             <label class="plabel" for="cm_focal_factor"><span class="ptext">FOCAL_FACTOR</span>
               <span class="info" onclick="togHint(event,'h_cm_focal_factor')" title="說明">?</span>
@@ -681,19 +719,28 @@
             <div class="pctl"><input id="cm_dataset_name" name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}"></div>
           </div>
           <!-- 參數:僅 pose_prior 用得到 -->
-          <div class="pgrp" data-p="pose_prior">
-            <div class="prow stack">
-              <label class="plabel" for="cm_prior_std_x"><span class="ptext">PRIOR_STD_X / Y / Z</span>
-                <span class="info" onclick="togHint(event,'h_cm_prior_std')" title="說明">?</span>
-              </label>
-              <div class="pctl"><div class="row">
-                <input id="cm_prior_std_x" name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
-                <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
-                <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
-              </div></div>
-            </div>
-            <div class="fhint" id="h_cm_prior_std">GPS 位置精度 std (公尺):消費級 3~5、RTK ~0.02。</div>
+          <!-- Not scoped to pose_prior any more: the EXIF/EO injectors write this
+               covariance into the DB for every mapper, so hiding it behind
+               MAPPER=pose_prior made a field that always applies unreachable. -->
+          <div class="prow stack">
+            <label class="plabel" for="cm_prior_std_x"><span class="ptext">PRIOR_STD_X / Y / Z(公尺)</span>
+              <span class="info" onclick="togHint(event,'h_cm_prior_std')" title="說明">?</span>
+            </label>
+            <div class="pctl"><div class="row">
+              <input id="cm_prior_std_x" name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
+              <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
+              <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
+            </div></div>
           </div>
+          <div class="fhint" id="h_cm_prior_std">位置先驗的不確定度(公尺)—— 它決定 BA 要多相信這些先驗。
+            <b>預設 <code>auto</code>,依先驗來源自動決定:</b><br>
+            ‧ 有填「外方位參數 CSV」→ <b>0.05 / 0.05 / 0.10</b>。廠商交付的 EO 是後處理過的航測 POS,
+            公分級精度;若沿用消費級 GPS 的公尺級數值,BA 會把它當雜訊、幾乎完全忽略,
+            等於白灌先驗。<br>
+            ‧ 只有 EXIF GPS → <b>3.0 / 3.0 / 5.0</b>(消費級)。RTK 可手動填 ~0.02。<br>
+            三格可以各自填數字覆蓋(例如只釘 Z),填數字就以數字為準。實際採用值會印在 log。<br>
+            <b>注意:這個值只有在位置先驗真的被讀取時才有意義</b> —— MAPPER 選 <code>pose_prior</code>
+            才會把位置放進 BA;選 <code>global</code> 時只會用到重力,位置先驗不參與。</div>
           <!-- 外方位參數 CSV:測繪廠商交付的 EO。位置寫進 DB pose_priors 蓋掉 EXIF;
                ω/φ/κ 只能降成 gravity 欄(COLMAP DB 沒有旋轉先驗),僅 global_mapper 會用。 -->
           <div class="prow stack">
@@ -858,30 +905,6 @@
           <div class="fhint" id="h_cm_masks_dir">要做「只重建前景物件、去掉背景」時才填。填放遮罩的資料夾,
             會用<b>同一組相機參數</b>把遮罩一起去畸變(不然遮罩會對不上去畸變後的影像),輸出到
             <code>&lt;out&gt;_*_mapper/masks</code>,訓練時再搭配 LichtFeld 的「遮罩模式」。一般整場景重建留空。</div>
-        </div>
-      </details>
-
-      <details class="grp">
-        <summary>大場景後處理（h3dgs simplify）</summary>
-        <div class="gbody">
-          <div class="hint">超大場景(數千張以上)才需要動。一般案子留預設不勾。</div>
-          <div class="prow">
-            <label class="plabel" for="cm_simplify"><span class="ptext">simplify_images</span>
-              <span class="info" onclick="togHint(event,'h_cm_simplify')" title="說明">?</span>
-            </label>
-            <div class="pctl"><input type="checkbox" id="cm_simplify" name="SIMPLIFY" value="1" {{ 'checked' if colmap_defaults.SIMPLIFY=='1' }}></div>
-          </div>
-          <div class="fhint" id="h_cm_simplify"><b>什麼時候開:</b>影像量很大、且重建結果有少數飛掉的離群相機在拖累場景時。
-            會剔除離群相機 + 沒配上 3D 點的觀測,讓下游訓練更乾淨、更省記憶體。
-            原始的 images.bin 會備份成 <code>images_heavy.bin</code>,所以是可回復的。h3dgs 流程預設會跑這步。</div>
-          <div class="prow">
-            <label class="plabel" for="cm_simplify_dist"><span class="ptext">SIMPLIFY_MULT_MIN_DIST</span>
-              <span class="info" onclick="togHint(event,'h_cm_simplify_dist')" title="說明">?</span>
-            </label>
-            <div class="pctl"><input id="cm_simplify_dist" name="SIMPLIFY_MULT_MIN_DIST" value="{{ colmap_defaults.SIMPLIFY_MULT_MIN_DIST }}"></div>
-          </div>
-          <div class="fhint" id="h_cm_simplify_dist">相機間距 &gt; 此倍率 × 中位數 就視為離群(預設 10)。
-            只在勾了 simplify_images 時生效。調小 = 剔得更兇(小心誤殺正常的航線邊緣);調大 = 只砍極端離群。</div>
         </div>
       </details>
 

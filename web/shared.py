@@ -45,10 +45,10 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
 
 # --- form pre-fill defaults / enums (mirror the pipeline module defaults) --- #
 COLMAP_DEFAULTS = {
-    "CAMERA_MODEL": "SIMPLE_RADIAL", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
+    "CAMERA_MODEL": "OPENCV", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
     "MATCHER": "vocab", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
     # multi-camera rig: off by default; RIG_MODE picks how frames are grouped.
-    "RIG_ENABLE": "0", "RIG_MODE": "folder", "RIG_REGEX": "",
+    "RIG_ENABLE": "0", "RIG_MODE": "auto", "RIG_REGEX": "",
     "RIG_REF_CAMERA": "", "RIG_GPS_TOL": "0.5",
     "GUIDED_MATCHING": "1", "MAPPER": "global", "DATASET_NAME": "training_dataset",
     "FORCE": "0", "NESTED_LAYOUT": "1", "VOCAB_TREE": "", "VOCAB_TREE_URL": "",
@@ -57,7 +57,7 @@ COLMAP_DEFAULTS = {
     # spatial_matcher (MATCHER=spatial)
     "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
     # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
-    "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
+    "PRIOR_STD_X": "auto", "PRIOR_STD_Y": "auto", "PRIOR_STD_Z": "auto",
     # Surveyor exterior-orientation CSV (optional): positions overwrite the EXIF pose
     # priors; ω/φ/κ can only enter the DB as the gravity column (global_mapper's
     # rotation averaging). Rig matching + gravity default on, RA_USE_GRAVITY opt-in.
@@ -77,7 +77,7 @@ COLMAP_DEFAULTS = {
     "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
     # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
     "CM_N_SEQ": "0", "CM_N_QUAD": "10", "CM_N_LOOP": "5", "CM_N_GPS": "25",
-    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "SIFT_MAX_IMAGE_SIZE": "",
+    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "SIFT_MAX_IMAGE_SIZE": "auto",
     "MAX_IMAGE_SIZE": "", "MASKS_DIR": "",
     "SIMPLIFY": "0", "SIMPLIFY_MULT_MIN_DIST": "10",
     "REORIENT": "0", "REORIENT_TARGET_MED_DIST": "20", "REORIENT_UPSCALE": "0",
@@ -87,7 +87,7 @@ FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOL
 ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
     "MATCHER": ["sequential", "vocab", "both", "spatial", "custom"],
-    "RIG_MODE": ["folder", "regex", "gps"],
+    "RIG_MODE": ["auto", "folder", "regex", "gps"],
     "MAPPER": ["global", "incremental", "pose_prior", "hierarchical"],
     "BA_BACKEND": ["ceres", "caspar"],
 }

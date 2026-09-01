@@ -15,6 +15,11 @@ then materialises a symlink tree whose names *do* satisfy COLMAP's rule:
 which makes `image_prefix = "<camera>/"` group correctly with no database
 surgery. The strategies:
 
+  auto    camera = first path component; the exposure key is *discovered* from
+          the filenames by scoring every digit field (and pair of fields) on how
+          many exposures it leaves covered by all cameras. Handles the usual
+          `<cam>-<strip>_<index>-<serial>.jpg` shape with no configuration, and
+          is why the panel does not ask for a regex up front.
   folder  camera = first path component, frame = the rest of the relative path.
           For rigs that already write matching filenames per camera.
   regex   camera / frame come from named groups in a user-supplied pattern,
@@ -29,18 +34,20 @@ the generated rig_config.json.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-RIG_MODES = ("folder", "regex", "gps")
+RIG_MODES = ("auto", "folder", "regex", "gps")
 
 # Panel-facing defaults (mirrored into COLMAP_DEFAULTS).
 RIG_DEFAULTS = {
     "rig_enable": False,
-    "rig_mode": "folder",
+    "rig_mode": "auto",
     "rig_regex": "",
     "rig_ref_camera": "",     # "" = first camera in sorted order
     "rig_gps_tol": "0.5",     # metres; gps mode only
@@ -112,6 +119,126 @@ def _gps_metres(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(dx, dy)
 
 
+def _digit_tokens(name: str) -> list[str]:
+    """Every maximal digit run in the filename stem, in order."""
+    return re.findall(r"\d+", Path(name).stem)
+
+
+def auto_frame_key(per_cam: dict[str, list[str]]) -> tuple[tuple[int, ...], int]:
+    """Find which digit-token positions form the shared exposure key.
+
+    Rig filenames are almost always `<camera><separator><strip>_<index><serial>`
+    in some order: some digit fields identify the exposure (identical across the
+    heads that fired together) and others identify the body or the file (unique
+    per camera, so never shared). We do not have to know which is which — we can
+    just score every candidate: the right key is the one that maximises the
+    number of exposures covered by *every* camera.
+
+    Returns (token positions, how many frames all cameras share). An empty tuple
+    means nothing worked.
+    """
+    if len(per_cam) < 2:
+        return (), 0
+    token_counts = [min(len(_digit_tokens(n)) for n in names)
+                    for names in per_cam.values() if names]
+    if not token_counts:
+        return (), 0
+
+    best: tuple[tuple[int, ...], int] = ((), 0)
+    # Single fields first, then pairs — a pair is only preferred when it strictly
+    # beats every single field, so we keep the simplest key that works.
+    positions = range(min(token_counts))
+    for combo in [(i,) for i in positions] + list(itertools.combinations(positions, 2)):
+        keyed = {cam: ["_".join(_digit_tokens(n)[i] for i in combo) for n in names]
+                 for cam, names in per_cam.items()}
+        shared = set.intersection(*(set(v) for v in keyed.values()))
+        if len(shared) > best[1]:
+            best = (combo, len(shared))
+    return best
+
+
+def _camera_from_filename(name: str) -> str:
+    """The leading non-digit run of the filename: `N-1_0-61214.jpg` -> "N",
+    `CAM_A_00042.jpg` -> "CAM_A". Nothing about the value is assumed — it is
+    only used to tell one body from another."""
+    stem = Path(name).name
+    m = re.match(r"^([^\d]+?)[-_]?\d", stem)
+    return m.group(1).strip("-_") if m else ""
+
+
+def group_auto(names: list[str]) -> tuple[RigGrouping, list[str]]:
+    """`auto` mode: split cameras, then discover the exposure key from the names.
+
+    Cameras come from the folder when there is one folder per camera, and
+    otherwise from the leading non-digit part of the filename, so a flat dataset
+    whose bodies are only distinguishable by a filename prefix still works. No
+    camera name is assumed anywhere: whatever strings the data uses become the
+    camera ids.
+
+    Also returns diagnostic lines, because both the camera split and the key are
+    inferred and the user should be able to sanity-check them in the log.
+    """
+    notes: list[str] = []
+    out = RigGrouping()
+    per_cam: dict[str, list[str]] = {}
+    for name in sorted(names):
+        hit = _split_folder(name)
+        if not hit:
+            out.unmatched.append(name)
+            continue
+        per_cam.setdefault(hit[0], []).append(name)
+
+    if len(per_cam) < 2:
+        # One folder (or none): fall back to a filename prefix as the camera id.
+        flat = sorted(names)
+        by_prefix: dict[str, list[str]] = {}
+        for name in flat:
+            cam = _camera_from_filename(name)
+            if cam:
+                by_prefix.setdefault(cam, []).append(name)
+        if len(by_prefix) >= 2 and sum(map(len, by_prefix.values())) == len(flat):
+            notes.append(f"rig: auto split {len(by_prefix)} cameras by filename prefix "
+                         f"({', '.join(sorted(by_prefix))}) — no per-camera folders found")
+            per_cam, out.unmatched = by_prefix, []
+        else:
+            out.unmatched.extend(n for names_ in per_cam.values() for n in names_)
+            notes.append("rig: auto found only one camera — expected either one folder "
+                         "per camera, or filenames that start with a per-camera prefix")
+            return out, notes
+
+    combo, shared = auto_frame_key(per_cam)
+    if not combo:
+        out.unmatched.extend(n for names_ in per_cam.values() for n in names_)
+        notes.append("rig: auto could not find a shared exposure key in the filenames "
+                     "— try mode=gps, or mode=regex with an explicit pattern")
+        return out, notes
+
+    notes.append(f"rig: auto picked digit field(s) {list(combo)} as the exposure key "
+                 f"({shared} exposures shared by every camera)")
+
+    # A key that repeats inside one camera cannot identify an exposure; pairing on
+    # it would bind images from *different* shots together, which is worse than
+    # dropping them. Same key is dropped for every camera so frames stay aligned.
+    keyed = {cam: [("_".join(_digit_tokens(n)[i] for i in combo), n) for n in names_]
+             for cam, names_ in per_cam.items()}
+    ambiguous: set[str] = set()
+    for pairs in keyed.values():
+        counts = Counter(k for k, _ in pairs)
+        ambiguous |= {k for k, c in counts.items() if c > 1}
+    if ambiguous:
+        notes.append(f"rig: dropped {len(ambiguous)} ambiguous key(s) that repeat within a "
+                     f"camera (e.g. {', '.join(sorted(ambiguous)[:3])}) — those exposures "
+                     "cannot be matched safely")
+
+    for cam, pairs in keyed.items():
+        for key, name in pairs:
+            if key in ambiguous:
+                out.unmatched.append(name)
+            else:
+                out.frames.setdefault(cam, {})[key] = name
+    return out, notes
+
+
 def group_images(names: list[str], mode: str, regex: str = "",
                  gps: dict[str, tuple[float, float]] | None = None,
                  gps_tol: float = 0.5) -> RigGrouping:
@@ -121,6 +248,9 @@ def group_images(names: list[str], mode: str, regex: str = "",
     """
     if mode not in RIG_MODES:
         raise ValueError(f"rig mode must be one of {RIG_MODES}, got {mode!r}")
+
+    if mode == "auto":
+        return group_auto(names)[0]
 
     out = RigGrouping()
     if mode == "regex":
@@ -172,13 +302,50 @@ def group_images(names: list[str], mode: str, regex: str = "",
     return out
 
 
-def build_staging(grouping: RigGrouping, img_root: Path, staging: Path) -> int:
-    """Materialise <staging>/<camera>/<frame_key><ext> symlinks. Returns count.
+def recommend_ref_camera(grouping: RigGrouping,
+                         eo_stems: set[str] | None = None) -> tuple[str, str]:
+    """Pick the rig's reference sensor. Returns (camera, why).
+
+    The other heads' extrinsics are expressed relative to this one, so it wants
+    to be the best-determined camera in the rig — in an oblique block that is the
+    nadir head. Its name cannot be assumed, so we infer it:
+
+    1. When an EO CSV is supplied, the head whose *own* filenames match the CSV
+       IDs is by definition the one the surveyor measured, and it is also the only
+       head whose omega/phi/kappa may legally become gravity priors. That is a
+       direct, name-independent identification of the reference head.
+    2. Otherwise fall back to the head present in the most exposures — weak, but
+       it at least avoids picking a camera with dropped shots. The caller should
+       say so in the log, because at that point the choice is close to arbitrary.
+    """
+    cams = grouping.cameras
+    if not cams:
+        return "", "no cameras"
+
+    if eo_stems:
+        hits = {cam: sum(1 for n in table.values() if Path(n).stem in eo_stems)
+                for cam, table in grouping.frames.items()}
+        best = max(cams, key=lambda c: (hits.get(c, 0), -cams.index(c)))
+        if hits.get(best):
+            return best, (f"matches {hits[best]} EO CSV row(s) by filename, so it is the "
+                          "head the survey measured")
+
+    best = max(cams, key=lambda c: (len(grouping.frames[c]), -cams.index(c)))
+    return best, f"most exposures ({len(grouping.frames[best])}), no EO CSV to identify a head"
+
+
+def build_staging(grouping: RigGrouping, img_root: Path,
+                  staging: Path) -> dict[str, str]:
+    """Materialise <staging>/<camera>/<frame_key><ext> symlinks.
 
     The extension is taken from the source file so COLMAP's reader still sees a
     normal image; the *stem* is what has to match across cameras.
+
+    Returns {staged relative name: original relative name}. Downstream steps that
+    key off the vendor's filenames — the EO CSV match above all — need that map,
+    because restaging deliberately throws the original stem away.
     """
-    n = 0
+    mapping: dict[str, str] = {}
     for cam, table in grouping.frames.items():
         cam_dir = staging / cam
         cam_dir.mkdir(parents=True, exist_ok=True)
@@ -188,17 +355,24 @@ def build_staging(grouping: RigGrouping, img_root: Path, staging: Path) -> int:
             if link.is_symlink() or link.exists():
                 link.unlink()
             link.symlink_to(src)
-            n += 1
-    return n
+            mapping[f"{cam}/{link.name}"] = name
+    return mapping
 
 
 def write_rig_config(grouping: RigGrouping, path: Path,
-                     ref_camera: str = "") -> str:
+                     ref_camera: str = "",
+                     intrinsics: dict[str, tuple[str, list[float]]] | None = None,
+                     ) -> str:
     """Emit rig_config.json for `colmap rig_configurator`. Returns the ref camera.
 
     Extrinsics are deliberately omitted: they are derived by passing an existing
     (rig-less) reconstruction as --input_path, which is both easier and better
     conditioned than hand-measured values.
+
+    `intrinsics` maps a camera id to (model_name, params). Supplying it is how a
+    vendor calibration reaches COLMAP per head: ApplyRigConfig copies these into
+    the database (scene/rig.cc), so each head gets its own focal length instead of
+    one EXIF guess shared by the whole rig.
     """
     cams = grouping.cameras
     if not cams:
@@ -211,8 +385,21 @@ def write_rig_config(grouping: RigGrouping, path: Path,
     # walks config.cameras in array order and Rig::AddSensor aborts with
     # "The reference sensor needs to be added first" (rig.cc:42) if a non-ref
     # sensor is reached before AddRefSensor has run.
-    entries: list[dict[str, object]] = [{"image_prefix": f"{ref}/", "ref_sensor": True}]
-    entries += [{"image_prefix": f"{cam}/"} for cam in cams if cam != ref]
+    intrinsics = intrinsics or {}
+
+    def entry(cam: str, is_ref: bool) -> dict[str, object]:
+        e: dict[str, object] = {"image_prefix": f"{cam}/"}
+        if is_ref:
+            e["ref_sensor"] = True
+        cal = intrinsics.get(cam)
+        if cal:
+            model, params = cal
+            e["camera_model_name"] = model
+            e["camera_params"] = list(params)
+        return e
+
+    entries = [entry(ref, True)]
+    entries += [entry(cam, False) for cam in cams if cam != ref]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps([{"cameras": entries}], indent=2), encoding="utf-8")
     return ref

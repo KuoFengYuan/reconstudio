@@ -15,12 +15,14 @@ behaviour-preserving: these pass identically before and after.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from pipeline.colmap import _run
+from pipeline.runner import PipelineError
 
 # The slice of COLMAP's DB schema the pose-prior injectors touch, so the fake
 # feature_extractor can hand the later stages a database they can actually write to.
@@ -548,3 +550,257 @@ def test_no_region_leaves_the_image_list_whole(patched, imgroot, vocab, tmp_path
     _run.run_colmap(_params(imgroot, ws, vocab), r)
     assert len((ws / "image_list.txt").read_text().split()) == 3
     assert not any("region 選片" in m for m in r.logs)
+
+
+# --- multi-camera rig ------------------------------------------------------
+def _make_rig_images(root: Path, cams=("nadir", "forward", "backward"), n: int = 3) -> None:
+    """ROOT/<camera>/<CAM>-1_<index>-<serial>.jpg — a real oblique block's shape,
+    where the serial differs per body so only <strip>_<index> is shared."""
+    for c, base in zip(cams, (61214, 61294, 70924), strict=False):
+        d = root / c
+        d.mkdir(parents=True, exist_ok=True)
+        for i in range(n):
+            (d / f"{c[0].upper()}-1_{i}-{base + i}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+
+
+def test_rig_stage_groups_images_that_live_in_camera_subfolders(
+        patched, vocab, tmp_path):
+    """Regression: the stage listed img_root non-recursively and without folder
+    prefixes, so a multi layout yielded zero images and the rig always aborted."""
+    root = tmp_path / "rig_images"
+    _make_rig_images(root)
+    ws = tmp_path / "ws"
+    r = FakeRunner()
+
+    _run.run_colmap(_params(root, ws, vocab, rig_enable=True, layout="multi"), r)
+
+    assert "rig_configurator" in r.subcommands()
+    argv = r.argv_for("rig_configurator")
+    cfg = Path(argv[argv.index("--rig_config_path") + 1])
+    prefixes = [c["image_prefix"] for c in json.loads(cfg.read_text())[0]["cameras"]]
+    assert sorted(prefixes) == ["backward/", "forward/", "nadir/"]
+
+    # feature extraction must read the restaged tree, not the originals
+    fe = r.argv_for("feature_extractor")
+    assert fe[fe.index("--image_path") + 1] == str(ws / "rig_images")
+    # every camera exposes the same stems, which is the whole point of restaging
+    # (here the index field alone separates exposures, so the key is just "0"..)
+    for cam in ("nadir", "forward", "backward"):
+        assert (ws / "rig_images" / cam / "0.jpg").is_symlink()
+    assert (ws / "rig_images" / "nadir" / "0.jpg").resolve() == (
+        root / "nadir" / "N-1_0-61214.jpg").resolve()
+
+
+def test_rig_is_skipped_entirely_when_disabled(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert "rig_configurator" not in r.subcommands()
+
+
+def test_rig_aborts_when_only_one_camera_can_be_identified(patched, imgroot, vocab,
+                                                           tmp_path):
+    # imgroot is one flat folder of img_000.jpg.. — one folder and one filename
+    # prefix, so there is no second camera to constrain against.
+    with pytest.raises(PipelineError, match="no frame is covered by every camera"):
+        _run.run_colmap(
+            _params(imgroot, tmp_path / "ws", vocab, rig_enable=True), FakeRunner())
+
+
+def test_rig_splits_cameras_by_filename_prefix_when_there_are_no_folders(
+        patched, vocab, tmp_path):
+    """A flat dataset is still a rig when the bodies stamp a filename prefix.
+    Camera ids come from the data, not from any assumed folder naming."""
+    root = tmp_path / "flat"
+    root.mkdir()
+    for cam, base in (("alpha", 500), ("bravo", 900)):
+        for i in range(3):
+            (root / f"{cam}_{i}-{base + i}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab,
+                            rig_enable=True, layout="single"), r)
+
+    argv = r.argv_for("rig_configurator")
+    cfg = Path(argv[argv.index("--rig_config_path") + 1])
+    prefixes = [c["image_prefix"] for c in json.loads(cfg.read_text())[0]["cameras"]]
+    assert sorted(prefixes) == ["alpha/", "bravo/"]
+
+
+# --- SIFT extraction size --------------------------------------------------
+def _sift_px(r: FakeRunner) -> str | None:
+    fe = r.argv_for("feature_extractor")
+    f = "--FeatureExtraction.max_image_size"
+    return fe[fe.index(f) + 1] if f in fe else None
+
+
+def test_sift_size_defaults_to_auto(patched, imgroot, vocab, tmp_path):
+    """The default has to be auto, not blank: blank means COLMAP silently extracts
+    at 3200 px, which quietly discards the resolution a high-res run keeps."""
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert _sift_px(r) == str(_run.SIFT_MAX_PX)
+
+
+def test_sift_size_can_be_handed_back_to_colmap(patched, imgroot, vocab, tmp_path):
+    # -1 is COLMAP's own sentinel, so it stays the escape hatch from auto
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="-1"), r)
+    assert _sift_px(r) == "-1"
+
+
+def test_sift_size_auto_follows_the_undistort_cap(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="auto", max_image_size="4096"), r)
+    assert _sift_px(r) == "4096"
+
+
+def test_sift_size_auto_is_clamped_to_the_gpu_ceiling(patched, imgroot, vocab, tmp_path):
+    # SiftGPU doubles this value (first_octave=-1), so 8192 is already -maxd 16384
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="auto", max_image_size="20000"), r)
+    assert _sift_px(r) == str(_run.SIFT_MAX_PX)
+
+
+def test_sift_size_auto_without_an_undistort_cap_uses_the_ceiling(
+        patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="auto"), r)
+    assert _sift_px(r) == str(_run.SIFT_MAX_PX)
+
+
+def test_sift_size_explicit_value_is_passed_through(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="1920", max_image_size="8192"), r)
+    assert _sift_px(r) == "1920"        # an explicit choice always wins over auto
+
+
+def test_caspar_with_the_default_camera_model_is_warned_about(patched, imgroot,
+                                                             vocab, tmp_path):
+    """OPENCV is the default camera model, but Caspar only accepts SIMPLE_RADIAL /
+    PINHOLE and silently skips every image otherwise — so that combination has to
+    be called out rather than quietly producing a reconstruction with no BA."""
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            mapper="incremental", ba_backend="caspar"), r)
+    assert any("Caspar only supports SIMPLE_RADIAL / PINHOLE" in m for m in r.logs)
+
+
+# --- pose-prior uncertainty ------------------------------------------------
+def test_prior_std_auto_tightens_for_an_eo_csv(patched, imgroot, vocab, tmp_path):
+    """A surveyor's EO is post-processed airborne POS; leaving the consumer-GPS
+    metres in place tells BA to weight it to nothing, wasting the priors."""
+    r = FakeRunner()
+    csv = _eo_csv(tmp_path, [f"img_{i:03d}" for i in range(3)])
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            pose_prior_csv=str(csv)), r)
+    assert any("PRIOR_STD=auto -> (0.05, 0.05, 0.1) m" in m for m in r.logs)
+
+
+def test_prior_std_resolver_picks_by_source():
+    class C:
+        eo_csv = ""
+        d = {"prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "auto"}
+    assert _run._resolve_prior_std(C()) == _run.PRIOR_STD_GPS
+    C.eo_csv = "/some/eo.csv"
+    assert _run._resolve_prior_std(C()) == _run.PRIOR_STD_EO
+
+
+def test_prior_std_explicit_value_overrides_auto_per_axis():
+    class C:
+        eo_csv = "/some/eo.csv"
+        d = {"prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "0.5"}
+    assert _run._resolve_prior_std(C()) == (0.05, 0.05, 0.5)
+
+
+def test_rig_with_pose_prior_derives_the_extrinsics_first(patched, vocab, tmp_path):
+    """rig + pose_prior IS supported by COLMAP, but only with sensor_from_rig known
+    (incremental_pipeline.cc:563). We supply none, so the extrinsics have to be
+    derived from a rig-less reconstruction via rig_configurator --input_path."""
+    root = tmp_path / "rig_images"
+    _make_rig_images(root)
+    ws = tmp_path / "ws"
+    r = FakeRunner()
+    patched.gps = "full"          # pose_prior requires a prior on every image
+    _run.run_colmap(_params(root, ws, vocab, rig_enable=True, layout="multi",
+                            mapper="pose_prior"), r)
+
+    subs = r.subcommands()
+    # pass 1 is a bare global_mapper into its own directory, so sparse/ is untouched
+    assert subs.count("global_mapper") == 1
+    init = r.argv_for("global_mapper")
+    assert init[init.index("--output_path") + 1] == str(ws / "sparse_rig_init")
+    # then the rig is configured FROM that model, and only then does pose_prior run
+    rig = r.argv_for("rig_configurator")
+    assert rig[rig.index("--input_path") + 1] == str(ws / "sparse_rig_init" / "0")
+    assert subs.index("rig_configurator") > subs.index("global_mapper")
+    assert subs.index("pose_prior_mapper") > subs.index("rig_configurator")
+
+
+def test_rig_with_global_stays_single_pass(patched, vocab, tmp_path):
+    """global calibrates unknown rig extrinsics itself, so it must NOT pay for the
+    extra reconstruction — and its rig_configurator takes no --input_path."""
+    root = tmp_path / "rig_images_g"
+    _make_rig_images(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws_g", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+    assert r.subcommands().count("global_mapper") == 1
+    assert "sparse_rig_init" not in " ".join(sum(r.calls, []))
+    rig = r.argv_for("rig_configurator")
+    assert "--input_path" not in rig
+
+
+
+
+
+# --- calibrated intrinsics -------------------------------------------------
+def _calib_txt(root: Path, cams=("nadir", "forward", "backward")) -> None:
+    """Drop an Australis-shaped certificate into the dataset, unhelpfully named."""
+    secs = []
+    for i, cam in enumerate(cams):
+        secs.append(f"""
+ {i + 3}. {cam.capitalize()} Camera Calibration Report:
+ Camera:                        TestCam {cam}
+ Sensor Resolution:             x {1000 + i} * y {800 + i} (1 MP)
+ Pixel Size:                    3.76 um
+ C                  {90 + i}.0000        0.00000            {90 + i}.0000
+ XP                   0.0000        0.00000              0.0000
+ YP                 - 0.4069        0.00000            - 0.4069
+""")
+    (root / "vendor_doc.txt").write_text("\n".join(secs), encoding="utf-8")
+
+
+def test_calibrated_intrinsics_are_discovered_and_make_pp_refinable(
+        patched, vocab, tmp_path):
+    """ba_refine_principal_point defaults to 0, so an injected principal point
+    would be held — and its y sign is the one convention we have to guess. It has
+    to become refinable so a wrong guess self-corrects."""
+    root = tmp_path / "rig_images"
+    _make_rig_images(root)
+    _calib_txt(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+
+    assert any("3 calibrated head(s) found in vendor_doc.txt" in m for m in r.logs)
+    gm = r.argv_for("global_mapper")
+    assert gm[gm.index("--GlobalMapper.ba_refine_principal_point") + 1] == "1"
+    # each head keeps its own focal length in the rig config
+    rig = r.argv_for("rig_configurator")
+    cfg = json.loads(Path(rig[rig.index("--rig_config_path") + 1]).read_text())
+    focals = {c["image_prefix"]: c["camera_params"][0] for c in cfg[0]["cameras"]}
+    assert len(set(focals.values())) == 3, focals
+
+
+def test_pp_refinement_is_not_forced_without_a_calibration(patched, vocab, tmp_path):
+    root = tmp_path / "rig_images_nc"
+    _make_rig_images(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws2", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+    assert "--GlobalMapper.ba_refine_principal_point" not in r.argv_for("global_mapper")
