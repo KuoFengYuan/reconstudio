@@ -487,23 +487,27 @@
               </select>
             </div>
           </div>
-          <div class="fhint" id="h_cm_rig_mode">怎麼判斷「哪幾張是同一次曝光」:<br>
-            ‧ <b>folder</b> — 相機 = 第一層資料夾,曝光 = 後面的檔名。各鏡頭檔名<b>本來就一致</b>時用這個。<br>
-            ‧ <b>regex</b> — 用下面的正規表示式從檔名拆出相機與曝光編號。<b>各鏡頭檔名帶自己機身序號時用這個</b>
-            (COLMAP 原生的 <code>image_prefix</code> 對這種檔名分不了組,這就是它會 SIGABRT 的原因)。<br>
-            ‧ <b>gps</b> — 相機仍取自資料夾,但用 EXIF GPS 位置分群:同一次曝光的各鏡頭共用同一個座標。
-            檔名完全沒有共通鍵時的退路。</div>
+          <div class="fhint" id="h_cm_rig_mode">怎麼判斷「哪幾張是同一次曝光」。<b>維持 auto 就好</b>:<br>
+            ‧ <b>auto(預設,建議)</b> — 相機 = 第一層資料夾,曝光編號<b>自動從檔名找出來</b>。
+            作法是把檔名裡的每個數字欄位都試一遍,選「能讓最多次曝光被所有相機同時涵蓋」的那個。
+            像 <code>B-1_0-70924.jpg</code> / <code>N-1_0-61214.jpg</code>(機身流水號不同)這種它會自己認出
+            <code>1_0</code> 是共用鍵。<b>不用填下面任何一格。</b><br>
+            ‧ <b>folder</b> — 曝光 = 資料夾後面的整個檔名。各鏡頭檔名本來就完全一致時才用。<br>
+            ‧ <b>regex</b> — auto 猜錯時的手動指定(見下欄)。<br>
+            ‧ <b>gps</b> — 用 EXIF GPS 位置分群。檔名毫無規律可循時的退路。<br>
+            不管哪種模式,分組結果都會印在 log,<b>沒有任何曝光被所有相機覆蓋時會直接中止</b>。</div>
           <div class="prow stack">
-            <label class="plabel" for="cm_rig_regex"><span class="ptext">RIG_REGEX（regex 模式）</span>
+            <label class="plabel" for="cm_rig_regex"><span class="ptext">RIG_REGEX(僅 regex 模式)</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_regex')" title="說明">?</span>
             </label>
-            <div class="pctl"><input id="cm_rig_regex" name="RIG_REGEX" value="{{ colmap_defaults.RIG_REGEX }}" placeholder="^(?P&lt;cam&gt;[NFBLR])-\d+_0-\d+_(?P&lt;frame&gt;\d+)\.jpg$"></div>
+            <div class="pctl"><input id="cm_rig_regex" name="RIG_REGEX" value="{{ colmap_defaults.RIG_REGEX }}" placeholder="auto 模式請留空"></div>
           </div>
-          <div class="fhint" id="h_cm_rig_regex">必須含兩個具名群組:<code>(?P&lt;cam&gt;…)</code> 相機代號、
-            <code>(?P&lt;frame&gt;…)</code> 同一次曝光共用的編號。先對檔名(不含路徑)比對,不中再對完整相對路徑。<br>
-            例:檔名 <code>N-1_0-61214_00042.jpg</code> / <code>F-1_0-61294_00042.jpg</code>(機身序號不同、末段編號相同)→
-            <code>^(?P&lt;cam&gt;[NFBLR])-\d+_0-\d+_(?P&lt;frame&gt;\d+)\.jpg$</code>。
-            分組結果一定要看 log 確認再往下跑。</div>
+          <div class="fhint" id="h_cm_rig_regex"><b>auto / folder / gps 模式請留空。</b>
+            這格只在「分組方式 = regex」時才會被讀取。<br>
+            填的是<b>正規表示式,不是檔名</b>,而且必須含兩個具名群組:<code>(?P&lt;cam&gt;…)</code> 相機代號、
+            <code>(?P&lt;frame&gt;…)</code> 同一次曝光共用的編號。<br>
+            例:檔名長 <code>B-1_0-70924.jpg</code> / <code>N-1_0-61214.jpg</code>,要抓中間的 <code>1_0</code> 當共用鍵 →
+            <code>^(?P&lt;cam&gt;[A-Z])-(?P&lt;frame&gt;\d+_\d+)-\d+\.jpg$</code></div>
           <div class="prow">
             <label class="plabel" for="cm_rig_ref"><span class="ptext">RIG_REF_CAMERA(參考鏡頭)</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_ref')" title="說明">?</span>

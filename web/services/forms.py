@@ -118,7 +118,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "matcher": g("MATCHER", "vocab"),
         # --- multi-camera rig (see pipeline/colmap/_rig.py) ---
         "rig_enable": bool(form.get("RIG_ENABLE")),
-        "rig_mode": g("RIG_MODE", "folder"),
+        "rig_mode": g("RIG_MODE", "auto"),
         "rig_regex": g("RIG_REGEX", ""),
         "rig_ref_camera": g("RIG_REF_CAMERA", ""),
         "rig_gps_tol": g("RIG_GPS_TOL", "0.5"),

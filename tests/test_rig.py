@@ -16,6 +16,7 @@ import pytest
 from pipeline.colmap._rig import (
     build_staging,
     compile_rig_regex,
+    group_auto,
     group_images,
     summarize,
     write_rig_config,
@@ -112,3 +113,49 @@ def test_rig_config_rejects_an_unknown_ref_camera(tmp_path):
     g = group_images(OBLIQUE, "regex", regex=OBLIQUE_RX)
     with pytest.raises(ValueError, match="ref camera"):
         write_rig_config(g, tmp_path / "c.json", ref_camera="ZZZ")
+
+
+# --- auto mode -------------------------------------------------------------
+# Shape of a real oblique block: <cam>-<strip>_<index>-<serial>.jpg, where the
+# serial differs per body AND per image, so only <strip>_<index> is shared.
+def _oblique_block():
+    names = []
+    for cam, base in (("nadir", 61214), ("forward", 61294), ("backward", 70924)):
+        for strip in (1, 2):
+            for idx in range(3):
+                names.append(f"{cam}/{cam[0].upper()}-{strip}_{idx}-{base + strip * 10 + idx}.jpg")
+    return names
+
+
+def test_auto_discovers_the_shared_exposure_key_without_config():
+    g, notes = group_auto(_oblique_block())
+    assert g.cameras == ["backward", "forward", "nadir"]
+    # strip+index, i.e. the two leading digit fields — found, not supplied
+    assert g.complete_frames() == ["1_0", "1_1", "1_2", "2_0", "2_1", "2_2"]
+    assert any("auto picked digit field(s) [0, 1]" in n for n in notes)
+
+
+def test_auto_drops_keys_that_repeat_within_a_camera():
+    # a duplicated <strip>_<index> cannot identify an exposure; binding it would
+    # pair images from different shots, so both copies are dropped everywhere.
+    names = _oblique_block() + [f"{c}/{c[0].upper()}-1_0-{9000 + i}.jpg"
+                                for i, c in enumerate(("nadir", "forward", "backward"))]
+    g, notes = group_auto(names)
+    assert "1_0" not in g.complete_frames()
+    assert any("ambiguous" in n for n in notes)
+    assert len(g.unmatched) == 6          # the original 1_0 trio plus the clashing trio
+
+
+def test_auto_reports_failure_when_no_key_is_shared():
+    # disjoint numbering per camera: no digit field can ever line up
+    names = ([f"N/N_{100 + i}.jpg" for i in range(3)]
+             + [f"F/F_{200 + i}.jpg" for i in range(3)])
+    g, notes = group_auto(names)
+    assert g.complete_frames() == []
+    assert any("could not find a shared exposure key" in n for n in notes)
+
+
+def test_auto_needs_at_least_two_camera_folders():
+    g, notes = group_auto([f"N/N-1_{i}-100{i}.jpg" for i in range(3)])
+    assert g.cameras == []
+    assert any("at least two camera folders" in n for n in notes)

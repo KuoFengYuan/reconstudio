@@ -15,6 +15,11 @@ then materialises a symlink tree whose names *do* satisfy COLMAP's rule:
 which makes `image_prefix = "<camera>/"` group correctly with no database
 surgery. The strategies:
 
+  auto    camera = first path component; the exposure key is *discovered* from
+          the filenames by scoring every digit field (and pair of fields) on how
+          many exposures it leaves covered by all cameras. Handles the usual
+          `<cam>-<strip>_<index>-<serial>.jpg` shape with no configuration, and
+          is why the panel does not ask for a regex up front.
   folder  camera = first path component, frame = the rest of the relative path.
           For rigs that already write matching filenames per camera.
   regex   camera / frame come from named groups in a user-supplied pattern,
@@ -29,18 +34,20 @@ the generated rig_config.json.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-RIG_MODES = ("folder", "regex", "gps")
+RIG_MODES = ("auto", "folder", "regex", "gps")
 
 # Panel-facing defaults (mirrored into COLMAP_DEFAULTS).
 RIG_DEFAULTS = {
     "rig_enable": False,
-    "rig_mode": "folder",
+    "rig_mode": "auto",
     "rig_regex": "",
     "rig_ref_camera": "",     # "" = first camera in sorted order
     "rig_gps_tol": "0.5",     # metres; gps mode only
@@ -112,6 +119,98 @@ def _gps_metres(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(dx, dy)
 
 
+def _digit_tokens(name: str) -> list[str]:
+    """Every maximal digit run in the filename stem, in order."""
+    return re.findall(r"\d+", Path(name).stem)
+
+
+def auto_frame_key(per_cam: dict[str, list[str]]) -> tuple[tuple[int, ...], int]:
+    """Find which digit-token positions form the shared exposure key.
+
+    Rig filenames are almost always `<camera><separator><strip>_<index><serial>`
+    in some order: some digit fields identify the exposure (identical across the
+    heads that fired together) and others identify the body or the file (unique
+    per camera, so never shared). We do not have to know which is which — we can
+    just score every candidate: the right key is the one that maximises the
+    number of exposures covered by *every* camera.
+
+    Returns (token positions, how many frames all cameras share). An empty tuple
+    means nothing worked.
+    """
+    if len(per_cam) < 2:
+        return (), 0
+    token_counts = [min(len(_digit_tokens(n)) for n in names)
+                    for names in per_cam.values() if names]
+    if not token_counts:
+        return (), 0
+
+    best: tuple[tuple[int, ...], int] = ((), 0)
+    # Single fields first, then pairs — a pair is only preferred when it strictly
+    # beats every single field, so we keep the simplest key that works.
+    positions = range(min(token_counts))
+    for combo in [(i,) for i in positions] + list(itertools.combinations(positions, 2)):
+        keyed = {cam: ["_".join(_digit_tokens(n)[i] for i in combo) for n in names]
+                 for cam, names in per_cam.items()}
+        shared = set.intersection(*(set(v) for v in keyed.values()))
+        if len(shared) > best[1]:
+            best = (combo, len(shared))
+    return best
+
+
+def group_auto(names: list[str]) -> tuple[RigGrouping, list[str]]:
+    """`auto` mode: camera from the folder, exposure key discovered from the names.
+
+    Also returns diagnostic lines, because the discovered key is a guess that the
+    user should be able to sanity-check in the log.
+    """
+    notes: list[str] = []
+    out = RigGrouping()
+    per_cam: dict[str, list[str]] = {}
+    for name in sorted(names):
+        hit = _split_folder(name)
+        if not hit:
+            out.unmatched.append(name)
+            continue
+        per_cam.setdefault(hit[0], []).append(name)
+
+    if len(per_cam) < 2:
+        out.unmatched.extend(n for names_ in per_cam.values() for n in names_)
+        notes.append("rig: auto needs at least two camera folders")
+        return out, notes
+
+    combo, shared = auto_frame_key(per_cam)
+    if not combo:
+        out.unmatched.extend(n for names_ in per_cam.values() for n in names_)
+        notes.append("rig: auto could not find a shared exposure key in the filenames "
+                     "— try mode=gps, or mode=regex with an explicit pattern")
+        return out, notes
+
+    notes.append(f"rig: auto picked digit field(s) {list(combo)} as the exposure key "
+                 f"({shared} exposures shared by every camera)")
+
+    # A key that repeats inside one camera cannot identify an exposure; pairing on
+    # it would bind images from *different* shots together, which is worse than
+    # dropping them. Same key is dropped for every camera so frames stay aligned.
+    keyed = {cam: [("_".join(_digit_tokens(n)[i] for i in combo), n) for n in names_]
+             for cam, names_ in per_cam.items()}
+    ambiguous: set[str] = set()
+    for pairs in keyed.values():
+        counts = Counter(k for k, _ in pairs)
+        ambiguous |= {k for k, c in counts.items() if c > 1}
+    if ambiguous:
+        notes.append(f"rig: dropped {len(ambiguous)} ambiguous key(s) that repeat within a "
+                     f"camera (e.g. {', '.join(sorted(ambiguous)[:3])}) — those exposures "
+                     "cannot be matched safely")
+
+    for cam, pairs in keyed.items():
+        for key, name in pairs:
+            if key in ambiguous:
+                out.unmatched.append(name)
+            else:
+                out.frames.setdefault(cam, {})[key] = name
+    return out, notes
+
+
 def group_images(names: list[str], mode: str, regex: str = "",
                  gps: dict[str, tuple[float, float]] | None = None,
                  gps_tol: float = 0.5) -> RigGrouping:
@@ -121,6 +220,9 @@ def group_images(names: list[str], mode: str, regex: str = "",
     """
     if mode not in RIG_MODES:
         raise ValueError(f"rig mode must be one of {RIG_MODES}, got {mode!r}")
+
+    if mode == "auto":
+        return group_auto(names)[0]
 
     out = RigGrouping()
     if mode == "regex":
