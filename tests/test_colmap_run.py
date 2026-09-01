@@ -168,10 +168,10 @@ def test_default_pipeline_runs_all_stages_in_order(patched, imgroot, vocab, tmp_
     ws = tmp_path / "ws"
     r = FakeRunner()
     _run.run_colmap(_params(imgroot, ws, vocab), r)
-    # default: matcher=both, mapper=global, simplify/align/reorient OFF
+    # default: matcher=vocab, mapper=global, rig/simplify/align/reorient OFF
     assert r.subcommands() == [
         "feature_extractor",
-        "sequential_matcher", "vocab_tree_matcher",
+        "vocab_tree_matcher",
         "view_graph_calibrator",
         "global_mapper",
         "image_undistorter",

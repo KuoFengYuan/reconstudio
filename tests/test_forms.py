@@ -132,7 +132,7 @@ def test_build_colmap_params_minimal_form_applies_defaults():
     assert p["workspace"] == "/ws"
     assert p["folders"] == ["folderA", "folderB"]
     assert p["stages"] == ["sfm", "mvs"]
-    assert p["matcher"] == "both"
+    assert p["matcher"] == "vocab"
     assert p["mapper"] == "global"
     assert p["camera_mode"] == "per_folder"
     assert p["max_features"] == "4096"

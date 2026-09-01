@@ -26,8 +26,7 @@ from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
-from ._rig import (RIG_DEFAULTS, build_staging, group_images, summarize,
-                   write_rig_config)
+from ._rig import RIG_DEFAULTS, build_staging, group_images, summarize, write_rig_config
 
 COLMAP_STAGES = ["stage", "extract", "rig", "gps_inject", "match", "calibrate", "mapper",
                  "simplify", "align", "undistort", "reorient"]
