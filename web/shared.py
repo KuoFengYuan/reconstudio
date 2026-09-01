@@ -46,7 +46,10 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
 # --- form pre-fill defaults / enums (mirror the pipeline module defaults) --- #
 COLMAP_DEFAULTS = {
     "CAMERA_MODEL": "SIMPLE_RADIAL", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
-    "MATCHER": "both", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
+    "MATCHER": "vocab", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
+    # multi-camera rig: off by default; RIG_MODE picks how frames are grouped.
+    "RIG_ENABLE": "0", "RIG_MODE": "folder", "RIG_REGEX": "",
+    "RIG_REF_CAMERA": "", "RIG_GPS_TOL": "0.5",
     "GUIDED_MATCHING": "1", "MAPPER": "global", "DATASET_NAME": "training_dataset",
     "FORCE": "0", "NESTED_LAYOUT": "1", "VOCAB_TREE": "", "VOCAB_TREE_URL": "",
     # 影像解析度 is a single dropdown (its <option> values carry the cap or "keep"), so the
@@ -84,6 +87,7 @@ FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOL
 ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
     "MATCHER": ["sequential", "vocab", "both", "spatial", "custom"],
+    "RIG_MODE": ["folder", "regex", "gps"],
     "MAPPER": ["global", "incremental", "pose_prior", "hierarchical"],
     "BA_BACKEND": ["ceres", "caspar"],
 }

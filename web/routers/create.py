@@ -200,7 +200,6 @@ async def create_depth(request: Request):
         params = {"images": images, "mode": mode, "model": model, "gpu": gpu,
                   "max_side": (form.get("max_side") or "").strip(),
                   "bit_depth": (form.get("bit_depth") or "").strip(),
-                  "cpu": bool(form.get("cpu")),
                   "overwrite": bool(form.get("overwrite"))}
     except ValueError as exc:
         return _page(request, "_error.html", message=str(exc))

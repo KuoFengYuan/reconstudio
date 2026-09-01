@@ -135,7 +135,7 @@ cmake -B build && cmake --build build -j"$(nproc)"
 > `libcudnn9` 同時也是 🌊 深度 工具(共用同一份 binary)的必要條件。裝在非標準位置時
 > 用 `local.env` 的 `LD_LIBRARY_PATH` 指過去;`./run.sh --doctor` 有專門一項在檢查它。
 
-LichtFeld 的兩個 backend(MR-NF / iGS+)已內建在 `pipeline/backends.py`,只要
+LichtFeld 的 backend(MR-NF)已內建在 `pipeline/backends.py`,只要
 `LichtFeld-Studio` 跟 `reconstudio` 同一層(就是上面 `cd ..` clone 的位置),完全不用
 碰 `backends.json`,程式會自動找到 `build/LichtFeld-Studio`。只有這台機器的 build
 放在別的地方(不同硬碟、NFS 路徑…)時,才需要在**這台機器自己的** `backends.json` 補一個
@@ -149,7 +149,7 @@ LichtFeld 的兩個 backend(MR-NF / iGS+)已內建在 `pipeline/backends.py`,只
   (背景跑、不擋啟動;離線就沿用現有版本)。詳見[三、進階](#supersplat-自動更新)。
 - **🌊 深度/法向量(LichtFeld preprocess,選用)** — 為照片產生深度圖和/或法向量圖,給 LichtFeld
   訓練做深度/法向量監督。**免額外裝 conda env** — 直接跑 LichtFeld-Studio 自己編譯出來的
-  `preprocess` 子指令(跟 lichtfeld-mrnf/igs+ 訓練 backend 共用同一份 binary),模型是內建的
+  `preprocess` 子指令(跟 lichtfeld-mrnf 訓練 backend 共用同一份 binary),模型是內建的
   MoGe-2 ONNX(深度+法向量聯合模型),第一次執行會自動下載,不需要 torch。
 
   只要 `../LichtFeld-Studio` 建置好(見上面「三、建置」),開 `/doctor` 就會看到「深度/法向量生成」
@@ -268,16 +268,21 @@ worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航�
 
 ### 開啟深度/法向量監督(depth / normal loss)
 
-LichtFeld backend(MR-NF / iGS+)的參數區有深度與法向量兩組選項,先用「🌊 深度」產生對應
+LichtFeld backend(MR-NF)的參數區有深度與法向量兩組選項,先用「🌊 深度」產生對應
 的圖後即可開啟:
 
-- **深度損失 (use-depth-loss)** — 勾選才啟用(預設關)。
+- **深度損失 (use-depth-loss)** — 勾選才啟用(預設關)。深度圖沒有自動生成,一定要先用
+  「🌊 深度」工具產生 `depth/`。
 - **深度損失模式** — `ssi`(**自動偵測,預設,建議**)、`ssi-disparity`、`ssi-depth`(強制指定
   先驗是反深度或正深度)。
 - **深度損失權重** — 預設 `2.0`。
-- **法向量損失 (use-normal-loss)** — 勾選才啟用(預設關)。
-- **法向量先驗權重** / **深度-法向量一致性權重** — 皆預設 `0.05`。
-- **扁平化權重** — 預設 `1.0`(法向量監督期間讓高斯最短軸攤平)。
+- **法向量損失 (use-normal-loss)** — 勾選才啟用(預設關)。**這版起法向量圖不是必須預先生成**:
+  訓練時若 `normals/` 缺圖或尺寸不符,LichtFeld 會自動用內建 MoGe-2 即時補生成(`--no-normal-auto-generate`
+  可關掉這個行為)。「🌊 深度」工具仍然有用——可以用原始解析度先跑一次、重複利用、離線檢查——但不再是
+  開啟法向量損失的前提。
+- **法向量先驗權重** — 預設 `0.005`。
+- **深度-法向量一致性權重** — 預設 `0.001`。
+- **扁平化權重** — 預設 `0`(法向量監督期間讓高斯最短軸攤平;預設不啟用)。
 - **法向量先驗座標系** — `auto`(**自動偵測,建議**)、`camera-opencv`、`camera-opengl`、`world`。
 
 > 前提:`depth/`、`normals/` 要和**這次訓練實際用的 `images/` 同層、同名同尺寸**。LichtFeld 看到
@@ -286,7 +291,7 @@ LichtFeld backend(MR-NF / iGS+)的參數區有深度與法向量兩組選項,先
 
 ### 開啟 16-bit 色彩訓練(HDR 素材)
 
-LichtFeld backend(MR-NF / iGS+)參數區有 **16-bit 色彩訓練**(`--use-16bit`)勾選框,預設關。
+LichtFeld backend(MR-NF)參數區有 **16-bit 色彩訓練**(`--use-16bit`)勾選框,預設關。
 
 - 只在來源影像**本身就是 16-bit**(RAW 轉出的 TIFF/PNG、HDR 合成素材)才有意義——一般手機
   /相機直出的 8-bit JPEG/PNG 開這個沒效果,因為動態範圍在源頭就已經被裁掉了。

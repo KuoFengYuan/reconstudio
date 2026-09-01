@@ -21,13 +21,15 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from ..config import settings
-from ..runner import Runner
+from ..runner import PipelineError, Runner
 from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
-from ._gps import gps_coverage, inject_pose_priors
+from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
+from ._rig import (RIG_DEFAULTS, build_staging, group_images, summarize,
+                   write_rig_config)
 
-COLMAP_STAGES = ["stage", "extract", "gps_inject", "match", "calibrate", "mapper",
+COLMAP_STAGES = ["stage", "extract", "rig", "gps_inject", "match", "calibrate", "mapper",
                  "simplify", "align", "undistort", "reorient"]
 # colmap / ffmpeg binaries (PATH by default; override via COLMAP_BIN / FFMPEG_BIN).
 COLMAP_BIN = settings.colmap_bin
@@ -36,7 +38,7 @@ COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
     "vocab_tree_url": "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words256K.bin",
     "camera_model": "SIMPLE_RADIAL", "max_features": "4096", "camera_mode": "per_folder",
-    "matcher": "both", "seq_overlap": "10", "num_matches": "50",
+    "matcher": "vocab", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",
     # resize longest-side cap for the "fullhd" option (default 1920). Raise for higher-res
@@ -109,9 +111,11 @@ COLMAP_DEFAULTS = {
     # (PCA gravity-align + scale). Both off unless ticked; h3dgs runs both.
     "simplify": False, "simplify_mult_min_dist": "10",
     "reorient": False, "reorient_target_med_dist": "20", "reorient_upscale": "0",
-    # hierarchical_mapper partition knobs (COLMAP 4.0.4); "" = COLMAP default
+    # hierarchical_mapper partition knobs (COLMAP 4.2 --HierarchicalMapper.*); "" = COLMAP default
     # (leaf_max_num_images 500, image_overlap 50, num_workers -1 = auto).
     "hm_leaf_max_num_images": "", "hm_image_overlap": "", "hm_num_workers": "",
+    # --- multi-camera rig (see _rig.py) ---
+    **RIG_DEFAULTS,
 }
 
 
@@ -171,6 +175,11 @@ class _Ctx:
     region_vis_thresh: float
     simplify: bool
     reorient: bool
+    rig_enable: bool
+    rig_mode: str
+    rig_regex: str
+    rig_ref_camera: str
+    rig_gps_tol: float
     cm_n_seq: str
     cm_n_quad: str
     cm_n_loop: str
@@ -195,6 +204,8 @@ class _Ctx:
     # img_root before the FullHD resize rebases it — the originals still carry EXIF GPS,
     # which the resized copies don't, so gps_inject reads priors from here.
     orig_root: str = ""
+    # rig_config.json written by the rig staging stage; consumed by rig_configurator.
+    rig_config: Path | None = None
 
     def stage_on(self, s: str) -> bool:
         return s in self.stages
@@ -341,6 +352,10 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         region=region, region_model=region_model,
         region_buffer=region_buffer, region_vis_thresh=region_vis_thresh,
         simplify=bool(d["simplify"]), reorient=bool(d["reorient"]),
+        rig_enable=bool(d["rig_enable"]), rig_mode=str(d["rig_mode"]).strip() or "folder",
+        rig_regex=str(d["rig_regex"]).strip(),
+        rig_ref_camera=str(d["rig_ref_camera"]).strip(),
+        rig_gps_tol=float(str(d["rig_gps_tol"]) or 0.5),
         cm_n_seq=str(d["cm_n_seq"]), cm_n_quad=str(d["cm_n_quad"]), cm_n_loop=str(d["cm_n_loop"]),
         cm_n_gps=int(str(d["cm_n_gps"]) or 0),
         cm_loop_ints=[int(x) for x in str(d["cm_loop_matches"]).replace(",", " ").split()],
@@ -556,6 +571,66 @@ def _stage_extract(c: _Ctx) -> None:
             c.r.log("skip extract (database.db exists; set FORCE=1 to redo)")
 
 
+def _stage_rig_stage(c: _Ctx) -> None:
+    """0b. Multi-camera rig: restage images so COLMAP can group them into frames.
+
+    Runs BEFORE the image list / extraction because it rebases `img_root`: the
+    names COLMAP records in the database must already be `<camera>/<frame_key>`,
+    which is the only thing `rig_configurator` groups by. The FullHD resize that
+    may follow keeps relative paths, so the layout survives it.
+    """
+    if not c.rig_enable:
+        return
+    names = list_image_names(Path(c.img_root))
+    gps_map = None
+    if c.rig_mode == "gps":
+        gps_map = {}
+        for n in names:
+            hit = image_gps_latlonalt(Path(c.img_root) / n)
+            if hit:
+                gps_map[n] = (hit[0], hit[1])
+        c.r.log(f"rig: EXIF GPS found for {len(gps_map)}/{len(names)} images")
+
+    try:
+        grouping = group_images(names, c.rig_mode, regex=c.rig_regex,
+                                gps=gps_map, gps_tol=c.rig_gps_tol)
+    except ValueError as exc:
+        raise PipelineError(f"rig grouping failed: {exc}") from exc
+
+    for line in summarize(grouping):
+        c.r.log(line)
+    if not grouping.complete_frames():
+        raise PipelineError(
+            "rig: no frame is covered by every camera — the grouping is wrong, so a "
+            "rig would constrain nothing. Check 遮罩/regex 設定 (rig_mode="
+            f"{c.rig_mode!r}, regex={c.rig_regex!r}) or turn the rig off.")
+
+    stage_root = c.ws / "rig_images"
+    stage_root.mkdir(parents=True, exist_ok=True)
+    n = build_staging(grouping, Path(c.img_root), stage_root)
+    c.rig_config = c.ws / "rig_config.json"
+    ref = write_rig_config(grouping, c.rig_config, c.rig_ref_camera)
+    c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")
+    c.img_root = str(stage_root)          # everything downstream reads the rig layout
+
+
+def _stage_rig_configure(c: _Ctx) -> None:
+    """1c. `colmap rig_configurator`: write rigs/frames into the database.
+
+    Must run after feature extraction (it reads the images table) and before
+    matching/mapping, so the mapper sees the rig constraint from the start.
+    Extrinsics are left for the mapper to refine (--*.refine_sensor_from_rig,
+    on by default); supplying an --input_path reconstruction would only be
+    needed to seed them from an existing rig-less solve.
+    """
+    if not c.rig_enable or not c.stage_on("rig"):
+        return
+    c.r.banner(f"rig_configurator -> {c.db}")
+    c.r.run([COLMAP_BIN, "rig_configurator",
+             "--database_path", str(c.db),
+             "--rig_config_path", str(c.rig_config)])
+
+
 def _stage_gps_inject(c: _Ctx) -> None:
     # 1b. GPS pose priors for non-JPEG inputs. COLMAP's feature_extractor reads EXIF GPS
     # only from JPEG (verified on 4.0.4: a GPS-tagged TIFF yields zero pose_priors rows
@@ -719,12 +794,15 @@ def _stage_mapper(c: _Ctx) -> None:
                 extra = ["--Mapper.ba_global_function_tolerance", "0.000001"]
                 # hierarchical_mapper reconstructs each cluster with the incremental
                 # pipeline, so it inherits the same --Mapper.ba_*_backend flags below.
+                # COLMAP 4.2 moved these three under the HierarchicalMapper.*
+                # namespace; the old bare names are a hard parse error, not a
+                # warning, so the stage would die before doing any work.
                 if c.hm_leaf:
-                    extra += ["--leaf_max_num_images", c.hm_leaf]
+                    extra += ["--HierarchicalMapper.leaf_max_num_images", c.hm_leaf]
                 if c.hm_overlap:
-                    extra += ["--image_overlap", c.hm_overlap]
+                    extra += ["--HierarchicalMapper.image_overlap", c.hm_overlap]
                 if c.hm_workers:
-                    extra += ["--num_workers", c.hm_workers]
+                    extra += ["--HierarchicalMapper.num_workers", c.hm_workers]
             else:
                 sub, label = "mapper", "colmap mapper (incremental)"
             # GPU bundle adjustment: BA dominates incremental/pose_prior/hierarchical
@@ -917,12 +995,14 @@ def _stage_reorient(c: _Ctx) -> None:
 def run_colmap(p: dict, r: Runner) -> None:
     c = _setup(p, r)
     _stage_nested(c)            # 0. NESTED staging (rebases img_root)
+    _stage_rig_stage(c)         # 0b. rig staging (rebases img_root; groups frames)
     _build_image_list(c)        # image_list.txt + c.lines
     _resolve_eo_csv(c)          # optional EO CSV -> c.eo_map (name -> EO row)
     _check_gps_coverage(c)      # c.gps_present / c.gps_opts (may abort)
     c.orig_root = c.img_root    # capture pre-resize originals (intact EXIF) for gps_inject
     _maybe_resize_fullhd(c)     # FullHD downscale (rebases img_root)
     _stage_extract(c)           # 1. feature_extractor
+    _stage_rig_configure(c)     # 1c. rig_configurator -> rigs/frames in the DB
     _stage_gps_inject(c)        # 1b. inject TIFF/non-JPEG EXIF GPS into DB pose_priors
     _stage_match(c)             # 2. matcher
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)

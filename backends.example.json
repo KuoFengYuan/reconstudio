@@ -71,7 +71,7 @@
   },
 
   "_lichtfeld_note": [
-    "lichtfeld-mrnf / lichtfeld-igs+ are now BUILT-IN (pipeline/backends.py), so most",
+    "lichtfeld-mrnf is now BUILT-IN (pipeline/backends.py), so most",
     "machines need NO entry here at all — the default exec path ../LichtFeld-Studio/",
     "build/LichtFeld-Studio just works when the repo is a sibling of reconstudio/.",
     "Only add an override below if this machine's build lives somewhere else; you",
