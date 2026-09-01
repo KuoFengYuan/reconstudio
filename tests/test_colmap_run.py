@@ -677,3 +677,14 @@ def test_sift_size_explicit_value_is_passed_through(patched, imgroot, vocab, tmp
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
                             sift_max_image_size="1920", max_image_size="8192"), r)
     assert _sift_px(r) == "1920"        # an explicit choice always wins over auto
+
+
+def test_caspar_with_the_default_camera_model_is_warned_about(patched, imgroot,
+                                                             vocab, tmp_path):
+    """OPENCV is the default camera model, but Caspar only accepts SIMPLE_RADIAL /
+    PINHOLE and silently skips every image otherwise — so that combination has to
+    be called out rather than quietly producing a reconstruction with no BA."""
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            mapper="incremental", ba_backend="caspar"), r)
+    assert any("Caspar only supports SIMPLE_RADIAL / PINHOLE" in m for m in r.logs)

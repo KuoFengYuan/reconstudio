@@ -112,7 +112,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
     params = {
         "image_root": image_root, "workspace": workspace, "folders": folders,
         "stages": stages,
-        "camera_model": g("CAMERA_MODEL", "SIMPLE_RADIAL"),
+        "camera_model": g("CAMERA_MODEL", "OPENCV"),
         "camera_mode": g("CAMERA_MODE", "per_folder"),
         "max_features": g("MAX_FEATURES", "4096"),
         "matcher": g("MATCHER", "vocab"),

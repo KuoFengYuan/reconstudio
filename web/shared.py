@@ -45,7 +45,7 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
 
 # --- form pre-fill defaults / enums (mirror the pipeline module defaults) --- #
 COLMAP_DEFAULTS = {
-    "CAMERA_MODEL": "SIMPLE_RADIAL", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
+    "CAMERA_MODEL": "OPENCV", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
     "MATCHER": "vocab", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
     # multi-camera rig: off by default; RIG_MODE picks how frames are grouped.
     "RIG_ENABLE": "0", "RIG_MODE": "auto", "RIG_REGEX": "",

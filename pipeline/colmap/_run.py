@@ -44,7 +44,11 @@ COLMAP_BIN = settings.colmap_bin
 COLMAP_DEFAULTS = {
     "vocab_tree": str(Path.home() / ".cache/colmap/vocab_tree_faiss_flickr100K_words256K.bin"),
     "vocab_tree_url": "https://github.com/colmap/colmap/releases/download/3.11.1/vocab_tree_faiss_flickr100K_words256K.bin",
-    "camera_model": "SIMPLE_RADIAL", "max_features": "4096", "camera_mode": "per_folder",
+    # OPENCV (k1,k2,p1,p2) describes a real lens far better than SIMPLE_RADIAL's single
+    # parameter, which matters for metric/aerial work. Note the Caspar BA backend only
+    # accepts SIMPLE_RADIAL/PINHOLE and silently skips every image otherwise — _setup
+    # warns when that combination is selected.
+    "camera_model": "OPENCV", "max_features": "4096", "camera_mode": "per_folder",
     "matcher": "vocab", "seq_overlap": "10", "num_matches": "50",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",

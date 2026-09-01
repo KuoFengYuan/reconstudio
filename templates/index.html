@@ -537,9 +537,21 @@
         <summary>Camera</summary>
         <div class="gbody">
           <div class="prow">
-            <label class="plabel" for="cm_camera_model"><span class="ptext">CAMERA_MODEL</span></label>
+            <label class="plabel" for="cm_camera_model"><span class="ptext">CAMERA_MODEL</span>
+              <span class="info" onclick="togHint(event,'h_cm_camera_model')" title="說明">?</span>
+            </label>
             <div class="pctl"><input id="cm_camera_model" name="CAMERA_MODEL" value="{{ colmap_defaults.CAMERA_MODEL }}"></div>
           </div>
+          <div class="fhint" id="h_cm_camera_model">鏡頭畸變模型。<b>預設 OPENCV</b>(k1,k2,p1,p2)——
+            比 SIMPLE_RADIAL 的單一參數更貼近真實鏡頭,測繪/航拍用這個。<br>
+            <b>兩個要注意的地方:</b><br>
+            ‧ <b>BA 後端選 caspar 時必須改成 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過每一張影像、
+            完全不做 BA(面板會在開跑前警告,但不會阻止)。<br>
+            ‧ 自率定發散時,COLMAP 的 <code>Mapper.max_extra_param</code>(預設 1.0)會把任何畸變參數
+            絕對值 &gt; 1 的相機判定為壞相機並<b>靜默丟棄</b>。正常鏡頭的 k1/k2 遠小於 1 所以不會踩到,
+            但**開了 rig 的話影響會放大** —— 一個 frame 裡只要有一顆鏡頭被判壞,整次曝光(全部鏡頭)
+            都會被一起退掉。registered images 數量異常少時,往這個方向查。<br>
+            其他可用值:PINHOLE(無畸變)、SIMPLE_RADIAL、RADIAL、FULL_OPENCV(參數多、更容易自率定發散)。</div>
           <div class="prow">
             <label class="plabel" for="cm_camera_mode"><span class="ptext">CAMERA_MODE</span>
               <span class="info" onclick="togHint(event,'h_cm_camera_mode')" title="說明">?</span>
