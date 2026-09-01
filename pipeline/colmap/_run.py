@@ -24,6 +24,7 @@ from ..config import settings
 from ..runner import PipelineError, Runner
 from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
+from ._intrinsics import discover_calibrations, match_to_cameras
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
 from ._rig import (
@@ -726,12 +727,36 @@ def _stage_rig_stage(c: _Ctx) -> None:
             c.r.log("rig: that choice is a weak guess; set 參考鏡頭 (RIG_REF_CAMERA) "
                     "to the nadir/most stable head if you know which it is")
 
+    # Known interior orientation, if the dataset shipped a calibration certificate.
+    # Scanned for rather than configured: vendors drop it in with the imagery under
+    # arbitrary names, and a document either parses as a calibration or it does not.
+    intrinsics: dict[str, tuple[str, list[float]]] = {}
+    cals, src = discover_calibrations([Path(c.orig_root or c.img_root),
+                                      Path(c.orig_root or c.img_root).parent])
+    if cals:
+        model = str(c.d["camera_model"]).upper()
+        hit, missed = match_to_cameras(cals, grouping.cameras)
+        c.r.log(f"intrinsics: {len(cals)} calibrated head(s) found in {Path(src).name}")
+        for cam, cal in sorted(hit.items()):
+            params = cal.colmap_params(model)
+            intrinsics[cam] = (model, params)
+            cx, cy = cal.principal_point_px()
+            c.r.log(f"intrinsics:   {cam} <- '{cal.name}' f={cal.focal_px:.1f} px "
+                    f"(C={cal.c_mm} mm / {cal.pixel_size_mm * 1000:.2f} um), "
+                    f"pp=({cx:.1f}, {cy:.1f}) vs centre "
+                    f"({cal.width / 2:.1f}, {cal.height / 2:.1f}) — {cal.detail}")
+        if missed:
+            c.r.log(f"intrinsics: no calibration matched {missed} — those heads keep "
+                    "COLMAP's EXIF-derived guess")
+        c.r.log("intrinsics: distortion is left at zero for the bundle to solve; only "
+                "focal length and principal point come from the certificate")
+
     stage_root = c.ws / "rig_images"
     stage_root.mkdir(parents=True, exist_ok=True)
     c.rig_orig_names = build_staging(grouping, Path(c.img_root), stage_root)
     n = len(c.rig_orig_names)
     c.rig_config = c.ws / "rig_config.json"
-    ref = write_rig_config(grouping, c.rig_config, ref_camera)
+    ref = write_rig_config(grouping, c.rig_config, ref_camera, intrinsics)
     c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")
 
     # The staged tree IS the dataset from here on, and its shape is always one

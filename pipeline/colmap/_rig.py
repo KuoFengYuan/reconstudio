@@ -360,12 +360,19 @@ def build_staging(grouping: RigGrouping, img_root: Path,
 
 
 def write_rig_config(grouping: RigGrouping, path: Path,
-                     ref_camera: str = "") -> str:
+                     ref_camera: str = "",
+                     intrinsics: dict[str, tuple[str, list[float]]] | None = None,
+                     ) -> str:
     """Emit rig_config.json for `colmap rig_configurator`. Returns the ref camera.
 
     Extrinsics are deliberately omitted: they are derived by passing an existing
     (rig-less) reconstruction as --input_path, which is both easier and better
     conditioned than hand-measured values.
+
+    `intrinsics` maps a camera id to (model_name, params). Supplying it is how a
+    vendor calibration reaches COLMAP per head: ApplyRigConfig copies these into
+    the database (scene/rig.cc), so each head gets its own focal length instead of
+    one EXIF guess shared by the whole rig.
     """
     cams = grouping.cameras
     if not cams:
@@ -378,8 +385,21 @@ def write_rig_config(grouping: RigGrouping, path: Path,
     # walks config.cameras in array order and Rig::AddSensor aborts with
     # "The reference sensor needs to be added first" (rig.cc:42) if a non-ref
     # sensor is reached before AddRefSensor has run.
-    entries: list[dict[str, object]] = [{"image_prefix": f"{ref}/", "ref_sensor": True}]
-    entries += [{"image_prefix": f"{cam}/"} for cam in cams if cam != ref]
+    intrinsics = intrinsics or {}
+
+    def entry(cam: str, is_ref: bool) -> dict[str, object]:
+        e: dict[str, object] = {"image_prefix": f"{cam}/"}
+        if is_ref:
+            e["ref_sensor"] = True
+        cal = intrinsics.get(cam)
+        if cal:
+            model, params = cal
+            e["camera_model_name"] = model
+            e["camera_params"] = list(params)
+        return e
+
+    entries = [entry(ref, True)]
+    entries += [entry(cam, False) for cam in cams if cam != ref]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps([{"cameras": entries}], indent=2), encoding="utf-8")
     return ref
