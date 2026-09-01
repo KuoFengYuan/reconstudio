@@ -252,22 +252,6 @@ def _setup(p: dict, r: Runner) -> _Ctx:
                          f"'hierarchical' (got: {mapper})")
     if camera_mode not in ("per_folder", "single"):
         raise ValueError(f"CAMERA_MODE must be 'per_folder' or 'single' (got: {camera_mode})")
-    # We hand rig_configurator a config with no sensor_from_rig, so the mapper has to
-    # be able to calibrate the rig itself. Only the global pipeline can: it solves the
-    # unknown extrinsics per connected component (global_pipeline_test.cc
-    # MultiComponentsWithUnknownSensorFromRig). The incremental family instead bails
-    # with "Discarding reconstruction due to unknown sensor_from_rig poses"
-    # (incremental_pipeline.cc:777) — and only after extraction and matching have
-    # already run, so this has to be caught up front.
-    if bool(d["rig_enable"]) and mapper != "global":
-        raise ValueError(
-            f"MAPPER={mapper} cannot start from a rig with unknown extrinsics — only "
-            "'global' calibrates sensor_from_rig itself; the others abort after "
-            "extraction and matching have already run.\n"
-            "Either set MAPPER=global (it also refines the rig via "
-            "--GlobalMapper.refine_sensor_from_rig), or turn the rig off.\n"
-            "Note the trade-off: global uses the EO gravity priors but NOT the "
-            "positions, while pose_prior uses the positions but not gravity.")
     ba_backend = str(d["ba_backend"]).lower()
     if ba_backend not in ("ceres", "caspar"):
         raise ValueError(f"BA_BACKEND must be 'ceres' or 'caspar' (got: {ba_backend})")
@@ -771,6 +755,13 @@ def _stage_rig_configure(c: _Ctx) -> None:
     """
     if not c.rig_enable or not c.stage_on("rig"):
         return
+    if c.mapper != "global":
+        # The incremental family refuses to start while sensor_from_rig is unknown
+        # (incremental_pipeline.cc:563), so those mappers get their rig from
+        # _stage_rig_calibrate instead, which can pass --input_path.
+        c.r.log(f"rig: deferring rig_configurator — MAPPER={c.mapper} needs known "
+                "extrinsics, so they are derived from an initial reconstruction first")
+        return
     c.r.banner(f"rig_configurator -> {c.db}")
     c.r.run([COLMAP_BIN, "rig_configurator",
              "--database_path", str(c.db),
@@ -896,6 +887,46 @@ def _stage_calibrate(c: _Ctx) -> None:
             sentinel.touch()
         else:
             c.r.log("skip calibrate (sentinel exists; set FORCE=1 to redo)")
+
+
+def _stage_rig_calibrate(c: _Ctx) -> None:
+    """3b. Derive sensor_from_rig for the mappers that need it known in advance.
+
+    Our rig config carries no extrinsics, and only the global pipeline calibrates
+    them itself; `mapper` / `pose_prior_mapper` / `hierarchical_mapper` abort with
+    UNKNOWN_SENSOR_FROM_RIG (incremental_pipeline.cc:563). COLMAP's own remedy is
+    the two-pass route named in that error: reconstruct once WITHOUT rigs, then
+    hand that reconstruction to rig_configurator, which averages the relative
+    poses between registered sensors into sensor_from_rig and writes them to the
+    database (scene/rig.cc UpdateRigAndCameraCalibsFromReconstruction).
+
+    The first pass is throwaway — it only has to register enough frames for that
+    average — so it runs a bare global_mapper rather than the configured one. It
+    lands in its own directory so the real mapper's sparse/ is untouched.
+    """
+    if not c.rig_enable or c.mapper == "global" or not c.stage_on("rig"):
+        return
+    init = c.ws / "sparse_rig_init"
+    if c.need(init / "0" / "cameras.bin"):
+        c.r.banner(f"rig calibration pass 1/2: global_mapper without rigs -> {init}")
+        init.mkdir(parents=True, exist_ok=True)
+        c.r.run([COLMAP_BIN, "global_mapper", "--database_path", str(c.db),
+                 "--image_path", c.img_root, "--output_path", str(init)])
+    else:
+        c.r.log(f"skip rig init pass ({init.name}/0 exists; set FORCE=1 to redo)")
+    if not (init / "0" / "cameras.bin").exists():
+        raise PipelineError(
+            f"the rig calibration pass produced no model in {init}/0, so "
+            "sensor_from_rig cannot be derived. Reconstruction is failing before the "
+            "rig is even involved — check the matches, or set MAPPER=global to let it "
+            "calibrate the rig itself in one pass.")
+
+    c.r.banner(f"rig calibration pass 2/2: rig_configurator --input_path {init / '0'} "
+               f"-> {c.db}")
+    c.r.run([COLMAP_BIN, "rig_configurator",
+             "--database_path", str(c.db),
+             "--rig_config_path", str(c.rig_config),
+             "--input_path", str(init / "0")])
 
 
 def _stage_mapper(c: _Ctx) -> None:
@@ -1156,6 +1187,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_gps_inject(c)        # 1b. inject TIFF/non-JPEG EXIF GPS into DB pose_priors
     _stage_match(c)             # 2. matcher
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)
+    _stage_rig_calibrate(c)     # 3b. derive sensor_from_rig for non-global mappers
     _stage_mapper(c)            # 4. mapper -> sparse/0
     _stage_simplify(c)          # 4a. simplify_images (optional)
     _stage_align(c)             # 4b. model_aligner (optional GPS)

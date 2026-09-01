@@ -476,7 +476,13 @@
           <div class="fhint" id="h_cm_rig_enable">開啟後會多兩個階段:先把影像重新整理成
             <code>&lt;相機&gt;/&lt;曝光編號&gt;</code> 的符號連結樹(原始檔不動),抽完特徵再跑
             <code>rig_configurator</code> 把 rig/frames 寫進資料庫。分組結果會印在 log,
-            <b>沒有任何一個曝光被所有相機覆蓋時會直接中止</b>(那種 rig 等於沒有約束力)。</div>
+            <b>沒有任何一個曝光被所有相機覆蓋時會直接中止</b>(那種 rig 等於沒有約束力)。<br>
+            <b>跟 MAPPER 的關係 —— 自動處理,不用你設定:</b>產生的 rig 設定不帶鏡頭外參。
+            <code>global</code> 能自己把未知外參標定出來,所以是<b>單遍</b>重建。
+            <code>pose_prior</code> / <code>incremental</code> / <code>hierarchical</code>
+            要求外參必須已知,會自動改走<b>兩遍</b>:先不帶 rig 重建一次 →
+            <code>rig_configurator --input_path</code> 從那個重建平均出外參寫回資料庫 →
+            再用你選的 mapper 正式重建。代價是重建時間約兩倍。</div>
           <div class="prow">
             <label class="plabel" for="cm_rig_mode"><span class="ptext">分組方式</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_mode')" title="說明">?</span>

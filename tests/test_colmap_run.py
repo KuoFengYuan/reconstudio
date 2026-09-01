@@ -717,25 +717,42 @@ def test_prior_std_explicit_value_overrides_auto_per_axis():
     assert _run._resolve_prior_std(C()) == (0.05, 0.05, 0.5)
 
 
-def test_rig_with_an_incremental_mapper_is_refused_up_front(patched, vocab, tmp_path):
-    """Our rig config carries no sensor_from_rig, and only the global pipeline can
-    calibrate that itself; the incremental family aborts — but only after extraction
-    and matching have burned their time, so this must fail before any COLMAP call."""
+def test_rig_with_pose_prior_derives_the_extrinsics_first(patched, vocab, tmp_path):
+    """rig + pose_prior IS supported by COLMAP, but only with sensor_from_rig known
+    (incremental_pipeline.cc:563). We supply none, so the extrinsics have to be
+    derived from a rig-less reconstruction via rig_configurator --input_path."""
     root = tmp_path / "rig_images"
     _make_rig_images(root)
+    ws = tmp_path / "ws"
     r = FakeRunner()
-    for mapper in ("pose_prior", "incremental", "hierarchical"):
-        with pytest.raises(ValueError, match="unknown extrinsics"):
-            _run.run_colmap(_params(root, tmp_path / f"ws_{mapper}", vocab,
-                                    rig_enable=True, layout="multi", mapper=mapper), r)
-    assert r.calls == []          # nothing was executed
+    patched.gps = "full"          # pose_prior requires a prior on every image
+    _run.run_colmap(_params(root, ws, vocab, rig_enable=True, layout="multi",
+                            mapper="pose_prior"), r)
+
+    subs = r.subcommands()
+    # pass 1 is a bare global_mapper into its own directory, so sparse/ is untouched
+    assert subs.count("global_mapper") == 1
+    init = r.argv_for("global_mapper")
+    assert init[init.index("--output_path") + 1] == str(ws / "sparse_rig_init")
+    # then the rig is configured FROM that model, and only then does pose_prior run
+    rig = r.argv_for("rig_configurator")
+    assert rig[rig.index("--input_path") + 1] == str(ws / "sparse_rig_init" / "0")
+    assert subs.index("rig_configurator") > subs.index("global_mapper")
+    assert subs.index("pose_prior_mapper") > subs.index("rig_configurator")
 
 
-def test_rig_with_the_global_mapper_is_allowed(patched, vocab, tmp_path):
-    root = tmp_path / "rig_images2"
+def test_rig_with_global_stays_single_pass(patched, vocab, tmp_path):
+    """global calibrates unknown rig extrinsics itself, so it must NOT pay for the
+    extra reconstruction — and its rig_configurator takes no --input_path."""
+    root = tmp_path / "rig_images_g"
     _make_rig_images(root)
     r = FakeRunner()
-    _run.run_colmap(_params(root, tmp_path / "ws", vocab,
-                            rig_enable=True, layout="multi", mapper="global"), r)
-    assert "rig_configurator" in r.subcommands()
-    assert "global_mapper" in r.subcommands()
+    _run.run_colmap(_params(root, tmp_path / "ws_g", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+    assert r.subcommands().count("global_mapper") == 1
+    assert "sparse_rig_init" not in " ".join(sum(r.calls, []))
+    rig = r.argv_for("rig_configurator")
+    assert "--input_path" not in rig
+
+
+
