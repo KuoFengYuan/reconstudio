@@ -624,3 +624,46 @@ def test_rig_splits_cameras_by_filename_prefix_when_there_are_no_folders(
     cfg = Path(argv[argv.index("--rig_config_path") + 1])
     prefixes = [c["image_prefix"] for c in json.loads(cfg.read_text())[0]["cameras"]]
     assert sorted(prefixes) == ["alpha/", "bravo/"]
+
+
+# --- SIFT extraction size --------------------------------------------------
+def _sift_px(r: FakeRunner) -> str | None:
+    fe = r.argv_for("feature_extractor")
+    f = "--FeatureExtraction.max_image_size"
+    return fe[fe.index(f) + 1] if f in fe else None
+
+
+def test_sift_size_is_left_to_colmap_when_blank(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert _sift_px(r) is None          # COLMAP's -1, which behaves like 3200
+
+
+def test_sift_size_auto_follows_the_undistort_cap(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="auto", max_image_size="4096"), r)
+    assert _sift_px(r) == "4096"
+
+
+def test_sift_size_auto_is_clamped_to_the_gpu_ceiling(patched, imgroot, vocab, tmp_path):
+    # SiftGPU doubles this value (first_octave=-1), so 8192 is already -maxd 16384
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="auto", max_image_size="20000"), r)
+    assert _sift_px(r) == str(_run.SIFT_MAX_PX)
+
+
+def test_sift_size_auto_without_an_undistort_cap_uses_the_ceiling(
+        patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="auto"), r)
+    assert _sift_px(r) == str(_run.SIFT_MAX_PX)
+
+
+def test_sift_size_explicit_value_is_passed_through(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="1920", max_image_size="8192"), r)
+    assert _sift_px(r) == "1920"        # an explicit choice always wins over auto

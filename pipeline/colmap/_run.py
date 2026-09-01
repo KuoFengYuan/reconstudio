@@ -568,10 +568,10 @@ def _stage_extract(c: _Ctx) -> None:
             # invisible unless set. Option is FeatureExtraction.max_image_size on COLMAP
             # 4.x (was SiftExtraction.* on older builds). Pass only when set; higher = more
             # detail but slower and can OOM on huge aerials, lower = coarser/viewpoint-robust.
-            sift_size = (["--FeatureExtraction.max_image_size", c.sift_max_image_size]
-                         if c.sift_max_image_size else [])
-            if c.sift_max_image_size:
-                c.r.log(f"FeatureExtraction.max_image_size={c.sift_max_image_size} "
+            sift_px = _resolve_sift_size(c)
+            sift_size = ["--FeatureExtraction.max_image_size", sift_px] if sift_px else []
+            if sift_px:
+                c.r.log(f"FeatureExtraction.max_image_size={sift_px} "
                         "(COLMAP default -1 behaves like 3200)")
             c.r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(c.db),
                      "--image_path", c.img_root, "--image_list_path", str(c.lst), *cam,
@@ -580,6 +580,43 @@ def _stage_extract(c: _Ctx) -> None:
                      *sift_size])
         else:
             c.r.log("skip extract (database.db exists; set FORCE=1 to redo)")
+
+
+# SiftGPU is handed EffMaxImageSize() * (1 << -min(0, first_octave)) as its -maxd
+# (feature/sift.cc), and first_octave defaults to -1, so whatever we ask for is
+# DOUBLED before it reaches the GPU. 8192 therefore already means -maxd 16384,
+# which is the practical ceiling; above it extraction fails on large aerials.
+SIFT_MAX_PX = 8192
+
+
+def _resolve_sift_size(c: _Ctx) -> str:
+    """The --FeatureExtraction.max_image_size to pass, or "" to leave it default.
+
+    "auto" ties feature extraction to the resolution the run actually keeps: it is
+    incoherent to train on 8192 px imagery while solving the poses at COLMAP's
+    silent 3200 px default. It follows the undistort cap when there is one, else
+    goes as high as is safe, and never exceeds SIFT_MAX_PX.
+
+    Deliberately NOT the default: for a wide-baseline oblique rig, coarser
+    features are often the more robust choice across the nadir/oblique viewpoint
+    gap, so raising this is a judgement call rather than a free win.
+    """
+    want = (c.sift_max_image_size or "").strip().lower()
+    if not want:
+        return ""
+    if want != "auto":
+        return c.sift_max_image_size
+    cap = SIFT_MAX_PX
+    if c.max_image_size:
+        try:
+            undistort_px = int(c.max_image_size)
+        except ValueError:
+            undistort_px = 0
+        if undistort_px > 0:
+            cap = min(undistort_px, SIFT_MAX_PX)
+    c.r.log(f"SIFT_MAX_IMAGE_SIZE=auto -> {cap} px "
+            f"(undistort cap={c.max_image_size or 'none'}, ceiling={SIFT_MAX_PX})")
+    return str(cap)
 
 
 def _stage_rig_stage(c: _Ctx) -> None:
