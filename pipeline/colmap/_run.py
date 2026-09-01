@@ -97,10 +97,11 @@ COLMAP_DEFAULTS = {
     "cm_loop_matches": "",
     # feature_extractor focal seed for uncalibrated large scenes (h3dgs uses 0.5); "" = COLMAP default.
     "focal_factor": "",
-    # feature_extractor SIFT extraction longest-side cap. "" = COLMAP's built-in default of
-    # 3200 (it silently downscales above that before detecting SIFT). Set higher to extract
-    # at full detail, or lower to force coarser, more viewpoint-robust features.
-    "sift_max_image_size": "",
+    # feature_extractor SIFT extraction longest-side cap. "auto" (default) follows the
+    # undistort cap, bounded by SIFT_MAX_PX — COLMAP's own default silently extracts at
+    # 3200 px, which throws away the resolution a high-res run deliberately keeps. Use a
+    # number to pin it (lower = coarser, more viewpoint-robust), or -1 for COLMAP's default.
+    "sift_max_image_size": "auto",
     # image_undistorter longest-side cap (h3dgs uses 2048); "" = no cap.
     "max_image_size": "",
     # optional foreground masks: undistort them through the same cameras as the images.

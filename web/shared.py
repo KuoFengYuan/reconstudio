@@ -77,7 +77,7 @@ COLMAP_DEFAULTS = {
     "GPS_ALIGN": "0", "GPS_ALIGN_MAX_ERROR": "3.0",
     # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
     "CM_N_SEQ": "0", "CM_N_QUAD": "10", "CM_N_LOOP": "5", "CM_N_GPS": "25",
-    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "SIFT_MAX_IMAGE_SIZE": "",
+    "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "SIFT_MAX_IMAGE_SIZE": "auto",
     "MAX_IMAGE_SIZE": "", "MASKS_DIR": "",
     "SIMPLIFY": "0", "SIMPLIFY_MULT_MIN_DIST": "10",
     "REORIENT": "0", "REORIENT_TARGET_MED_DIST": "20", "REORIENT_UPSCALE": "0",

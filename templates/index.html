@@ -559,19 +559,21 @@
             <label class="plabel" for="cm_sift_size"><span class="ptext">SIFT_MAX_IMAGE_SIZE</span>
               <span class="info" onclick="togHint(event,'h_cm_sift_size')" title="說明">?</span>
             </label>
-            <div class="pctl"><input id="cm_sift_size" name="SIFT_MAX_IMAGE_SIZE" value="{{ colmap_defaults.SIFT_MAX_IMAGE_SIZE }}" placeholder="留空=預設(~3200) / auto / 數值"></div>
+            <div class="pctl"><input id="cm_sift_size" name="SIFT_MAX_IMAGE_SIZE" value="{{ colmap_defaults.SIFT_MAX_IMAGE_SIZE }}" placeholder="auto / 數值 / -1"></div>
           </div>
-          <div class="fhint" id="h_cm_sift_size">抽 SIFT 前會把影像長邊縮到此值。<b>留空 = COLMAP 預設,
-            行為等同 3200 px,而且完全不會提示</b> —— 注意 <b>-1 不是「全跑」</b>,它就是 3200。<br>
-            填 <code>auto</code> = 跟著下面「去畸變輸出」的 MAX_IMAGE_SIZE 走(沒設就取上限),
+          <div class="fhint" id="h_cm_sift_size">抽 SIFT 前會把影像長邊縮到此值。
+            <b>預設 <code>auto</code></b> —— 跟著下面「去畸變輸出」的 MAX_IMAGE_SIZE 走(沒設就取上限),
             並且**永遠不超過 8192**。為什麼是 8192:COLMAP 送給 SiftGPU 的 <code>-maxd</code> 是
             這個值 × 2(<code>first_octave</code> 預設 -1 的補償),所以 8192 已經等於 16384,
             再往上大張航拍會 <b>GPU OOM 直接 crash</b>。<br>
             <b>但不是越大越好。</b>調小(例如 1920)會得到更粗、對大視角變化更穩健的特徵 ——
             <b>傾斜 rig 跨正射↔斜視的匹配常常反而更好</b>。所以 auto 不是預設值:
             要不要拉高是取捨,不是免費的。<br>
-            判斷方式:如果你保留了高解析影像卻讓這格留空,那姿態是在 3200 px 上解出來的,
-            跟你留的解析度不相稱;但若匹配數本來就吃緊(斜鏡頭觀測少),就別拉大。</div>
+            填數值 = 釘死在該值。填 <code>-1</code> = 交還給 COLMAP 自己決定
+            (那等同 3200 px,而且不會有任何提示 —— 注意 <b>-1 不是「全解析」</b>)。<br>
+            判斷方式:如果你保留了高解析影像卻用 -1,姿態就是在 3200 px 上解出來的,
+            跟你留的解析度不相稱;但若匹配數本來就吃緊(斜鏡頭觀測少),就往下調而不是往上。
+            實際採用的數值每次都會印在 log。</div>
           <div class="prow">
             <label class="plabel" for="cm_focal_factor"><span class="ptext">FOCAL_FACTOR</span>
               <span class="info" onclick="togHint(event,'h_cm_focal_factor')" title="說明">?</span>

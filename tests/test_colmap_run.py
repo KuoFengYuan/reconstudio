@@ -633,10 +633,20 @@ def _sift_px(r: FakeRunner) -> str | None:
     return fe[fe.index(f) + 1] if f in fe else None
 
 
-def test_sift_size_is_left_to_colmap_when_blank(patched, imgroot, vocab, tmp_path):
+def test_sift_size_defaults_to_auto(patched, imgroot, vocab, tmp_path):
+    """The default has to be auto, not blank: blank means COLMAP silently extracts
+    at 3200 px, which quietly discards the resolution a high-res run keeps."""
     r = FakeRunner()
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
-    assert _sift_px(r) is None          # COLMAP's -1, which behaves like 3200
+    assert _sift_px(r) == str(_run.SIFT_MAX_PX)
+
+
+def test_sift_size_can_be_handed_back_to_colmap(patched, imgroot, vocab, tmp_path):
+    # -1 is COLMAP's own sentinel, so it stays the escape hatch from auto
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            sift_max_image_size="-1"), r)
+    assert _sift_px(r) == "-1"
 
 
 def test_sift_size_auto_follows_the_undistort_cap(patched, imgroot, vocab, tmp_path):

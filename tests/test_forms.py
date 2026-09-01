@@ -254,3 +254,18 @@ def test_build_colmap_params_focal_factor_accepts_float():
     assert p["focal_factor"] == "1.25"
     with pytest.raises(ValueError):
         _build({"FOCAL_FACTOR": "x"})
+
+
+def test_sift_max_image_size_accepts_auto_and_the_colmap_sentinel():
+    """The panel pre-fills "auto"; a digits-only validator would reject it here
+    and the feature would be unreachable from the UI."""
+    assert _build({"SIFT_MAX_IMAGE_SIZE": "auto"})["sift_max_image_size"] == "auto"
+    assert _build({"SIFT_MAX_IMAGE_SIZE": "-1"})["sift_max_image_size"] == "-1"
+    assert _build({"SIFT_MAX_IMAGE_SIZE": "8192"})["sift_max_image_size"] == "8192"
+    assert _build({})["sift_max_image_size"] == "auto"          # default
+
+
+def test_sift_max_image_size_still_rejects_nonsense():
+    import pytest
+    with pytest.raises(ValueError, match="SIFT_MAX_IMAGE_SIZE"):
+        _build({"SIFT_MAX_IMAGE_SIZE": "big"})

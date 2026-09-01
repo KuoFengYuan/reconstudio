@@ -164,7 +164,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "cm_n_loop": g("CM_N_LOOP", "5"), "cm_n_gps": g("CM_N_GPS", "25"),
         "cm_loop_matches": (form.get("CM_LOOP_MATCHES") or "").strip(),
         "focal_factor": (form.get("FOCAL_FACTOR") or "").strip(),
-        "sift_max_image_size": (form.get("SIFT_MAX_IMAGE_SIZE") or "").strip(),
+        "sift_max_image_size": (form.get("SIFT_MAX_IMAGE_SIZE") or "auto").strip(),
         "max_image_size": (form.get("MAX_IMAGE_SIZE") or "").strip(),
         "masks_dir": (form.get("MASKS_DIR") or "").strip().rstrip("/"),
         "simplify": bool(form.get("SIMPLIFY")),
@@ -213,11 +213,17 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
             raise ValueError(f"{key} must be a number") from None
     # optional numerics: validated only when provided (blank = "use COLMAP default")
     for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
-                       ("sift_max_image_size", "SIFT_MAX_IMAGE_SIZE"),
                        ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),
                        ("hm_image_overlap", "HM_IMAGE_OVERLAP")):
         if params[key] and not params[key].isdigit():
             raise ValueError(f"{label} must be a positive integer (or blank)")
+    # SIFT size also takes "auto" (follow the undistort cap) and -1 (COLMAP's own
+    # default). Without this the "auto" the panel now pre-fills would be rejected
+    # here before the pipeline ever saw it.
+    sift = params["sift_max_image_size"].lower()
+    if sift and sift not in ("auto", "-1") and not sift.isdigit():
+        raise ValueError(
+            "SIFT_MAX_IMAGE_SIZE must be a positive integer, 'auto', -1, or blank")
     if params["hm_num_workers"]:  # -1 = auto, so allow a leading minus
         try:
             int(params["hm_num_workers"])
