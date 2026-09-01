@@ -302,6 +302,38 @@ def group_images(names: list[str], mode: str, regex: str = "",
     return out
 
 
+def recommend_ref_camera(grouping: RigGrouping,
+                         eo_stems: set[str] | None = None) -> tuple[str, str]:
+    """Pick the rig's reference sensor. Returns (camera, why).
+
+    The other heads' extrinsics are expressed relative to this one, so it wants
+    to be the best-determined camera in the rig — in an oblique block that is the
+    nadir head. Its name cannot be assumed, so we infer it:
+
+    1. When an EO CSV is supplied, the head whose *own* filenames match the CSV
+       IDs is by definition the one the surveyor measured, and it is also the only
+       head whose omega/phi/kappa may legally become gravity priors. That is a
+       direct, name-independent identification of the reference head.
+    2. Otherwise fall back to the head present in the most exposures — weak, but
+       it at least avoids picking a camera with dropped shots. The caller should
+       say so in the log, because at that point the choice is close to arbitrary.
+    """
+    cams = grouping.cameras
+    if not cams:
+        return "", "no cameras"
+
+    if eo_stems:
+        hits = {cam: sum(1 for n in table.values() if Path(n).stem in eo_stems)
+                for cam, table in grouping.frames.items()}
+        best = max(cams, key=lambda c: (hits.get(c, 0), -cams.index(c)))
+        if hits.get(best):
+            return best, (f"matches {hits[best]} EO CSV row(s) by filename, so it is the "
+                          "head the survey measured")
+
+    best = max(cams, key=lambda c: (len(grouping.frames[c]), -cams.index(c)))
+    return best, f"most exposures ({len(grouping.frames[best])}), no EO CSV to identify a head"
+
+
 def build_staging(grouping: RigGrouping, img_root: Path,
                   staging: Path) -> dict[str, str]:
     """Materialise <staging>/<camera>/<frame_key><ext> symlinks.

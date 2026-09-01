@@ -26,7 +26,8 @@ from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
-from ._rig import RIG_DEFAULTS, build_staging, group_auto, group_images, summarize, write_rig_config
+from ._rig import (RIG_DEFAULTS, build_staging, group_auto, group_images,
+                   recommend_ref_camera, summarize, write_rig_config)
 
 COLMAP_STAGES = ["stage", "extract", "rig", "gps_inject", "match", "calibrate", "mapper",
                  "simplify", "align", "undistort", "reorient"]
@@ -626,12 +627,32 @@ def _stage_rig_stage(c: _Ctx) -> None:
             "rig would constrain nothing. Check 遮罩/regex 設定 (rig_mode="
             f"{c.rig_mode!r}, regex={c.rig_regex!r}) or turn the rig off.")
 
+    # Reference sensor: honour an explicit choice, else recommend one. The EO CSV
+    # is the strongest available signal (the head it measures is the head whose
+    # angles may become gravity priors), so read its IDs when there is one.
+    ref_camera = c.rig_ref_camera
+    if not ref_camera:
+        eo_stems: set[str] = set()
+        if c.eo_csv:
+            try:
+                eo_stems = {row.stem for row in parse_eo_csv(Path(c.eo_csv))}
+            except Exception as exc:                    # noqa: BLE001
+                # A bad CSV is _resolve_eo_csv's problem to report; here it only
+                # costs us the better recommendation.
+                c.r.log(f"rig: could not read the EO CSV for the reference-sensor "
+                        f"recommendation ({exc}); falling back to exposure count")
+        ref_camera, why = recommend_ref_camera(grouping, eo_stems)
+        c.r.log(f"rig: auto-selected reference sensor '{ref_camera}' — {why}")
+        if not eo_stems:
+            c.r.log("rig: that choice is a weak guess; set 參考鏡頭 (RIG_REF_CAMERA) "
+                    "to the nadir/most stable head if you know which it is")
+
     stage_root = c.ws / "rig_images"
     stage_root.mkdir(parents=True, exist_ok=True)
     c.rig_orig_names = build_staging(grouping, Path(c.img_root), stage_root)
     n = len(c.rig_orig_names)
     c.rig_config = c.ws / "rig_config.json"
-    ref = write_rig_config(grouping, c.rig_config, c.rig_ref_camera)
+    ref = write_rig_config(grouping, c.rig_config, ref_camera)
     c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")
 
     # The staged tree IS the dataset from here on, and its shape is always one

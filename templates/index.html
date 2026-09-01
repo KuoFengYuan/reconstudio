@@ -512,11 +512,15 @@
             <label class="plabel" for="cm_rig_ref"><span class="ptext">RIG_REF_CAMERA(參考鏡頭)</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_ref')" title="說明">?</span>
             </label>
-            <div class="pctl"><input id="cm_rig_ref" name="RIG_REF_CAMERA" value="{{ colmap_defaults.RIG_REF_CAMERA }}" placeholder="留空 = 依字母序第一台"></div>
+            <div class="pctl"><input id="cm_rig_ref" name="RIG_REF_CAMERA" value="{{ colmap_defaults.RIG_REF_CAMERA }}" placeholder="留空 = 自動推薦"></div>
           </div>
-          <div class="fhint" id="h_cm_rig_ref">rig 的基準鏡頭,其他鏡頭的外參都相對它表示。
-            <b>傾斜攝影請填正射(nadir)那台</b>,它視角最穩、觀測最多。填相機代號(即資料夾名或 regex 的 cam 群組值)。
-            留空 = 依字母序取第一台。</div>
+          <div class="fhint" id="h_cm_rig_ref">rig 的基準鏡頭,其他鏡頭的外參都相對它表示,
+            所以要挑幾何最穩的那台(傾斜攝影就是正射那顆)。<br>
+            <b>留空 = 自動推薦,一般不用填。</b>推薦邏輯:<br>
+            ‧ 有填「外方位參數 CSV」時 → 選<b>檔名能對上 CSV ID 的那台</b>。那顆就是廠商實測的頭,
+            也是唯一有資格把 ω/φ/κ 寫成重力先驗的頭 —— 這是不靠名稱的直接判定。<br>
+            ‧ 沒有 CSV 時 → 選曝光數最多的那台,並在 log 標明「這是弱猜測」,提醒你手動指定。<br>
+            要手動填的話,填相機代號(資料夾名,或 regex 的 cam 群組值)。選擇結果都會印在 log。</div>
           <div class="prow">
             <label class="plabel" for="cm_rig_gps_tol"><span class="ptext">RIG_GPS_TOL（gps 模式,公尺）</span>
               <span class="info" onclick="togHint(event,'h_cm_rig_gps_tol')" title="說明">?</span>

@@ -10,14 +10,17 @@ unforgiving in two specific ways (both verified against the real binary):
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from pipeline.colmap._rig import (
+    RigGrouping,
     build_staging,
     compile_rig_regex,
     group_auto,
     group_images,
+    recommend_ref_camera,
     summarize,
     write_rig_config,
 )
@@ -188,3 +191,34 @@ def test_auto_reports_when_only_one_camera_can_be_identified():
     g, notes = group_auto([f"N/img_{i}.jpg" for i in range(3)])
     assert g.complete_frames() == []
     assert any("only one camera" in n for n in notes)
+
+
+# --- reference sensor recommendation --------------------------------------
+def test_ref_camera_recommendation_follows_the_eo_csv():
+    """The surveyed head is the right reference: it is the best-determined camera
+    and the only one whose omega/phi/kappa may become gravity priors. Identified
+    by data, not by name — the folder here is deliberately not called "nadir"."""
+    g, _ = group_auto(_oblique_block())
+    # pretend the CSV covers the "forward" head's own filenames
+    eo = {Path(n).stem for n in g.frames["forward"].values()}
+    cam, why = recommend_ref_camera(g, eo)
+    assert cam == "forward"
+    assert "EO CSV" in why
+
+
+def test_ref_camera_recommendation_falls_back_to_exposure_count():
+    g, _ = group_auto(_oblique_block())
+    g.frames["forward"].pop(next(iter(g.frames["forward"])))   # a dropped shot
+    cam, why = recommend_ref_camera(g, set())
+    assert cam != "forward"
+    assert "most exposures" in why
+
+
+def test_ref_camera_recommendation_is_deterministic_on_a_tie():
+    g, _ = group_auto(_oblique_block())
+    assert recommend_ref_camera(g, set())[0] == recommend_ref_camera(g, set())[0]
+    assert recommend_ref_camera(g, set())[0] == g.cameras[0]   # first in sorted order
+
+
+def test_ref_camera_recommendation_handles_an_empty_grouping():
+    assert recommend_ref_camera(RigGrouping(), set()) == ("", "no cameras")
