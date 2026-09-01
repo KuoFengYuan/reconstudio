@@ -909,30 +909,6 @@
       </details>
 
       <details class="grp">
-        <summary>大場景後處理（h3dgs simplify）</summary>
-        <div class="gbody">
-          <div class="hint">超大場景(數千張以上)才需要動。一般案子留預設不勾。</div>
-          <div class="prow">
-            <label class="plabel" for="cm_simplify"><span class="ptext">simplify_images</span>
-              <span class="info" onclick="togHint(event,'h_cm_simplify')" title="說明">?</span>
-            </label>
-            <div class="pctl"><input type="checkbox" id="cm_simplify" name="SIMPLIFY" value="1" {{ 'checked' if colmap_defaults.SIMPLIFY=='1' }}></div>
-          </div>
-          <div class="fhint" id="h_cm_simplify"><b>什麼時候開:</b>影像量很大、且重建結果有少數飛掉的離群相機在拖累場景時。
-            會剔除離群相機 + 沒配上 3D 點的觀測,讓下游訓練更乾淨、更省記憶體。
-            原始的 images.bin 會備份成 <code>images_heavy.bin</code>,所以是可回復的。h3dgs 流程預設會跑這步。</div>
-          <div class="prow">
-            <label class="plabel" for="cm_simplify_dist"><span class="ptext">SIMPLIFY_MULT_MIN_DIST</span>
-              <span class="info" onclick="togHint(event,'h_cm_simplify_dist')" title="說明">?</span>
-            </label>
-            <div class="pctl"><input id="cm_simplify_dist" name="SIMPLIFY_MULT_MIN_DIST" value="{{ colmap_defaults.SIMPLIFY_MULT_MIN_DIST }}"></div>
-          </div>
-          <div class="fhint" id="h_cm_simplify_dist">相機間距 &gt; 此倍率 × 中位數 就視為離群(預設 10)。
-            只在勾了 simplify_images 時生效。調小 = 剔得更兇(小心誤殺正常的航線邊緣);調大 = 只砍極端離群。</div>
-        </div>
-      </details>
-
-      <details class="grp">
         <summary>Pipeline（要跑哪些階段）</summary>
         <div class="gbody">
           <div class="prow stack">
