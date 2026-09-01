@@ -140,9 +140,11 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "spatial_max_distance": g("SPATIAL_MAX_DISTANCE", "100"),
         "spatial_ignore_z": "1" if form.get("SPATIAL_IGNORE_Z") else "0",
         # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
-        "prior_std_x": g("PRIOR_STD_X", "3.0"),
-        "prior_std_y": g("PRIOR_STD_Y", "3.0"),
-        "prior_std_z": g("PRIOR_STD_Z", "5.0"),
+        # "auto" = pick from the prior source (EO CSV vs bare EXIF GPS); see
+        # pipeline.colmap._run._resolve_prior_std.
+        "prior_std_x": g("PRIOR_STD_X", "auto"),
+        "prior_std_y": g("PRIOR_STD_Y", "auto"),
+        "prior_std_z": g("PRIOR_STD_Z", "auto"),
         "prior_robust_loss": "1",
         # Surveyor exterior-orientation CSV (ID,E,N,H,OMEGA,PHI,KAPPA): positions overwrite
         # the EXIF pose priors, ω/φ/κ enter only as the gravity column (global_mapper).
@@ -203,7 +205,8 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
                 "cm_n_seq", "cm_n_quad", "cm_n_loop", "cm_n_gps", "resize_max"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
-    for key in ("spatial_max_distance", "prior_std_x", "prior_std_y", "prior_std_z",
+    # the prior stds also take "auto", so they are checked separately below
+    for key in ("spatial_max_distance",
                 "ra_max_rotation_error_deg",
                 "gps_align_max_error", "simplify_mult_min_dist",
                 "reorient_target_med_dist", "reorient_upscale"):
@@ -211,6 +214,13 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
             float(params[key])
         except ValueError:
             raise ValueError(f"{key} must be a number") from None
+    for key in ("prior_std_x", "prior_std_y", "prior_std_z"):
+        if str(params[key]).strip().lower() == "auto":
+            continue
+        try:
+            float(params[key])
+        except ValueError:
+            raise ValueError(f"{key} must be a number or 'auto'") from None
     # optional numerics: validated only when provided (blank = "use COLMAP default")
     for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
                        ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),

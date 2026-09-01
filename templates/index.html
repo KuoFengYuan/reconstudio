@@ -713,19 +713,28 @@
             <div class="pctl"><input id="cm_dataset_name" name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}"></div>
           </div>
           <!-- 參數:僅 pose_prior 用得到 -->
-          <div class="pgrp" data-p="pose_prior">
-            <div class="prow stack">
-              <label class="plabel" for="cm_prior_std_x"><span class="ptext">PRIOR_STD_X / Y / Z</span>
-                <span class="info" onclick="togHint(event,'h_cm_prior_std')" title="說明">?</span>
-              </label>
-              <div class="pctl"><div class="row">
-                <input id="cm_prior_std_x" name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
-                <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
-                <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
-              </div></div>
-            </div>
-            <div class="fhint" id="h_cm_prior_std">GPS 位置精度 std (公尺):消費級 3~5、RTK ~0.02。</div>
+          <!-- Not scoped to pose_prior any more: the EXIF/EO injectors write this
+               covariance into the DB for every mapper, so hiding it behind
+               MAPPER=pose_prior made a field that always applies unreachable. -->
+          <div class="prow stack">
+            <label class="plabel" for="cm_prior_std_x"><span class="ptext">PRIOR_STD_X / Y / Z(公尺)</span>
+              <span class="info" onclick="togHint(event,'h_cm_prior_std')" title="說明">?</span>
+            </label>
+            <div class="pctl"><div class="row">
+              <input id="cm_prior_std_x" name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
+              <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
+              <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
+            </div></div>
           </div>
+          <div class="fhint" id="h_cm_prior_std">位置先驗的不確定度(公尺)—— 它決定 BA 要多相信這些先驗。
+            <b>預設 <code>auto</code>,依先驗來源自動決定:</b><br>
+            ‧ 有填「外方位參數 CSV」→ <b>0.05 / 0.05 / 0.10</b>。廠商交付的 EO 是後處理過的航測 POS,
+            公分級精度;若沿用消費級 GPS 的公尺級數值,BA 會把它當雜訊、幾乎完全忽略,
+            等於白灌先驗。<br>
+            ‧ 只有 EXIF GPS → <b>3.0 / 3.0 / 5.0</b>(消費級)。RTK 可手動填 ~0.02。<br>
+            三格可以各自填數字覆蓋(例如只釘 Z),填數字就以數字為準。實際採用值會印在 log。<br>
+            <b>注意:這個值只有在位置先驗真的被讀取時才有意義</b> —— MAPPER 選 <code>pose_prior</code>
+            才會把位置放進 BA;選 <code>global</code> 時只會用到重力,位置先驗不參與。</div>
           <!-- 外方位參數 CSV:測繪廠商交付的 EO。位置寫進 DB pose_priors 蓋掉 EXIF;
                ω/φ/κ 只能降成 gravity 欄(COLMAP DB 沒有旋轉先驗),僅 global_mapper 會用。 -->
           <div class="prow stack">

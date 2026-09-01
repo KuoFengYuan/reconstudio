@@ -62,7 +62,11 @@ COLMAP_DEFAULTS = {
     # sparse model into a local ENU frame in real-world metres.
     "gps_align": False, "gps_align_type": "enu", "gps_align_max_error": "3.0",
     # pose_prior_mapper: GPS position uncertainty (metres). Consumer GPS ~3-5 m; RTK ~0.02.
-    "prior_std_x": "3.0", "prior_std_y": "3.0", "prior_std_z": "5.0", "prior_robust_loss": "1",
+    # "auto" picks the uncertainty from the source of the priors: an EO CSV is
+    # post-processed airborne POS, so metre-level values would tell BA to ignore it.
+    # A number pins it. See _resolve_prior_std.
+    "prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "auto",
+    "prior_robust_loss": "1",
     # --- surveyor-supplied exterior orientation (EO) CSV ---
     # Path to a CSV of ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA (the adjusted
     # EO an aerial vendor ships alongside the imagery). Positions overwrite the EXIF-derived
@@ -594,6 +598,32 @@ def _stage_extract(c: _Ctx) -> None:
 SIFT_MAX_PX = 8192
 
 
+# Position-prior uncertainty in metres, by where the priors came from. A surveyor's
+# adjusted EO is post-processed airborne POS; declaring consumer-GPS metres for it
+# makes BA weight it to nothing, which silently wastes the priors.
+PRIOR_STD_EO = (0.05, 0.05, 0.10)
+PRIOR_STD_GPS = (3.0, 3.0, 5.0)
+
+
+def _resolve_prior_std(c: _Ctx) -> tuple[float, float, float]:
+    """(x, y, z) metres for the pose-position priors.
+
+    Each axis is taken from the form when it is a number, and otherwise ("auto",
+    the default) from the prior source: EO CSV -> centimetre-level, bare EXIF GPS
+    -> metre-level. Mixing is allowed, so a user can pin only Z.
+    """
+    src = PRIOR_STD_EO if c.eo_csv else PRIOR_STD_GPS
+    out = []
+    for key, fallback in zip(("prior_std_x", "prior_std_y", "prior_std_z"), src,
+                             strict=True):
+        raw = str(c.d[key]).strip().lower()
+        if raw in ("", "auto"):
+            out.append(fallback)
+        else:
+            out.append(float(raw))
+    return (out[0], out[1], out[2])
+
+
 def _resolve_sift_size(c: _Ctx) -> str:
     """The --FeatureExtraction.max_image_size to pass, or "" to leave it default.
 
@@ -746,8 +776,10 @@ def _stage_gps_inject(c: _Ctx) -> None:
     # EXIF pass below then only fills images the CSV didn't cover. Runs whenever a CSV is
     # given, independent of the GPS-option gate — the CSV is an explicit user request.
     if c.eo_map and c.db.exists():
-        std = (float(c.d["prior_std_x"]), float(c.d["prior_std_y"]), float(c.d["prior_std_z"]))
-        if min(std) >= 1.0:
+        std = _resolve_prior_std(c)
+        if std == PRIOR_STD_EO:
+            c.r.log(f"PRIOR_STD=auto -> {std} m (EO CSV = post-processed airborne POS)")
+        elif min(std) >= 1.0:
             c.r.log(f"note: PRIOR_STD={std} m is a consumer-GPS uncertainty, but an EO CSV "
                     "is post-processed airborne POS (typically 0.03-0.20 m). Leaving it "
                     "this loose lets BA largely ignore the priors you just supplied.")
@@ -770,7 +802,7 @@ def _stage_gps_inject(c: _Ctx) -> None:
         return
     # write a real covariance from the form's GPS uncertainty (metres) so the in-BA prior
     # alignment works for any mapper, not just pose_prior with --overwrite_priors_covariance.
-    std = (float(c.d["prior_std_x"]), float(c.d["prior_std_y"]), float(c.d["prior_std_z"]))
+    std = _resolve_prior_std(c)
     n_inj, n_have = inject_pose_priors(c.db, c.orig_root or c.img_root, c.lines, c.r, std)
     if n_inj:
         c.r.banner(f"GPS pose priors: injected {n_inj} from EXIF (TIFF/non-JPEG; "
@@ -881,9 +913,11 @@ def _stage_mapper(c: _Ctx) -> None:
                 sub, label = "pose_prior_mapper", "colmap pose_prior_mapper (GPS)"
                 extra = ["--use_robust_loss_on_prior_position", str(c.d["prior_robust_loss"]),
                          "--overwrite_priors_covariance", "1",
-                         "--prior_position_std_x", str(c.d["prior_std_x"]),
-                         "--prior_position_std_y", str(c.d["prior_std_y"]),
-                         "--prior_position_std_z", str(c.d["prior_std_z"])]
+                         *[a for pair in zip(("--prior_position_std_x",
+                                              "--prior_position_std_y",
+                                              "--prior_position_std_z"),
+                                             map(str, _resolve_prior_std(c)),
+                                             strict=True) for a in pair]]
             elif c.mapper == "hierarchical":
                 # h3dgs large-scene mapper: partition into overlapping sub-models,
                 # reconstruct in parallel, then merge — scales where global/incremental

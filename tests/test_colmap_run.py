@@ -688,3 +688,30 @@ def test_caspar_with_the_default_camera_model_is_warned_about(patched, imgroot,
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
                             mapper="incremental", ba_backend="caspar"), r)
     assert any("Caspar only supports SIMPLE_RADIAL / PINHOLE" in m for m in r.logs)
+
+
+# --- pose-prior uncertainty ------------------------------------------------
+def test_prior_std_auto_tightens_for_an_eo_csv(patched, imgroot, vocab, tmp_path):
+    """A surveyor's EO is post-processed airborne POS; leaving the consumer-GPS
+    metres in place tells BA to weight it to nothing, wasting the priors."""
+    r = FakeRunner()
+    csv = _eo_csv(tmp_path, [f"img_{i:03d}" for i in range(3)])
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab,
+                            pose_prior_csv=str(csv)), r)
+    assert any("PRIOR_STD=auto -> (0.05, 0.05, 0.1) m" in m for m in r.logs)
+
+
+def test_prior_std_resolver_picks_by_source():
+    class C:
+        eo_csv = ""
+        d = {"prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "auto"}
+    assert _run._resolve_prior_std(C()) == _run.PRIOR_STD_GPS
+    C.eo_csv = "/some/eo.csv"
+    assert _run._resolve_prior_std(C()) == _run.PRIOR_STD_EO
+
+
+def test_prior_std_explicit_value_overrides_auto_per_axis():
+    class C:
+        eo_csv = "/some/eo.csv"
+        d = {"prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "0.5"}
+    assert _run._resolve_prior_std(C()) == (0.05, 0.05, 0.5)

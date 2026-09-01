@@ -269,3 +269,16 @@ def test_sift_max_image_size_still_rejects_nonsense():
     import pytest
     with pytest.raises(ValueError, match="SIFT_MAX_IMAGE_SIZE"):
         _build({"SIFT_MAX_IMAGE_SIZE": "big"})
+
+
+def test_prior_std_accepts_auto_and_numbers():
+    p = _build({})
+    assert (p["prior_std_x"], p["prior_std_y"], p["prior_std_z"]) == ("auto",) * 3
+    p2 = _build({"PRIOR_STD_X": "0.02", "PRIOR_STD_Z": "auto"})
+    assert p2["prior_std_x"] == "0.02"
+    assert p2["prior_std_z"] == "auto"
+
+
+def test_prior_std_still_rejects_nonsense():
+    with pytest.raises(ValueError, match="prior_std_x"):
+        _build({"PRIOR_STD_X": "loose"})

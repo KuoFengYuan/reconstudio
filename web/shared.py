@@ -57,7 +57,7 @@ COLMAP_DEFAULTS = {
     # spatial_matcher (MATCHER=spatial)
     "SPATIAL_MAX_NEIGHBORS": "50", "SPATIAL_MAX_DISTANCE": "100", "SPATIAL_IGNORE_Z": "1",
     # pose_prior_mapper (MAPPER=pose_prior): GPS position std in metres
-    "PRIOR_STD_X": "3.0", "PRIOR_STD_Y": "3.0", "PRIOR_STD_Z": "5.0",
+    "PRIOR_STD_X": "auto", "PRIOR_STD_Y": "auto", "PRIOR_STD_Z": "auto",
     # Surveyor exterior-orientation CSV (optional): positions overwrite the EXIF pose
     # priors; ω/φ/κ can only enter the DB as the gravity column (global_mapper's
     # rotation averaging). Rig matching + gravity default on, RA_USE_GRAVITY opt-in.
