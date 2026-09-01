@@ -224,104 +224,73 @@ BUILTIN_BACKENDS: dict[str, dict] = {
              "hint": "超過這個寬度就縮到這個寬度,和「影像降採樣」是兩道獨立的關卡。"
                      "LichtFeld 內建預設就是 3840,而且不會警告 —— 航拍原圖 14204 px 會被砍成 3840,"
                      "6 cm 的 GSD 變成 23 cm。要用原生解析度訓練一定要填 0。"},
-            {"key": "use_16bit", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
+            {"key": "centralize", "flag": "--centralize", "type": "select",
+             "options": ["by_cameras", "by_pointcloud", "off"], "default": "by_cameras",
+             "label": "座標原點置中 (centralize)",
+             "hint": "把相機與點雲整體平移到幾何中位數,並記錄位移量(world = local + world_origin)。"
+                     "**大地座標(TWD97/UTM)的資料一定要開**:高斯位置是 float32,TWD97 northing "
+                     "~2,652,686 的 float32 間距是 0.25 m —— 是 6 cm GSD 的 4 倍,不置中的話每個高斯"
+                     "位置都被量化到 25 cm,連相對量測都會吃到這個誤差。"
+                     "by_cameras=用相機位置中位數(預設;相機一定存在,航拍飛行網格無離群值最穩);"
+                     "by_pointcloud=用稀疏點雲中位數(點雲是空的時候會靜默不置中,較不保險);"
+                     "off=不平移。注意:置中後匯出的 PLY 是本地座標,位移量只寫進 .licht 專案檔 —— "
+                     "距離/尺寸等相對量測不受影響,但要換回絕對 TWD97 座標時要把 world_origin 加回去。"},
+            {"key": "use_16bit", "group": "影像與資料集", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
              "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit "
                      "JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。"},
-            {"key": "cpu_cache", "flag": "--no-cpu-cache", "type": "bool", "invert": True, "default": True,
+            {"key": "cpu_cache", "group": "影像與資料集", "flag": "--no-cpu-cache", "type": "bool", "invert": True, "default": True,
              "label": "CPU 快取", "hint": "影像快取在 CPU 記憶體(預設開)。取消勾選 = 傳 --no-cpu-cache 停用。"},
-            {"key": "fs_cache", "flag": "--no-fs-cache", "type": "bool", "invert": True, "default": True,
-             "label": "FS 快取", "hint": "用檔案系統快取縮放後影像(預設開)。取消勾選 = 傳 --no-fs-cache 停用。"},
-            {"key": "mask_mode", "flag": "--mask-mode", "type": "select",
-             "options": ["none", "segment", "ignore", "alpha_consistent"], "default": "none",
+            {"key": "mask_mode", "group": "影像與資料集", "flag": "--mask-mode", "type": "select",
+             "options": ["none", "segment", "ignore", "segment_and_ignore", "alpha_consistent"], "default": "none",
              "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。"},
-            {"key": "bilateral_grid", "flag": "--bilateral-grid", "type": "bool", "default": False,
+            {"key": "bilateral_grid", "group": "外觀 / 曝光校正", "flag": "--bilateral-grid", "type": "bool", "default": False,
              "label": "雙邊網格 (曝光補償)"},
-            {"key": "enable_mip", "flag": "--enable-mip", "type": "bool", "default": True, "label": "Mip 濾波 (抗鋸齒)"},
-            {"key": "use_depth_loss", "flag": "--use-depth-loss", "type": "bool", "default": False,
+            {"key": "ppisp", "group": "外觀 / 曝光校正", "flag": "--ppisp", "type": "bool", "default": True,
+             "label": "PPISP",
+             "hint": "每張相機各自的物理合理 ISP 模型(曝光 + 白平衡),比雙邊網格更貼近真實相機的曝光/白平衡差異,"
+                     "可與雙邊網格同時開。搭配下方「EXIF Exposure」用照片 EXIF 加速收斂。(面板預設開)"},
+            {"key": "ppisp_exif_exposure", "group": "外觀 / 曝光校正", "flag": "--no-ppisp-exif-exposure", "type": "bool", "invert": True,
+             "default": True, "label": "EXIF Exposure",
+             "hint": "PPISP 開啟時,從照片 EXIF 讀取每張相機的曝光初始值以加速收斂(LichtFeld 預設開)。"
+                     "取消勾選 = 傳 --no-ppisp-exif-exposure 停用,PPISP 曝光從零開始學。僅在勾選 PPISP 時有意義。"},
+            {"key": "background_improvements", "flag": "--background-improvements", "type": "bool",
+             "default": True, "label": "BG Improvements",
+             "hint": "改善遠景/背景高斯的生長 —— far-field 種子與分裂、衰減緩解、"
+                     "生長上限、逐高斯位置步進、依可見度比例排序生長、分批填充容量上限。(面板預設開)"},
+            {"key": "enable_mip", "group": "外觀 / 曝光校正", "flag": "--enable-mip", "type": "bool", "default": True, "label": "Mip 濾波 (抗鋸齒)"},
+            {"key": "use_depth_loss", "group": "深度監督", "flag": "--use-depth-loss", "type": "bool", "default": False,
              "label": "深度損失 (use-depth-loss)",
              "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。"},
-            {"key": "depth_loss_mode", "flag": "--depth-loss-mode", "type": "select",
+            {"key": "depth_loss_mode", "group": "深度監督", "flag": "--depth-loss-mode", "type": "select",
              "options": ["ssi", "ssi-disparity", "ssi-depth"], "default": "ssi", "label": "深度損失模式",
              "hint": "深度先驗慣例:ssi=自動偵測(預設,建議);ssi-disparity/ssi-depth=強制指定先驗是反深度或正深度。"
                      "僅在勾選深度損失時生效。"},
-            {"key": "depth_loss_weight", "flag": "--depth-loss-weight", "type": "float", "default": "2.0",
+            {"key": "depth_loss_weight", "group": "深度監督", "flag": "--depth-loss-weight", "type": "float", "default": "2.0",
              "label": "深度損失權重", "hint": "深度監督權重(LichtFeld 預設 2.0)。僅在勾選深度損失時生效。"},
-            {"key": "use_normal_loss", "flag": "--use-normal-loss", "type": "bool", "default": False,
+            {"key": "use_normal_loss", "group": "法向量監督", "flag": "--use-normal-loss", "type": "bool", "default": False,
              "label": "法向量損失 (use-normal-loss)",
              "hint": "讀取資料集 normal/ 或 normals/ 法向量圖做監督(需與 images/ 同層、相同檔名,"
-                     "PNG/TIFF,RGB 編碼 [-1,1] 法向量)。目前「🌊 深度」工具不產生法向量,"
-                     "需另外用 LichtFeld 自帶的 preprocess 指令(--mode normals/both)產生。預設關。"},
-            {"key": "normal_loss_weight", "flag": "--normal-loss-weight", "type": "float", "default": "0.05",
-             "label": "法向量先驗權重", "hint": "渲染法向量對法向量先驗的 cosine 監督權重。僅在勾選法向量損失時生效。"},
-            {"key": "normal_consistency_weight", "flag": "--normal-consistency-weight", "type": "float",
-             "default": "0.05", "label": "深度-法向量一致性權重",
+                     "PNG/TIFF,RGB 編碼 [-1,1] 法向量)。缺圖或尺寸不符時 LichtFeld 會自動用內建 "
+                     "MoGe-2 即時補生成(見下方「法向量自動生成」);仍可用「🌊 深度」工具"
+                     "先預生成以重複利用或用原始解析度跑一次。預設關。"},
+            {"key": "normal_auto_generate", "group": "法向量監督", "flag": "--no-normal-auto-generate", "type": "bool", "invert": True,
+             "default": True, "label": "法向量自動生成",
+             "hint": "訓練開始前掃 normals/,缺圖或尺寸和當前訓練解析度不符的,直接用內建 MoGe-2 從全解析度 "
+                     "images/ 現場補生成(LichtFeld 預設開),所以換降採樣倍率也不會踩到尺寸不符。"
+                     "取消勾選 = 傳 --no-normal-auto-generate:只吃你自己預先產生的圖,缺圖就報錯 —— "
+                     "想確保用的是特定一批法向量圖(例如自己跑過後處理的)時才關。僅在勾選法向量損失時有意義。"},
+            {"key": "normal_loss_weight", "group": "法向量監督", "flag": "--normal-loss-weight", "type": "float", "default": "0.005",
+             "label": "法向量先驗權重",
+             "hint": "渲染法向量對法向量先驗的 cosine 監督權重。僅在勾選法向量損失時生效。"
+                     "0.005 是上游「以畫面品質為主、讓幾何自由發展」的預設;"
+                     "**若幾何本身就是產品(要抽 mesh / TSDF 融合),上游建議拉到 ~0.1**(20 倍)。"},
+            {"key": "normal_consistency_weight", "group": "法向量監督", "flag": "--normal-consistency-weight", "type": "float",
+             "default": "0.001", "label": "深度-法向量一致性權重",
              "hint": "渲染法向量與渲染深度反推法向量的一致性權重。僅在勾選法向量損失時生效。"},
-            {"key": "normal_flatten_weight", "flag": "--normal-flatten-weight", "type": "float",
-             "default": "1.0", "label": "扁平化權重",
+            {"key": "normal_flatten_weight", "group": "法向量監督", "flag": "--normal-flatten-weight", "type": "float",
+             "default": "0", "label": "扁平化權重",
              "hint": "法向量監督期間,讓高斯最短軸 scale 攤平的權重。僅在勾選法向量損失時生效。"},
-            {"key": "normal_loss_space", "flag": "--normal-loss-space", "type": "select",
-             "options": ["auto", "camera-opencv", "camera-opengl", "world"], "default": "auto",
-             "label": "法向量先驗座標系",
-             "hint": "auto=自動偵測(建議);其餘為強制指定先驗座標慣例。僅在勾選法向量損失時生效。"},
-        ],
-    },
-    "lichtfeld-igs+": {
-        "label": "LichtFeld · iGS+ (無 mesh)",
-        "launch": "binary",
-        "exec": "../LichtFeld-Studio/build/LichtFeld-Studio",
-        "train_args": "-d {scene} -o {out} --strategy igs+ --headless --no-splash {args} {extra}",
-        "params": [
-            {"key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數"},
-            {"key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "1",
-             "label": "步數縮放 (預設 1;留空=用內建預設)",
-             "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值"
-                     "(LichtFeld 內部換算,不必自己乘)。預設 1(不縮放);留空 = 用 LichtFeld 內建預設。"},
-            {"key": "sh_degree", "flag": "--sh-degree", "type": "select", "options": ["0", "1", "2", "3"],
-             "default": "3", "label": "SH 階數"},
-            {"key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)"},
-            {"key": "resize_factor", "flag": "--resize_factor", "type": "select",
-             "options": ["auto", "1", "2", "4", "8"], "default": "auto", "label": "影像降採樣"},
-            {"key": "max_width", "flag": "--max-width", "type": "int", "default": "3840",
-             "label": "影像寬度上限 px (0 = 不設限)",
-             "hint": "超過這個寬度就縮到這個寬度,和「影像降採樣」是兩道獨立的關卡。"
-                     "LichtFeld 內建預設就是 3840,而且不會警告 —— 航拍原圖 14204 px 會被砍成 3840,"
-                     "6 cm 的 GSD 變成 23 cm。要用原生解析度訓練一定要填 0。"},
-            {"key": "use_16bit", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
-             "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit "
-                     "JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。"},
-            {"key": "cpu_cache", "flag": "--no-cpu-cache", "type": "bool", "invert": True, "default": True,
-             "label": "CPU 快取", "hint": "影像快取在 CPU 記憶體(預設開)。取消勾選 = 傳 --no-cpu-cache 停用。"},
-            {"key": "fs_cache", "flag": "--no-fs-cache", "type": "bool", "invert": True, "default": True,
-             "label": "FS 快取", "hint": "用檔案系統快取縮放後影像(預設開)。取消勾選 = 傳 --no-fs-cache 停用。"},
-            {"key": "mask_mode", "flag": "--mask-mode", "type": "select",
-             "options": ["none", "segment", "ignore", "alpha_consistent"], "default": "none",
-             "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。"},
-            {"key": "bilateral_grid", "flag": "--bilateral-grid", "type": "bool", "default": False,
-             "label": "雙邊網格 (曝光補償)"},
-            {"key": "enable_mip", "flag": "--enable-mip", "type": "bool", "default": True, "label": "Mip 濾波 (抗鋸齒)"},
-            {"key": "use_depth_loss", "flag": "--use-depth-loss", "type": "bool", "default": False,
-             "label": "深度損失 (use-depth-loss)",
-             "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。"},
-            {"key": "depth_loss_mode", "flag": "--depth-loss-mode", "type": "select",
-             "options": ["ssi", "ssi-disparity", "ssi-depth"], "default": "ssi", "label": "深度損失模式",
-             "hint": "深度先驗慣例:ssi=自動偵測(預設,建議);ssi-disparity/ssi-depth=強制指定先驗是反深度或正深度。"
-                     "僅在勾選深度損失時生效。"},
-            {"key": "depth_loss_weight", "flag": "--depth-loss-weight", "type": "float", "default": "2.0",
-             "label": "深度損失權重", "hint": "深度監督權重(LichtFeld 預設 2.0)。僅在勾選深度損失時生效。"},
-            {"key": "use_normal_loss", "flag": "--use-normal-loss", "type": "bool", "default": False,
-             "label": "法向量損失 (use-normal-loss)",
-             "hint": "讀取資料集 normal/ 或 normals/ 法向量圖做監督(需與 images/ 同層、相同檔名,"
-                     "PNG/TIFF,RGB 編碼 [-1,1] 法向量)。目前「🌊 深度」工具不產生法向量,"
-                     "需另外用 LichtFeld 自帶的 preprocess 指令(--mode normals/both)產生。預設關。"},
-            {"key": "normal_loss_weight", "flag": "--normal-loss-weight", "type": "float", "default": "0.05",
-             "label": "法向量先驗權重", "hint": "渲染法向量對法向量先驗的 cosine 監督權重。僅在勾選法向量損失時生效。"},
-            {"key": "normal_consistency_weight", "flag": "--normal-consistency-weight", "type": "float",
-             "default": "0.05", "label": "深度-法向量一致性權重",
-             "hint": "渲染法向量與渲染深度反推法向量的一致性權重。僅在勾選法向量損失時生效。"},
-            {"key": "normal_flatten_weight", "flag": "--normal-flatten-weight", "type": "float",
-             "default": "1.0", "label": "扁平化權重",
-             "hint": "法向量監督期間,讓高斯最短軸 scale 攤平的權重。僅在勾選法向量損失時生效。"},
-            {"key": "normal_loss_space", "flag": "--normal-loss-space", "type": "select",
+            {"key": "normal_loss_space", "group": "法向量監督", "flag": "--normal-loss-space", "type": "select",
              "options": ["auto", "camera-opencv", "camera-opengl", "world"], "default": "auto",
              "label": "法向量先驗座標系",
              "hint": "auto=自動偵測(建議);其餘為強制指定先驗座標慣例。僅在勾選法向量損失時生效。"},

@@ -110,6 +110,35 @@
   .chk { display:flex; align-items:flex-start; gap:6px; margin-top:6px; color:var(--fg); font-size:13px; }
   .chk input { width:auto; flex:none; margin-top:2px; accent-color:var(--accent); }
   .chk > span { flex:1; }
+  /* Compact two-column parameter row (label left, control right) used by the
+     backend param schemas. Long explanations move behind the ⓘ toggle so a
+     20+ parameter panel stays scannable instead of scrolling for pages. */
+  .prow { display:flex; align-items:center; gap:10px; padding:3px 0; }
+  .prow > .plabel { flex:0 0 45%; display:flex; align-items:center; gap:5px; min-width:0;
+                    font-size:12px; color:var(--mut); margin:0; }
+  .prow > .plabel > .ptext { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .prow > .pctl { flex:1 1 auto; min-width:0; display:flex; align-items:center; }
+  .prow > .pctl > input, .prow > .pctl > select { width:100%; margin:0; }
+  .prow > .pctl > input[type=checkbox] { width:auto; flex:none; margin:0; accent-color:var(--accent); }
+  /* compound control (input + 瀏覽 button): the existing .row keeps its own layout */
+  .prow > .pctl > .row { flex:1; min-width:0; margin:0; }
+  /* .stack: label on its own line, control full width. For path pickers and any
+     control with buttons beside it — those never fit the 45% column (the buttons
+     have min-width:fit-content, so the input is what collapses). */
+  .prow.stack { flex-direction:column; align-items:stretch; gap:2px; }
+  .prow.stack > .plabel { flex:none; width:auto; }
+  .prow.stack > .pctl { width:100%; }
+  .info { flex:none; cursor:pointer; user-select:none; font-size:9px; font-weight:700;
+          width:13px; height:13px; line-height:12px; text-align:center; border-radius:50%;
+          color:var(--mut); border:1px solid var(--line); background:transparent; }
+  .info:hover { color:var(--accent); border-color:var(--accent); }
+  .info.on { color:var(--accent); border-color:var(--accent); }
+  /* NOTE: not .phint — that class is already taken by the COLMAP mapper hints,
+     whose syncMapper() reads dataset.p off every .phint it finds. */
+  .fhint { display:none; font-size:11px; color:var(--mut); line-height:1.45;
+           margin:1px 0 6px; padding:6px 9px; background:var(--panel2);
+           border-left:2px solid var(--line); border-radius:3px; }
+  .fhint.on { display:block; }
   .submit { width:100%; padding:11px; font-weight:650; margin-top:6px; font-size:14px;
             background:linear-gradient(180deg,var(--accent),var(--accent-d)); box-shadow:0 2px 10px rgba(0,0,0,.3); }
   /* min-width:fit-content + wrap: a button never gets squeezed narrower than its
@@ -324,36 +353,54 @@
     <form id="form-colmap" style="display:none" hx-post="/ui/jobs" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>Inputs</legend>
-        <label>image_root</label>
-        <div class="row">
-          <input name="image_root" id="image_root" placeholder="{{ browse_root }}" required>
-          <button type="button" class="ghost" onclick="openPicker('image_root')">瀏覽</button>
+        <div class="prow stack">
+          <label class="plabel" for="image_root"><span class="ptext">image_root</span></label>
+          <div class="pctl"><div class="row">
+            <input name="image_root" id="image_root" placeholder="{{ browse_root }}" required>
+            <button type="button" class="ghost" onclick="openPicker('image_root')">瀏覽</button>
+          </div></div>
         </div>
-        <label>workspace</label>
-        <div class="row">
-          <input name="workspace" id="workspace" placeholder="{{ browse_root }}" required>
-          <button type="button" class="ghost" onclick="openPicker('workspace')">瀏覽</button>
-          <button type="button" class="ghost" onclick="importColmap()"
-                  title="不重跑,直接讀 workspace/sparse/0 顯示點雲 + 相機位置">📂 讀取既有結果</button>
+        <div class="prow stack">
+          <label class="plabel" for="workspace"><span class="ptext">workspace</span>
+            <span class="info" onclick="togHint(event,'h_cm_workspace')" title="說明">?</span>
+          </label>
+          <div class="pctl"><div class="row">
+            <input name="workspace" id="workspace" placeholder="{{ browse_root }}" required>
+            <button type="button" class="ghost" onclick="openPicker('workspace')">瀏覽</button>
+            <button type="button" class="ghost" onclick="importColmap()"
+                    title="不重跑,直接讀 workspace/sparse/0 顯示點雲 + 相機位置">📂 讀取既有結果</button>
+          </div></div>
         </div>
-        <div class="hint">workspace 已經跑過 COLMAP(有 <code>sparse/0</code>)的話,按<b>讀取既有結果</b>就能直接看 3D、接著訓練,不用重跑。</div>
-        <label>影像解析度</label>
-        <select name="resize">
-          <option value="1920" selected>等比縮小 — 長邊 ≤ 1920（FullHD,傾斜攝影甜蜜點）</option>
-          <option value="2560">等比縮小 — 長邊 ≤ 2560</option>
-          <option value="4096">等比縮小 — 長邊 ≤ 4096（高解析訓練）</option>
-          <option value="7680">等比縮小 — 長邊 ≤ 7680（8K,接近原圖、避開 TIFF undistort 崩)</option>
-          <option value="keep">保持原樣（用原始檔）</option>
-        </select>
-        <div class="hint">縮成實體檔跑整條 COLMAP(存到 <code>workspace/images_&lt;長邊&gt;</code>)。預設 1920(傾斜攝影甜蜜點);要高解析訓練圖選 4096(再大 3DGS 吃不消)。7680（8K）= 接近原圖(11664)又先轉成乾淨 JPG,避開髒航測 TIFF 在 undistort 崩的坑。「保持原樣」= 用原始檔。</div>
-        <label>GPU（COLMAP 所有階段共用)</label>
-        <select name="COLMAP_GPU">
-          <option value="" {{ 'selected' if not colmap_defaults.COLMAP_GPU }}>全部 GPU（預設）</option>
-          {% if gpus %}{% for g in gpus %}
-          <option value="{{ g.index }}" {{ 'selected' if colmap_defaults.COLMAP_GPU == g.index|string }}>#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
-          {% endfor %}{% endif %}
-        </select>
-        <div class="hint">透過 CUDA_VISIBLE_DEVICES 套用到<b>所有 COLMAP 階段</b>（抽特徵 / 匹配 / mapper / BA / Caspar / 對齊）。「全部 GPU」= COLMAP 預設(-1)。</div>
+        <div class="fhint" id="h_cm_workspace">workspace 已經跑過 COLMAP(有 <code>sparse/0</code>)的話,按<b>讀取既有結果</b>就能直接看 3D、接著訓練,不用重跑。</div>
+        <div class="prow">
+          <label class="plabel" for="cm_resize"><span class="ptext">影像解析度</span>
+            <span class="info" onclick="togHint(event,'h_cm_resize')" title="說明">?</span>
+          </label>
+          <div class="pctl">
+            <select name="resize" id="cm_resize">
+              <option value="1920" selected>等比縮小 — 長邊 ≤ 1920（FullHD,傾斜攝影甜蜜點）</option>
+              <option value="2560">等比縮小 — 長邊 ≤ 2560</option>
+              <option value="4096">等比縮小 — 長邊 ≤ 4096（高解析訓練）</option>
+              <option value="7680">等比縮小 — 長邊 ≤ 7680（8K,接近原圖、避開 TIFF undistort 崩)</option>
+              <option value="keep">保持原樣（用原始檔）</option>
+            </select>
+          </div>
+        </div>
+        <div class="fhint" id="h_cm_resize">縮成實體檔跑整條 COLMAP(存到 <code>workspace/images_&lt;長邊&gt;</code>)。預設 1920(傾斜攝影甜蜜點);要高解析訓練圖選 4096(再大 3DGS 吃不消)。7680（8K）= 接近原圖(11664)又先轉成乾淨 JPG,避開髒航測 TIFF 在 undistort 崩的坑。「保持原樣」= 用原始檔。</div>
+        <div class="prow">
+          <label class="plabel" for="cm_gpu"><span class="ptext">GPU（所有階段共用)</span>
+            <span class="info" onclick="togHint(event,'h_cm_gpu')" title="說明">?</span>
+          </label>
+          <div class="pctl">
+            <select name="COLMAP_GPU" id="cm_gpu">
+              <option value="" {{ 'selected' if not colmap_defaults.COLMAP_GPU }}>全部 GPU（預設）</option>
+              {% if gpus %}{% for g in gpus %}
+              <option value="{{ g.index }}" {{ 'selected' if colmap_defaults.COLMAP_GPU == g.index|string }}>#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
+              {% endfor %}{% endif %}
+            </select>
+          </div>
+        </div>
+        <div class="fhint" id="h_cm_gpu">透過 CUDA_VISIBLE_DEVICES 套用到<b>所有 COLMAP 階段</b>（抽特徵 / 匹配 / mapper / BA / Caspar / 對齊）。「全部 GPU」= COLMAP 預設(-1)。</div>
       </fieldset>
 
       {# Region subset — only shown when the viewer's ⬚ 選訓練範圍 hands one over. Unlike
@@ -385,45 +432,149 @@
       <details class="grp" id="fmt-grp">
         <summary>輸入格式（手動指定 layout / subfolders）</summary>
         <div class="gbody">
-          <label>layout</label>
-          <select name="layout" id="layout">
-            <option value="auto" selected>自動偵測（推薦）</option>
-            <option value="single">單一資料夾 XXX/*.jpg（單相機）</option>
-            <option value="multi">多目錄 ROOT/&lt;group&gt;/*.jpg（每群一相機）</option>
-            <option value="nested">巢狀 ROOT/&lt;group&gt;/&lt;video&gt;/*.jpg（影片幀）</option>
-          </select>
-          <label>subfolders（逗號或換行;留空=自動偵測,例如 A B）</label>
-          <textarea name="subfolders" id="subfolders" placeholder="A, B"></textarea>
+          <div class="hint">兩格都留預設(自動偵測)即可,偵測錯了才手動指定。</div>
+          <div class="prow">
+            <label class="plabel" for="layout"><span class="ptext">layout</span>
+              <span class="info" onclick="togHint(event,'h_cm_layout')" title="說明">?</span>
+            </label>
+            <div class="pctl">
+              <select name="layout" id="layout">
+                <option value="auto" selected>自動偵測（推薦）</option>
+                <option value="single">單一資料夾（單相機）</option>
+                <option value="multi">多目錄（每群一相機）</option>
+                <option value="nested">巢狀（影片幀）</option>
+              </select>
+            </div>
+          </div>
+          <div class="fhint" id="h_cm_layout">影像資料夾的結構,決定「哪些影像算同一台相機」:<br>
+            ‧ <b>single</b> = <code>XXX/*.jpg</code>,全部同一台相機<br>
+            ‧ <b>multi</b> = <code>ROOT/&lt;group&gt;/*.jpg</code>,每個子資料夾一台相機 —— <b>多鏡頭傾斜 rig 用這個</b><br>
+            ‧ <b>nested</b> = <code>ROOT/&lt;group&gt;/&lt;video&gt;/*.jpg</code>,影片轉幀<br>
+            搭配 Camera 組的 CAMERA_MODE=per_folder,每個 group 會共用一組內參。</div>
+          <div class="prow stack">
+            <label class="plabel" for="subfolders"><span class="ptext">subfolders</span>
+              <span class="info" onclick="togHint(event,'h_cm_subfolders')" title="說明">?</span>
+            </label>
+            <div class="pctl"><textarea name="subfolders" id="subfolders" placeholder="A, B"></textarea></div>
+          </div>
+          <div class="fhint" id="h_cm_subfolders">逗號或換行分隔,留空 = 自動偵測(例如 <code>A, B</code>)。
+            只在 multi / nested layout 下有意義:用來<b>指定只跑其中幾個子資料夾</b>,或在自動偵測抓錯時手動指定。</div>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>多相機 rig（傾斜攝影 / 多鏡頭同步曝光）</summary>
+        <div class="gbody">
+          <div class="hint">多鏡頭同時曝光的機組才需要開。開了之後 COLMAP 會知道「這幾張是同一次曝光」,
+            用剛性約束綁住鏡頭之間的相對位置 —— 大幅減少大場景的姿態漂移。單相機請留關。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_rig_enable"><span class="ptext">啟用 rig</span>
+              <span class="info" onclick="togHint(event,'h_cm_rig_enable')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_rig_enable" name="RIG_ENABLE" value="1" {{ 'checked' if colmap_defaults.RIG_ENABLE=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_rig_enable">開啟後會多兩個階段:先把影像重新整理成
+            <code>&lt;相機&gt;/&lt;曝光編號&gt;</code> 的符號連結樹(原始檔不動),抽完特徵再跑
+            <code>rig_configurator</code> 把 rig/frames 寫進資料庫。分組結果會印在 log,
+            <b>沒有任何一個曝光被所有相機覆蓋時會直接中止</b>(那種 rig 等於沒有約束力)。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_rig_mode"><span class="ptext">分組方式</span>
+              <span class="info" onclick="togHint(event,'h_cm_rig_mode')" title="說明">?</span>
+            </label>
+            <div class="pctl">
+              <select id="cm_rig_mode" name="RIG_MODE">
+                {% for o in enums.RIG_MODE %}<option {{ 'selected' if o==colmap_defaults.RIG_MODE }}>{{ o }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="fhint" id="h_cm_rig_mode">怎麼判斷「哪幾張是同一次曝光」:<br>
+            ‧ <b>folder</b> — 相機 = 第一層資料夾,曝光 = 後面的檔名。各鏡頭檔名<b>本來就一致</b>時用這個。<br>
+            ‧ <b>regex</b> — 用下面的正規表示式從檔名拆出相機與曝光編號。<b>各鏡頭檔名帶自己機身序號時用這個</b>
+            (COLMAP 原生的 <code>image_prefix</code> 對這種檔名分不了組,這就是它會 SIGABRT 的原因)。<br>
+            ‧ <b>gps</b> — 相機仍取自資料夾,但用 EXIF GPS 位置分群:同一次曝光的各鏡頭共用同一個座標。
+            檔名完全沒有共通鍵時的退路。</div>
+          <div class="prow stack">
+            <label class="plabel" for="cm_rig_regex"><span class="ptext">RIG_REGEX（regex 模式）</span>
+              <span class="info" onclick="togHint(event,'h_cm_rig_regex')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_rig_regex" name="RIG_REGEX" value="{{ colmap_defaults.RIG_REGEX }}" placeholder="^(?P&lt;cam&gt;[NFBLR])-\d+_0-\d+_(?P&lt;frame&gt;\d+)\.jpg$"></div>
+          </div>
+          <div class="fhint" id="h_cm_rig_regex">必須含兩個具名群組:<code>(?P&lt;cam&gt;…)</code> 相機代號、
+            <code>(?P&lt;frame&gt;…)</code> 同一次曝光共用的編號。先對檔名(不含路徑)比對,不中再對完整相對路徑。<br>
+            例:檔名 <code>N-1_0-61214_00042.jpg</code> / <code>F-1_0-61294_00042.jpg</code>(機身序號不同、末段編號相同)→
+            <code>^(?P&lt;cam&gt;[NFBLR])-\d+_0-\d+_(?P&lt;frame&gt;\d+)\.jpg$</code>。
+            分組結果一定要看 log 確認再往下跑。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_rig_ref"><span class="ptext">RIG_REF_CAMERA(參考鏡頭)</span>
+              <span class="info" onclick="togHint(event,'h_cm_rig_ref')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_rig_ref" name="RIG_REF_CAMERA" value="{{ colmap_defaults.RIG_REF_CAMERA }}" placeholder="留空 = 依字母序第一台"></div>
+          </div>
+          <div class="fhint" id="h_cm_rig_ref">rig 的基準鏡頭,其他鏡頭的外參都相對它表示。
+            <b>傾斜攝影請填正射(nadir)那台</b>,它視角最穩、觀測最多。填相機代號(即資料夾名或 regex 的 cam 群組值)。
+            留空 = 依字母序取第一台。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_rig_gps_tol"><span class="ptext">RIG_GPS_TOL（gps 模式,公尺）</span>
+              <span class="info" onclick="togHint(event,'h_cm_rig_gps_tol')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_rig_gps_tol" name="RIG_GPS_TOL" value="{{ colmap_defaults.RIG_GPS_TOL }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_rig_gps_tol">只在 gps 模式生效:兩張影像的 EXIF GPS 距離小於此值就算同一次曝光。
+            同一機組同時曝光的座標通常完全相同,預設 0.5 m 已很寬鬆;航線間距遠大於此才不會誤併。
+            調太大會把相鄰站點併成一個 frame。</div>
         </div>
       </details>
 
       <details class="grp">
         <summary>Camera</summary>
         <div class="gbody">
-          <label>CAMERA_MODEL</label>
-          <input name="CAMERA_MODEL" value="{{ colmap_defaults.CAMERA_MODEL }}">
-          <label>CAMERA_MODE（per_folder = 每個 group 一台相機,共用內參）</label>
-          <select name="CAMERA_MODE">
-            {% for o in enums.CAMERA_MODE %}<option {{ 'selected' if o==colmap_defaults.CAMERA_MODE }}>{{ o }}</option>{% endfor %}
-          </select>
-          <label>MAX_FEATURES</label>
-          <input name="MAX_FEATURES" value="{{ colmap_defaults.MAX_FEATURES }}">
-          <label>SIFT_MAX_IMAGE_SIZE（抽 SIFT 的長邊上限;留空=COLMAP 預設,行為等同 3200)</label>
-          <input name="SIFT_MAX_IMAGE_SIZE" value="{{ colmap_defaults.SIFT_MAX_IMAGE_SIZE }}" placeholder="留空=預設(~3200)">
-          <div class="hint">COLMAP 抽 SIFT 前會把長邊縮到此值;預設(-1)行為等同 3200,留空時這個縮放是「隱形」的。注意：<b>-1 不是「全跑」</b>，它就是預設(=3200)。真要全解析得填大數值(如 8000+)，但對大張航拍會 <b>GPU OOM 直接 crash</b>。調小(如 1920)=更粗、跨大視角(傾斜攝影)更穩。傾斜 rig 建議搭 FullHD resize，別硬拉大。</div>
-          <label>FOCAL_FACTOR（default_focal_length_factor;留空=COLMAP 預設）</label>
-          <input name="FOCAL_FACTOR" value="{{ colmap_defaults.FOCAL_FACTOR }}" placeholder="大場景未標定建議 0.5">
-          <div class="hint">未知內參的大場景:給焦距一個初始猜測(影像寬 × 此係數)。h3dgs 用 0.5。已有可靠 EXIF 焦距時留空。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_camera_model"><span class="ptext">CAMERA_MODEL</span></label>
+            <div class="pctl"><input id="cm_camera_model" name="CAMERA_MODEL" value="{{ colmap_defaults.CAMERA_MODEL }}"></div>
+          </div>
+          <div class="prow">
+            <label class="plabel" for="cm_camera_mode"><span class="ptext">CAMERA_MODE</span>
+              <span class="info" onclick="togHint(event,'h_cm_camera_mode')" title="說明">?</span>
+            </label>
+            <div class="pctl">
+              <select id="cm_camera_mode" name="CAMERA_MODE">
+                {% for o in enums.CAMERA_MODE %}<option {{ 'selected' if o==colmap_defaults.CAMERA_MODE }}>{{ o }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
+          <div class="fhint" id="h_cm_camera_mode">per_folder = 每個 group 一台相機,共用內參。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_max_features"><span class="ptext">MAX_FEATURES</span></label>
+            <div class="pctl"><input id="cm_max_features" name="MAX_FEATURES" value="{{ colmap_defaults.MAX_FEATURES }}"></div>
+          </div>
+          <div class="prow">
+            <label class="plabel" for="cm_sift_size"><span class="ptext">SIFT_MAX_IMAGE_SIZE</span>
+              <span class="info" onclick="togHint(event,'h_cm_sift_size')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_sift_size" name="SIFT_MAX_IMAGE_SIZE" value="{{ colmap_defaults.SIFT_MAX_IMAGE_SIZE }}" placeholder="留空=預設(~3200)"></div>
+          </div>
+          <div class="fhint" id="h_cm_sift_size">抽 SIFT 的長邊上限;留空 = COLMAP 預設,行為等同 3200。COLMAP 抽 SIFT 前會把長邊縮到此值,留空時這個縮放是「隱形」的。注意：<b>-1 不是「全跑」</b>，它就是預設(=3200)。真要全解析得填大數值(如 8000+)，但對大張航拍會 <b>GPU OOM 直接 crash</b>。調小(如 1920)=更粗、跨大視角(傾斜攝影)更穩。傾斜 rig 建議搭 FullHD resize，別硬拉大。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_focal_factor"><span class="ptext">FOCAL_FACTOR</span>
+              <span class="info" onclick="togHint(event,'h_cm_focal_factor')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_focal_factor" name="FOCAL_FACTOR" value="{{ colmap_defaults.FOCAL_FACTOR }}" placeholder="大場景未標定建議 0.5"></div>
+          </div>
+          <div class="fhint" id="h_cm_focal_factor">default_focal_length_factor;留空 = COLMAP 預設。未知內參的大場景:給焦距一個初始猜測(影像寬 × 此係數)。h3dgs 用 0.5。已有可靠 EXIF 焦距時留空。</div>
         </div>
       </details>
 
       <details class="grp">
         <summary>Matching</summary>
         <div class="gbody">
-          <label>MATCHER</label>
-          <select name="MATCHER" id="matcher-sel" onchange="syncMatcher()">
-            {% for o in enums.MATCHER %}<option {{ 'selected' if o==colmap_defaults.MATCHER }}>{{ o }}</option>{% endfor %}
-          </select>
+          <div class="prow">
+            <label class="plabel" for="matcher-sel"><span class="ptext">MATCHER</span></label>
+            <div class="pctl">
+              <select name="MATCHER" id="matcher-sel" onchange="syncMatcher()">
+                {% for o in enums.MATCHER %}<option {{ 'selected' if o==colmap_defaults.MATCHER }}>{{ o }}</option>{% endfor %}
+              </select>
+            </div>
+          </div>
           <!-- 說明:只顯示所選 matcher 的 -->
           <div class="hint mhint" data-m="sequential">sequential = 連續幀重疊比對 + 迴圈偵測(loop detection),適合有序連拍 / 影片幀。</div>
           <div class="hint mhint" data-m="vocab">vocab = 用 vocab tree 找外觀相近的影像比對,適合無序 / 大量照片。</div>
@@ -432,40 +583,84 @@
           <div class="hint mhint" data-m="custom">custom = hierarchical-3D-Gaussians 的自訂配對:連續 + 二次方步距 + loop closure + GPS 鄰近,產生明確配對表後用 matches_importer 匯入。適合「有序、超大量、多相機 rig」的大場景(比對數遠少於 exhaustive)。建議搭配 MAPPER=hierarchical。</div>
           <!-- 參數:只顯示所選 matcher 用得到的 -->
           <div class="mgrp" data-m="seq_overlap">
-            <label>SEQ_OVERLAP</label>
-            <input name="SEQ_OVERLAP" value="{{ colmap_defaults.SEQ_OVERLAP }}">
+            <div class="prow">
+              <label class="plabel" for="cm_seq_overlap"><span class="ptext">SEQ_OVERLAP</span></label>
+              <div class="pctl"><input id="cm_seq_overlap" name="SEQ_OVERLAP" value="{{ colmap_defaults.SEQ_OVERLAP }}"></div>
+            </div>
           </div>
           <div class="mgrp" data-m="num_matches">
-            <label>NUM_MATCHES</label>
-            <input name="NUM_MATCHES" value="{{ colmap_defaults.NUM_MATCHES }}">
+            <div class="prow">
+              <label class="plabel" for="cm_num_matches"><span class="ptext">NUM_MATCHES</span></label>
+              <div class="pctl"><input id="cm_num_matches" name="NUM_MATCHES" value="{{ colmap_defaults.NUM_MATCHES }}"></div>
+            </div>
           </div>
           <div class="mgrp" data-m="spatial">
-            <label>SPATIAL_MAX_NEIGHBORS（每張比對的鄰近影像數）</label>
-            <input name="SPATIAL_MAX_NEIGHBORS" value="{{ colmap_defaults.SPATIAL_MAX_NEIGHBORS }}">
-            <label>SPATIAL_MAX_DISTANCE（公尺;依場景尺度調）</label>
-            <input name="SPATIAL_MAX_DISTANCE" value="{{ colmap_defaults.SPATIAL_MAX_DISTANCE }}">
-            <label class="chk" style="margin-top:10px;">
-              <input type="checkbox" name="SPATIAL_IGNORE_Z" value="1" {{ 'checked' if colmap_defaults.SPATIAL_IGNORE_Z=='1' }}>
-              <span>SPATIAL_IGNORE_Z（忽略高度,GPS 高程雜訊大時建議開）</span>
-            </label>
+            <div class="prow">
+              <label class="plabel" for="cm_sp_neighbors"><span class="ptext">SPATIAL_MAX_NEIGHBORS</span>
+                <span class="info" onclick="togHint(event,'h_cm_sp_neighbors')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_sp_neighbors" name="SPATIAL_MAX_NEIGHBORS" value="{{ colmap_defaults.SPATIAL_MAX_NEIGHBORS }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_sp_neighbors">每張比對的鄰近影像數。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_sp_distance"><span class="ptext">SPATIAL_MAX_DISTANCE</span>
+                <span class="info" onclick="togHint(event,'h_cm_sp_distance')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_sp_distance" name="SPATIAL_MAX_DISTANCE" value="{{ colmap_defaults.SPATIAL_MAX_DISTANCE }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_sp_distance">單位公尺;依場景尺度調。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_sp_ignore_z"><span class="ptext">SPATIAL_IGNORE_Z</span>
+                <span class="info" onclick="togHint(event,'h_cm_sp_ignore_z')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input type="checkbox" id="cm_sp_ignore_z" name="SPATIAL_IGNORE_Z" value="1" {{ 'checked' if colmap_defaults.SPATIAL_IGNORE_Z=='1' }}></div>
+            </div>
+            <div class="fhint" id="h_cm_sp_ignore_z">忽略高度,GPS 高程雜訊大時建議開。</div>
           </div>
           <div class="mgrp" data-m="custom_matcher">
-            <label>CM_N_QUAD（二次方步距配對數/張;主力,預設 10）</label>
-            <input name="CM_N_QUAD" value="{{ colmap_defaults.CM_N_QUAD }}">
-            <label>CM_N_SEQ（連續鄰幀配對數/張;預設 0）</label>
-            <input name="CM_N_SEQ" value="{{ colmap_defaults.CM_N_SEQ }}">
-            <label>CM_N_GPS（每張的 GPS 最近鄰數;0=不用 GPS,需 EXIF + exif 套件)</label>
-            <input name="CM_N_GPS" value="{{ colmap_defaults.CM_N_GPS }}">
-            <label>CM_N_LOOP（loop closure 視窗的 ±2^k 階數;預設 5）</label>
-            <input name="CM_N_LOOP" value="{{ colmap_defaults.CM_N_LOOP }}">
-            <label>CM_LOOP_MATCHES（手動 loop 錨點,成對整數 a b;每對代表第 a 幀≈第 b 幀。留空=不指定）</label>
-            <input name="CM_LOOP_MATCHES" value="{{ colmap_defaults.CM_LOOP_MATCHES }}" placeholder="例: 30 980, 120 1500">
-            <div class="hint">配對名稱沿用 feature_extractor 的 image_list（每個 group 內依檔名排序),所以和資料庫一致。多相機 rig 請用「子資料夾 = 各相機」的 multi/nested layout。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_n_quad"><span class="ptext">CM_N_QUAD</span>
+                <span class="info" onclick="togHint(event,'h_cm_n_quad')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_n_quad" name="CM_N_QUAD" value="{{ colmap_defaults.CM_N_QUAD }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_n_quad">二次方步距配對數/張;主力,預設 10。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_n_seq"><span class="ptext">CM_N_SEQ</span>
+                <span class="info" onclick="togHint(event,'h_cm_n_seq')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_n_seq" name="CM_N_SEQ" value="{{ colmap_defaults.CM_N_SEQ }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_n_seq">連續鄰幀配對數/張;預設 0。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_n_gps"><span class="ptext">CM_N_GPS</span>
+                <span class="info" onclick="togHint(event,'h_cm_n_gps')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_n_gps" name="CM_N_GPS" value="{{ colmap_defaults.CM_N_GPS }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_n_gps">每張的 GPS 最近鄰數;0 = 不用 GPS,需 EXIF + exif 套件。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_n_loop"><span class="ptext">CM_N_LOOP</span>
+                <span class="info" onclick="togHint(event,'h_cm_n_loop')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_n_loop" name="CM_N_LOOP" value="{{ colmap_defaults.CM_N_LOOP }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_n_loop">loop closure 視窗的 ±2^k 階數;預設 5。</div>
+            <div class="prow stack">
+              <label class="plabel" for="cm_loop_matches"><span class="ptext">CM_LOOP_MATCHES</span>
+                <span class="info" onclick="togHint(event,'h_cm_loop_matches')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_loop_matches" name="CM_LOOP_MATCHES" value="{{ colmap_defaults.CM_LOOP_MATCHES }}" placeholder="例: 30 980, 120 1500"></div>
+            </div>
+            <div class="fhint" id="h_cm_loop_matches">手動 loop 錨點,成對整數 a b;每對代表第 a 幀≈第 b 幀。留空 = 不指定。配對名稱沿用 feature_extractor 的 image_list（每個 group 內依檔名排序),所以和資料庫一致。多相機 rig 請用「子資料夾 = 各相機」的 multi/nested layout。</div>
           </div>
-          <label class="chk" style="margin-top:10px;">
-            <input type="checkbox" name="GUIDED_MATCHING" value="1" {{ 'checked' if colmap_defaults.GUIDED_MATCHING=='1' }}>
-            <span>GUIDED_MATCHING（較慢,低紋理多撿匹配;所有 matcher 通用）</span>
-          </label>
+          <div class="prow">
+            <label class="plabel" for="cm_guided"><span class="ptext">GUIDED_MATCHING</span>
+              <span class="info" onclick="togHint(event,'h_cm_guided')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_guided" name="GUIDED_MATCHING" value="1" {{ 'checked' if colmap_defaults.GUIDED_MATCHING=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_guided">較慢,低紋理多撿匹配;所有 matcher 通用。</div>
         </div>
       </details>
 
@@ -481,137 +676,295 @@
           <div class="hint phint" data-p="incremental">incremental = COLMAP 經典增量式 mapper,逐張加入重建。</div>
           <div class="hint phint" data-p="pose_prior">pose_prior = 把 GPS 位置先驗放進 BA,大場景抗漂移、輸出直接是公制+地理對齊(需每張帶 GPS;此時不必再開下方 GPS 對齊)。</div>
           <div class="hint phint" data-p="hierarchical">hierarchical = h3dgs 的 hierarchical_mapper:把場景切成重疊子模型,平行重建後合併,適合 global/incremental 撐不住的超大場景。輸出一樣落在 sparse/0,下游 train/undistort 不變。建議搭配 MATCHER=custom + 下方「大場景」的 simplify / 重力對齊。</div>
-          <label>DATASET_NAME</label>
-          <input name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}">
+          <div class="prow">
+            <label class="plabel" for="cm_dataset_name"><span class="ptext">DATASET_NAME</span></label>
+            <div class="pctl"><input id="cm_dataset_name" name="DATASET_NAME" value="{{ colmap_defaults.DATASET_NAME }}"></div>
+          </div>
           <!-- 參數:僅 pose_prior 用得到 -->
           <div class="pgrp" data-p="pose_prior">
-            <div class="hint" style="margin-top:10px;">GPS 位置精度 std (公尺):消費級 3~5、RTK ~0.02。</div>
-            <label>PRIOR_STD_X / Y / Z</label>
-            <div class="row">
-              <input name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
-              <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
-              <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
+            <div class="prow stack">
+              <label class="plabel" for="cm_prior_std_x"><span class="ptext">PRIOR_STD_X / Y / Z</span>
+                <span class="info" onclick="togHint(event,'h_cm_prior_std')" title="說明">?</span>
+              </label>
+              <div class="pctl"><div class="row">
+                <input id="cm_prior_std_x" name="PRIOR_STD_X" value="{{ colmap_defaults.PRIOR_STD_X }}">
+                <input name="PRIOR_STD_Y" value="{{ colmap_defaults.PRIOR_STD_Y }}">
+                <input name="PRIOR_STD_Z" value="{{ colmap_defaults.PRIOR_STD_Z }}">
+              </div></div>
             </div>
+            <div class="fhint" id="h_cm_prior_std">GPS 位置精度 std (公尺):消費級 3~5、RTK ~0.02。</div>
           </div>
           <!-- 外方位參數 CSV:測繪廠商交付的 EO。位置寫進 DB pose_priors 蓋掉 EXIF;
                ω/φ/κ 只能降成 gravity 欄(COLMAP DB 沒有旋轉先驗),僅 global_mapper 會用。 -->
-          <div class="hint" style="margin-top:14px;">外方位參數 CSV(選填):欄位 ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA。ID 需等於影像檔名(不含副檔名);同一次曝光的其他鏡頭會用 EXIF GPS 自動配對。位置會覆蓋 EXIF 先驗;ω/φ/κ 只能以重力向量進 DB(COLMAP 沒有旋轉先驗欄位),要真正吃到完整姿態請走 point_triangulator。</div>
-          <label>POSE_PRIOR_CSV（留空 = 不用）</label>
-          <input name="POSE_PRIOR_CSV" value="{{ colmap_defaults.POSE_PRIOR_CSV }}" placeholder="/path/to/外方位參數.csv">
-          <label>POSE_PRIOR_CRS（EASTING/NORTHING 的投影;twd97_tm2_121 = EPSG:3826)</label>
-          <input name="POSE_PRIOR_CRS" value="{{ colmap_defaults.POSE_PRIOR_CRS }}" placeholder="twd97_tm2_121">
-          <label class="chk"><input type="checkbox" name="POSE_PRIOR_RIG_MATCH" {% if colmap_defaults.POSE_PRIOR_RIG_MATCH %}checked{% endif %}>把 CSV 站心用 EXIF GPS 配到同機組其他鏡頭</label>
-          <label class="chk"><input type="checkbox" name="POSE_PRIOR_GRAVITY" {% if colmap_defaults.POSE_PRIOR_GRAVITY %}checked{% endif %}>由 ω/φ/κ 寫入重力先驗(僅檔名精確對到的影像)</label>
-          <label class="chk pgrp" data-p="global"><input type="checkbox" name="RA_USE_GRAVITY" {% if colmap_defaults.RA_USE_GRAVITY %}checked{% endif %}>RA_USE_GRAVITY:global_mapper 旋轉平均時使用重力先驗</label>
+          <div class="prow stack">
+            <label class="plabel" for="cm_pose_prior_csv"><span class="ptext">POSE_PRIOR_CSV</span>
+              <span class="info" onclick="togHint(event,'h_cm_pose_prior_csv')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_pose_prior_csv" name="POSE_PRIOR_CSV" value="{{ colmap_defaults.POSE_PRIOR_CSV }}" placeholder="/path/to/外方位參數.csv"></div>
+          </div>
+          <div class="fhint" id="h_cm_pose_prior_csv">外方位參數 CSV(選填,留空 = 不用):欄位 ID,EASTING,NORTHING,ELLIPSOID HEIGHT,OMEGA,PHI,KAPPA。ID 需等於影像檔名(不含副檔名);同一次曝光的其他鏡頭會用 EXIF GPS 自動配對。位置會覆蓋 EXIF 先驗;ω/φ/κ 只能以重力向量進 DB(COLMAP 沒有旋轉先驗欄位),要真正吃到完整姿態請走 point_triangulator。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_pose_prior_crs"><span class="ptext">POSE_PRIOR_CRS</span>
+              <span class="info" onclick="togHint(event,'h_cm_pose_prior_crs')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_pose_prior_crs" name="POSE_PRIOR_CRS" value="{{ colmap_defaults.POSE_PRIOR_CRS }}" placeholder="twd97_tm2_121"></div>
+          </div>
+          <div class="fhint" id="h_cm_pose_prior_crs">EASTING/NORTHING 的投影;twd97_tm2_121 = EPSG:3826。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_ppr_rig"><span class="ptext">CSV 站心配到同機組其他鏡頭</span>
+              <span class="info" onclick="togHint(event,'h_cm_ppr_rig')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_ppr_rig" name="POSE_PRIOR_RIG_MATCH" {% if colmap_defaults.POSE_PRIOR_RIG_MATCH %}checked{% endif %}></div>
+          </div>
+          <div class="fhint" id="h_cm_ppr_rig">用 EXIF GPS 把 CSV 的站心配到同一次曝光的其他鏡頭。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_ppr_gravity"><span class="ptext">由 ω/φ/κ 寫入重力先驗</span>
+              <span class="info" onclick="togHint(event,'h_cm_ppr_gravity')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_ppr_gravity" name="POSE_PRIOR_GRAVITY" {% if colmap_defaults.POSE_PRIOR_GRAVITY %}checked{% endif %}></div>
+          </div>
+          <div class="fhint" id="h_cm_ppr_gravity">僅檔名精確對到的影像。</div>
+          <div class="prow pgrp" data-p="global">
+            <label class="plabel" for="cm_ra_gravity"><span class="ptext">RA_USE_GRAVITY</span>
+              <span class="info" onclick="togHint(event,'h_cm_ra_gravity')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_ra_gravity" name="RA_USE_GRAVITY" {% if colmap_defaults.RA_USE_GRAVITY %}checked{% endif %}></div>
+          </div>
+          <div class="fhint" id="h_cm_ra_gravity">global_mapper 旋轉平均時使用重力先驗。</div>
           <!-- 參數:僅 hierarchical 用得到（留空=COLMAP 預設） -->
           <div class="pgrp" data-p="hierarchical">
-            <div class="hint" style="margin-top:10px;">分區參數(留空用 COLMAP 4.0.4 預設)。</div>
-            <label>HM_LEAF_MAX_NUM_IMAGES（每個子模型最多影像數;預設 500)</label>
-            <input name="HM_LEAF_MAX_NUM_IMAGES" value="{{ colmap_defaults.HM_LEAF_MAX_NUM_IMAGES }}" placeholder="500">
-            <label>HM_IMAGE_OVERLAP（相鄰子模型重疊影像數;預設 50)</label>
-            <input name="HM_IMAGE_OVERLAP" value="{{ colmap_defaults.HM_IMAGE_OVERLAP }}" placeholder="50">
-            <label>HM_NUM_WORKERS（平行重建子模型的 worker 數;-1=自動)</label>
-            <input name="HM_NUM_WORKERS" value="{{ colmap_defaults.HM_NUM_WORKERS }}" placeholder="-1">
+            <div class="prow">
+              <label class="plabel" for="cm_hm_leaf"><span class="ptext">HM_LEAF_MAX_NUM_IMAGES</span>
+                <span class="info" onclick="togHint(event,'h_cm_hm')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_hm_leaf" name="HM_LEAF_MAX_NUM_IMAGES" value="{{ colmap_defaults.HM_LEAF_MAX_NUM_IMAGES }}" placeholder="500"></div>
+            </div>
+            <div class="fhint" id="h_cm_hm">分區參數,留空 = 用 COLMAP 4.2 預設(leaf 500 / overlap 50 / workers -1 自動)。每個子模型最多影像數 / 相鄰子模型重疊影像數 / 平行重建子模型的 worker 數。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_hm_overlap"><span class="ptext">HM_IMAGE_OVERLAP</span></label>
+              <div class="pctl"><input id="cm_hm_overlap" name="HM_IMAGE_OVERLAP" value="{{ colmap_defaults.HM_IMAGE_OVERLAP }}" placeholder="50"></div>
+            </div>
+            <div class="prow">
+              <label class="plabel" for="cm_hm_workers"><span class="ptext">HM_NUM_WORKERS</span></label>
+              <div class="pctl"><input id="cm_hm_workers" name="HM_NUM_WORKERS" value="{{ colmap_defaults.HM_NUM_WORKERS }}" placeholder="-1"></div>
+            </div>
           </div>
           <!-- GPU BA (--Mapper.ba_use_gpu):incremental / pose_prior / hierarchical 適用。
                global_mapper 不掛這個字首,它自己的 Ceres BA 預設就是 GPU
                (--GlobalMapper.ba_ceres_use_gpu=1),不需要這顆開關。 -->
-          <label class="chk pgrp" data-p="incremental pose_prior hierarchical" style="margin-top:10px;">
-            <input type="checkbox" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}>
-            <span>GPU bundle adjustment（--Mapper.ba_use_gpu;大幅加速 BA,建議開）</span>
-          </label>
+          <div class="prow pgrp" data-p="incremental pose_prior hierarchical">
+            <label class="plabel" for="cm_ba_gpu"><span class="ptext">GPU bundle adjustment</span>
+              <span class="info" onclick="togHint(event,'h_cm_ba_gpu')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_ba_gpu" name="MAPPER_BA_GPU" value="1" {{ 'checked' if colmap_defaults.MAPPER_BA_GPU=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_ba_gpu">--Mapper.ba_use_gpu;大幅加速 BA,建議開。global_mapper 不吃這顆(它自己的 Ceres BA 預設就是 GPU)。</div>
           <!-- BA backend:四種 mapper 都適用(global 用 --GlobalMapper.ba_backend,
                其餘三種用 --Mapper.ba_*_backend;COLMAP main@2fe2b41 起 global/hierarchical
                也能選 CASPAR 了) -->
-          <div class="pgrp" data-p="incremental pose_prior global hierarchical" style="margin-top:10px;">
-            <label>BA 後端（BA_BACKEND）</label>
-            <select name="BA_BACKEND">
-              <option value="ceres" {{ 'selected' if colmap_defaults.BA_BACKEND=='ceres' }}>ceres（預設;incremental/pose_prior/hierarchical 搭配上方 GPU BA 用 cuDSS,global 本身預設已是 GPU）</option>
-              <option value="caspar" {{ 'selected' if colmap_defaults.BA_BACKEND=='caspar' }}>caspar（GPU,快約 1~2 個數量級;需 SIMPLE_RADIAL/PINHOLE 相機）</option>
-            </select>
-            <div class="hint">caspar = COLMAP 的 SymForce GPU 解算器,接管 local+global BA(四種 mapper 都吃)。<b>相機模型必須是 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過所有影像、不做 BA。incremental/pose_prior/hierarchical 選 caspar 時上方 GPU BA 勾選會被忽略。</div>
+          <div class="pgrp" data-p="incremental pose_prior global hierarchical">
+            <div class="prow">
+              <label class="plabel" for="cm_ba_backend"><span class="ptext">BA 後端 (BA_BACKEND)</span>
+                <span class="info" onclick="togHint(event,'h_cm_ba_backend')" title="說明">?</span>
+              </label>
+              <div class="pctl">
+                <select id="cm_ba_backend" name="BA_BACKEND">
+                  <option value="ceres" {{ 'selected' if colmap_defaults.BA_BACKEND=='ceres' }}>ceres（預設）</option>
+                  <option value="caspar" {{ 'selected' if colmap_defaults.BA_BACKEND=='caspar' }}>caspar（GPU,快 1~2 個數量級）</option>
+                </select>
+              </div>
+            </div>
+            <div class="fhint" id="h_cm_ba_backend">ceres = 預設;incremental/pose_prior/hierarchical 搭配上方 GPU BA 用 cuDSS,global 本身預設已是 GPU。caspar = COLMAP 的 SymForce GPU 解算器,接管 local+global BA(四種 mapper 都吃)。<b>相機模型必須是 SIMPLE_RADIAL 或 PINHOLE</b>,否則 Caspar 會跳過所有影像、不做 BA。incremental/pose_prior/hierarchical 選 caspar 時上方 GPU BA 勾選會被忽略。</div>
           </div>
         </div>
       </details>
 
       <details class="grp">
-        <summary>GPS 對齊 + 大場景後處理 (h3dgs)</summary>
+        <summary>座標與尺度（GPS 對齊 / 轉正）</summary>
         <div class="gbody">
-          <div class="hint">GPS 流程(spatial / pose_prior / 下方對齊)需<b>每張都有</b> EXIF GPS,非 100% 覆蓋會在開跑前中斷。影片轉幀無 per-frame GPS。</div>
-          <label class="chk" style="margin-top:10px;">
-            <input type="checkbox" name="GPS_ALIGN" value="1" {{ 'checked' if colmap_defaults.GPS_ALIGN=='1' }}>
-            <span>GPS 對齊（公制尺度,model_aligner → ENU 公尺）</span>
-          </label>
-          <div class="hint">把稀疏模型改寫成真實公尺座標(需有 GPS)。與 Mesh 的 ChArUco mm 校正擇一,別同開。pose_prior 已對齊過可不勾。</div>
-          <label>GPS_ALIGN_MAX_ERROR（RANSAC 內點門檻,公尺）</label>
-          <input name="GPS_ALIGN_MAX_ERROR" value="{{ colmap_defaults.GPS_ALIGN_MAX_ERROR }}">
-
-          <label style="margin-top:14px;">MAX_IMAGE_SIZE（image_undistorter 長邊上限;留空=不限,h3dgs 用 2048)</label>
-          <input name="MAX_IMAGE_SIZE" value="{{ colmap_defaults.MAX_IMAGE_SIZE }}" placeholder="2048">
-          <label class="chk" style="margin-top:10px;">
-            <input type="checkbox" name="SIMPLIFY" value="1" {{ 'checked' if colmap_defaults.SIMPLIFY=='1' }}>
-            <span>simplify_images（剔除離群相機 + 沒配上 3D 點的觀測;原始備份 images_heavy.bin)</span>
-          </label>
-          <label>SIMPLIFY_MULT_MIN_DIST（相機間距 > 此倍×中位數 視為離群;預設 10)</label>
-          <input name="SIMPLIFY_MULT_MIN_DIST" value="{{ colmap_defaults.SIMPLIFY_MULT_MIN_DIST }}">
-          <label class="chk" style="margin-top:10px;">
-            <input type="checkbox" name="REORIENT" value="1" {{ 'checked' if colmap_defaults.REORIENT=='1' }}>
-            <span>auto_reorient（把場景轉正「up 朝上」+ 等比縮放;只改去畸變模型,影像不動)</span>
-          </label>
-          <label>REORIENT_TARGET_MED_DIST（縮放到「相機→點」中位距=此值;預設 20)</label>
-          <input name="REORIENT_TARGET_MED_DIST" value="{{ colmap_defaults.REORIENT_TARGET_MED_DIST }}">
-          <label>REORIENT_UPSCALE（手動縮放倍率;0=用上面目標距離自動算)</label>
-          <input name="REORIENT_UPSCALE" value="{{ colmap_defaults.REORIENT_UPSCALE }}">
-          <div class="hint">沒開 GPS:PCA 猜重力轉正 + 縮放(上兩個參數生效)。有開 GPS:只做 Z-up→Y-up 軸轉、保留公制尺度。要「真實公尺 + viewer 正立」兩個都勾。</div>
-          <label>MASKS_DIR（前景遮罩資料夾;留空=不用。用相同相機去畸變,輸出到 &lt;out&gt;_*_mapper/masks)</label>
-          <input name="MASKS_DIR" value="{{ colmap_defaults.MASKS_DIR }}" placeholder="留空 = 不用遮罩">
+          <div class="hint">這一組決定「重建出來的座標是什麼」。<b>不確定就全部留預設</b> —— 預設是不動座標,
+            訓練與量測照樣能跑,只是尺度不是真實公尺。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_gps_align"><span class="ptext">GPS 對齊(→ 公制)</span>
+              <span class="info" onclick="togHint(event,'h_cm_gps_align')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_gps_align" name="GPS_ALIGN" value="1" {{ 'checked' if colmap_defaults.GPS_ALIGN=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_gps_align">
+            <b>什麼時候開:</b>每張影像都有 EXIF GPS,而且你 Mapping 選的<b>不是</b> pose_prior。
+            跑 model_aligner 把稀疏模型改寫成 ENU 真實公尺座標。<br>
+            <b>什麼時候不要開:</b>① Mapping 已選 pose_prior(GPS 先驗已經進 BA,模型本來就是公制+地理對齊,再對一次是多餘的);
+            ② 要用 Mesh 頁的 ChArUco mm 校正定尺度(兩者擇一,同開會打架);③ 沒有 per-frame GPS(影片轉幀就沒有)。<br>
+            前提:GPS 需<b>每張都有</b>,非 100% 覆蓋會在開跑前中斷。
+          </div>
+          <div class="prow">
+            <label class="plabel" for="cm_gps_err"><span class="ptext">GPS_ALIGN_MAX_ERROR</span>
+              <span class="info" onclick="togHint(event,'h_cm_gps_err')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_gps_err" name="GPS_ALIGN_MAX_ERROR" value="{{ colmap_defaults.GPS_ALIGN_MAX_ERROR }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_gps_err">RANSAC 內點門檻(公尺)。只在上面勾了 GPS 對齊時生效。
+            消費級 GPS 3.0(預設);RTK 可降到 0.05~0.1 讓對齊更嚴格。訂太小會因內點不足而對齊失敗。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_reorient"><span class="ptext">auto_reorient(轉正)</span>
+              <span class="info" onclick="togHint(event,'h_cm_reorient')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_reorient" name="REORIENT" value="1" {{ 'checked' if colmap_defaults.REORIENT=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_reorient">
+            把場景轉成「up 朝上」,只改去畸變後的模型,影像不動。行為<b>取決於上面的 GPS 對齊有沒有開</b>:<br>
+            ‧ <b>有開 GPS 對齊</b> → 只做 Z-up→Y-up 軸轉,<b>保留公制尺度</b>。要「真實公尺 + viewer 正立」就兩個都勾。<br>
+            ‧ <b>沒開 GPS 對齊</b> → 用 PCA 猜重力方向轉正,<b>並且會重新縮放場景</b>(下面兩個參數才生效)。
+            ⚠ 如果你的模型已經是公制(例如 pose_prior 或事後自己對過),單獨勾這個會<b>把公制尺度改掉</b>。
+          </div>
+          <div class="prow">
+            <label class="plabel" for="cm_reorient_med"><span class="ptext">REORIENT_TARGET_MED_DIST</span>
+              <span class="info" onclick="togHint(event,'h_cm_reorient_med')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_reorient_med" name="REORIENT_TARGET_MED_DIST" value="{{ colmap_defaults.REORIENT_TARGET_MED_DIST }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_reorient_med">縮放到「相機→點」中位距 = 此值(預設 20)。
+            <b>只有在「勾了 auto_reorient 且沒開 GPS 對齊」時才生效</b>,其餘情況這格填什麼都沒差。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_reorient_up"><span class="ptext">REORIENT_UPSCALE</span>
+              <span class="info" onclick="togHint(event,'h_cm_reorient_up')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_reorient_up" name="REORIENT_UPSCALE" value="{{ colmap_defaults.REORIENT_UPSCALE }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_reorient_up">手動縮放倍率;0 = 用上面的目標中位距自動算。同樣只在「auto_reorient 且沒開 GPS 對齊」時生效。</div>
         </div>
       </details>
 
       <details class="grp">
-        <summary>Pipeline</summary>
+        <summary>去畸變輸出（undistort）</summary>
         <div class="gbody">
-          <label>STAGES</label>
-          <div class="checks">
-            {% for s in stages %}<label><input type="checkbox" name="stages" value="{{ s }}" checked> {{ s }}</label>{% endfor %}
+          <div class="hint">這一組決定「交給 3DGS 訓練的影像長什麼樣」。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_max_image_size"><span class="ptext">MAX_IMAGE_SIZE</span>
+              <span class="info" onclick="togHint(event,'h_cm_max_image_size')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_max_image_size" name="MAX_IMAGE_SIZE" value="{{ colmap_defaults.MAX_IMAGE_SIZE }}" placeholder="留空 = 不限(建議)"></div>
           </div>
-          <div class="checks" style="margin-top:10px;">
-            <label><input type="checkbox" name="FORCE" value="1"> FORCE（重跑）</label>
+          <div class="fhint" id="h_cm_max_image_size">image_undistorter 的長邊上限。<b>留空 = 不縮(建議)</b> ——
+            去畸變不是瓶頸,原生解析度跑得動,砍在這裡等於直接丟掉 GSD。h3dgs 論文用 2048 是為了配合它自己的訓練預算,
+            你要原生解析度訓練就<b>不要填</b>。注意這跟上面 Inputs 的「影像解析度」是<b>兩道獨立的關卡</b>,
+            那一道已經先縮過一次了。</div>
+          <div class="prow stack">
+            <label class="plabel" for="cm_masks_dir"><span class="ptext">MASKS_DIR(前景遮罩)</span>
+              <span class="info" onclick="togHint(event,'h_cm_masks_dir')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_masks_dir" name="MASKS_DIR" value="{{ colmap_defaults.MASKS_DIR }}" placeholder="留空 = 不用遮罩"></div>
           </div>
+          <div class="fhint" id="h_cm_masks_dir">要做「只重建前景物件、去掉背景」時才填。填放遮罩的資料夾,
+            會用<b>同一組相機參數</b>把遮罩一起去畸變(不然遮罩會對不上去畸變後的影像),輸出到
+            <code>&lt;out&gt;_*_mapper/masks</code>,訓練時再搭配 LichtFeld 的「遮罩模式」。一般整場景重建留空。</div>
         </div>
       </details>
 
       <details class="grp">
-        <summary>Advanced</summary>
+        <summary>大場景後處理（h3dgs simplify）</summary>
         <div class="gbody">
-          <label>VOCAB_TREE（留空=預設路徑,缺檔自動下載）</label>
-          <input name="VOCAB_TREE" value="{{ colmap_defaults.VOCAB_TREE }}">
-          <label>VOCAB_TREE_URL</label>
-          <input name="VOCAB_TREE_URL" value="{{ colmap_defaults.VOCAB_TREE_URL }}">
+          <div class="hint">超大場景(數千張以上)才需要動。一般案子留預設不勾。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_simplify"><span class="ptext">simplify_images</span>
+              <span class="info" onclick="togHint(event,'h_cm_simplify')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_simplify" name="SIMPLIFY" value="1" {{ 'checked' if colmap_defaults.SIMPLIFY=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_simplify"><b>什麼時候開:</b>影像量很大、且重建結果有少數飛掉的離群相機在拖累場景時。
+            會剔除離群相機 + 沒配上 3D 點的觀測,讓下游訓練更乾淨、更省記憶體。
+            原始的 images.bin 會備份成 <code>images_heavy.bin</code>,所以是可回復的。h3dgs 流程預設會跑這步。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_simplify_dist"><span class="ptext">SIMPLIFY_MULT_MIN_DIST</span>
+              <span class="info" onclick="togHint(event,'h_cm_simplify_dist')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_simplify_dist" name="SIMPLIFY_MULT_MIN_DIST" value="{{ colmap_defaults.SIMPLIFY_MULT_MIN_DIST }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_simplify_dist">相機間距 &gt; 此倍率 × 中位數 就視為離群(預設 10)。
+            只在勾了 simplify_images 時生效。調小 = 剔得更兇(小心誤殺正常的航線邊緣);調大 = 只砍極端離群。</div>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Pipeline（要跑哪些階段）</summary>
+        <div class="gbody">
+          <div class="prow stack">
+            <label class="plabel"><span class="ptext">STAGES</span>
+              <span class="info" onclick="togHint(event,'h_cm_stages')" title="說明">?</span>
+            </label>
+            <div class="pctl"><div class="checks">
+              {% for s in stages %}<label><input type="checkbox" name="stages" value="{{ s }}" checked> {{ s }}</label>{% endfor %}
+            </div></div>
+          </div>
+          <div class="fhint" id="h_cm_stages">依序執行的階段,<b>預設全勾 = 跑完整條</b>。取消勾選就跳過該階段 ——
+            用在「前面都跑完了,只想重跑後段」的情況(例如只重跑 undistort)。跳過的階段會沿用上次的產出,
+            所以前置產物必須已經存在。已完成的階段本來就會自動略過(靠 sentinel 檔判斷),
+            正常情況不用動這裡。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_force"><span class="ptext">FORCE(強制重跑)</span>
+              <span class="info" onclick="togHint(event,'h_cm_force')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_force" name="FORCE" value="1"></div>
+          </div>
+          <div class="fhint" id="h_cm_force">忽略「已完成」的判斷,把勾選的階段全部重做一次。
+            改了參數想重算時勾它,否則會因為偵測到既有產出而直接跳過。</div>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>Advanced（vocab tree）</summary>
+        <div class="gbody">
+          <div class="hint">MATCHER 選 <code>vocab</code> 或 <code>both</code> 時才會用到。兩格都留預設即可,缺檔會自動下載。</div>
+          <div class="prow stack">
+            <label class="plabel" for="cm_vocab_tree"><span class="ptext">VOCAB_TREE</span>
+              <span class="info" onclick="togHint(event,'h_cm_vocab_tree')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_vocab_tree" name="VOCAB_TREE" value="{{ colmap_defaults.VOCAB_TREE }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_vocab_tree">vocab tree 檔案的本機路徑。留空 = 用預設路徑
+            (<code>~/.cache/colmap/</code>),檔案不存在時會用下面的網址自動下載一次,之後就重複使用。
+            只有你要換成自己訓練的 vocab tree 時才需要改。</div>
+          <div class="prow stack">
+            <label class="plabel" for="cm_vocab_url"><span class="ptext">VOCAB_TREE_URL</span>
+              <span class="info" onclick="togHint(event,'h_cm_vocab_url')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input id="cm_vocab_url" name="VOCAB_TREE_URL" value="{{ colmap_defaults.VOCAB_TREE_URL }}"></div>
+          </div>
+          <div class="fhint" id="h_cm_vocab_url">上面那個檔案不存在時的下載來源(COLMAP 官方 release 的
+            flickr100K 256K words)。離線環境請自己把檔案放到上面的路徑,這格就用不到。</div>
         </div>
       </details>
 
       <button class="submit" type="submit">▶ 啟動 COLMAP</button>
     </form>
 
-    {# render one tunable param field from its schema entry (shared by train + mesh) #}
-    {% macro field(pr, ready) %}
-      {% if pr.type == 'bool' %}
-      <label class="chk" style="margin-top:8px"><input type="checkbox" name="{{ pr.key }}" value="1"
-             {{ 'checked' if pr.default }} {{ '' if ready else 'disabled' }}> <span>{{ pr.label }}</span></label>
-      {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
-      {% elif pr.type == 'select' %}
-      <label>{{ pr.label }}</label>
-      <select name="{{ pr.key }}" {{ '' if ready else 'disabled' }}>
-        {% for o in pr.options %}<option {{ 'selected' if o==pr.default }}>{{ o }}</option>{% endfor %}
-      </select>
-      {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
-      {% else %}
-      <label>{{ pr.label }}</label>
-      <input name="{{ pr.key }}" value="{{ pr.default }}" {{ '' if ready else 'disabled' }}
-             {% if pr.placeholder %}placeholder="{{ pr.placeholder }}"{% endif %}>
-      {% if pr.hint %}<div class="hint">{{ pr.hint }}</div>{% endif %}
-      {% endif %}
+    {# Render one tunable param from its schema entry (shared by train + mesh).
+       Compact row: label (+ ⓘ) left, control right; the hint is collapsed under
+       the ⓘ so long explanations don't stretch the panel. `ns` namespaces the
+       element ids — every backend's block is in the DOM at once (hidden ones are
+       just display:none + disabled), so bare pr.key ids would collide. #}
+    {% macro field(pr, ready, ns='') %}
+      {% set fid = ns ~ '_' ~ pr.key %}
+      <div class="prow">
+        <label class="plabel" for="{{ fid }}">
+          <span class="ptext">{{ pr.label }}</span>
+          {% if pr.hint %}<span class="info" onclick="togHint(event,'h_{{ fid }}')" title="說明">?</span>{% endif %}
+        </label>
+        <span class="pctl">
+          {% if pr.type == 'bool' %}
+          <input type="checkbox" id="{{ fid }}" name="{{ pr.key }}" value="1"
+                 {{ 'checked' if pr.default }} {{ '' if ready else 'disabled' }}>
+          {% elif pr.type == 'select' %}
+          <select id="{{ fid }}" name="{{ pr.key }}" {{ '' if ready else 'disabled' }}>
+            {% for o in pr.options %}<option {{ 'selected' if o==pr.default }}>{{ o }}</option>{% endfor %}
+          </select>
+          {% else %}
+          <input id="{{ fid }}" name="{{ pr.key }}" value="{{ pr.default }}" {{ '' if ready else 'disabled' }}
+                 {% if pr.placeholder %}placeholder="{{ pr.placeholder }}"{% endif %}>
+          {% endif %}
+        </span>
+      </div>
+      {% if pr.hint %}<div class="fhint" id="h_{{ fid }}">{{ pr.hint }}</div>{% endif %}
     {% endmacro %}
 
     <!-- ----- depth/normal form (LichtFeld-Studio `preprocess` -> depth/ + normals/) ----- -->
@@ -624,7 +977,7 @@
           訓練時加 <code>--use-depth-loss</code> / <code>--use-normal-loss</code> 會自動讀取。</div>
         {% if not depth_ready %}
         <div class="hint" style="color:var(--err)">⚠ 找不到編譯好的 LichtFeld-Studio binary(跟
-          lichtfeld-mrnf/igs+ 訓練 backend 共用同一份)。請先在 <code>../LichtFeld-Studio</code> 建置,
+          lichtfeld-mrnf 訓練 backend 共用同一份)。請先在 <code>../LichtFeld-Studio</code> 建置,
           或開 <a href="/doctor" target="_blank" style="color:var(--accent)">/doctor</a> 檢查。</div>
         {% endif %}
         <label>images(照片資料夾,或含 images/ 的 COLMAP workspace)</label>
@@ -658,7 +1011,6 @@
           <input name="max_side" value="{{ depth_defaults.max_side }}" {{ '' if depth_ready else 'disabled' }}>
           <label style="margin-top:8px">bit-depth(輸出 PNG 位元深度,留空 = 內建預設 16;8-bit 深度先驗量化較明顯)</label>
           <input name="bit_depth" value="{{ depth_defaults.bit_depth }}" {{ '' if depth_ready else 'disabled' }}>
-          <label class="chk" style="margin-top:8px"><input type="checkbox" name="cpu" value="1"> <span>強制 CPU 推論(忽略 GPU)</span></label>
           <label class="chk" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> <span>覆蓋已存在的深度/法向量圖(預設略過,可續跑)</span></label>
         </div>
       </details>
@@ -774,11 +1126,11 @@
       <div class="bp" data-backend="{{ b.name }}" data-binary="{{ '1' if b.binary else '' }}" {{ '' if b.name == train_defaults.backend else 'style=display:none' }}>
         <fieldset>
           <legend>{{ b.label }} 參數</legend>
-          {% for pr in b.params if not pr.group %}{{ field(pr, b.ready) }}{% endfor %}
+          {% for pr in b.params if not pr.group %}{{ field(pr, b.ready, b.name) }}{% endfor %}
         </fieldset>
         {% for grp, items in (b.params | selectattr('group', 'defined') | list | groupby('group')) %}
         <details class="grp"><summary>{{ grp }}</summary><div class="gbody">
-          {% for pr in items %}{{ field(pr, b.ready) }}{% endfor %}
+          {% for pr in items %}{{ field(pr, b.ready, b.name) }}{% endfor %}
         </div></details>
         {% endfor %}
       </div>
@@ -863,7 +1215,7 @@
       <div class="bp" data-backend="{{ b.name }}" {{ '' if loop.first else 'style=display:none' }}>
         <fieldset>
           <legend>{{ b.label }} Mesh 參數</legend>
-          {% for pr in b.mesh_params %}{{ field(pr, b.ready) }}{% endfor %}
+          {% for pr in b.mesh_params %}{{ field(pr, b.ready, b.name ~ '_mesh') }}{% endfor %}
         </fieldset>
       </div>
       {% endfor %}
@@ -1142,6 +1494,15 @@
 
   // Show the selected backend's param block within a form; disable inputs in the
   // hidden blocks so only the chosen backend's fields are submitted (no key clash).
+  // ⓘ toggle next to a compact param row: reveal/hide that param's explanation.
+  // stopPropagation so clicking it never toggles the <label for=...> control.
+  function togHint(ev, id){
+    ev.preventDefault(); ev.stopPropagation();
+    var el = document.getElementById(id);
+    if (!el) return;
+    var on = el.classList.toggle('on');
+    if (ev.currentTarget) ev.currentTarget.classList.toggle('on', on);
+  }
   function syncBackendParams(form){
     var sel = document.getElementById(form + '_backend');
     if (!sel) return;
@@ -1187,7 +1548,9 @@
     if (!iterEl || !scEl){ if (hint) hint.remove(); return; }   // only LichtFeld has both
     if (!hint){
       hint = document.createElement('div'); hint.className = 'hint lf-eff';
-      hint.style.color = 'var(--accent)'; scEl.insertAdjacentElement('afterend', hint);
+      hint.style.color = 'var(--accent)';
+      // anchor after the whole compact row, not inside its control column
+      (scEl.closest('.prow') || scEl).insertAdjacentElement('afterend', hint);
     }
     var it = parseFloat(iterEl.value) || 0, sc = parseFloat(scEl.value);
     hint.innerHTML = (sc && sc > 0 && sc !== 1)
@@ -1218,6 +1581,7 @@
     var m = sel.value;
     // data-p may list several mappers (e.g. "incremental pose_prior") — show if m is in it.
     document.querySelectorAll('.phint,.pgrp').forEach(function(e){
+      if (!e.dataset.p) return;           // not a mapper-scoped block
       e.style.display = (e.dataset.p.split(' ').indexOf(m) >= 0) ? '' : 'none';
     });
   }

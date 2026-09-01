@@ -28,7 +28,6 @@ DEPTH_DEFAULTS = {
     "model": "",          # blank = auto-download the default MoGe-2 ONNX model
     "max_side": "",       # blank = LichtFeld default (518)
     "bit_depth": "",      # blank = LichtFeld default (16)
-    "cpu": False,
     "overwrite": False,
 }
 
@@ -111,14 +110,12 @@ def run_depth(p: dict, r: Runner) -> None:
     bit_depth = str(p.get("bit_depth") or "").strip()
     if bit_depth:
         argv += ["--bit-depth", bit_depth]
-    if p.get("cpu"):
-        argv.append("--cpu")
     if p.get("overwrite"):
         argv.append("--overwrite")
 
     env = {}
     gpu = str(p.get("gpu", "")).strip()
-    if gpu != "" and not p.get("cpu"):
+    if gpu != "":
         env["CUDA_VISIBLE_DEVICES"] = gpu
 
     outputs = []

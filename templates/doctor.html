@@ -84,7 +84,7 @@
     <tr><td class="mut">exec_ok</td><td>{{ yn(report.depth.exec_ok) }}</td></tr>
   </table>
   {% if not report.depth.ready %}
-  <div class="mut" style="margin-top:6px">找不到編譯好的 LichtFeld-Studio binary(跟 lichtfeld-mrnf/igs+ 訓練 backend 共用同一份):
+  <div class="mut" style="margin-top:6px">找不到編譯好的 LichtFeld-Studio binary(跟 lichtfeld-mrnf 訓練 backend 共用同一份):
     請先在 <code>../LichtFeld-Studio</code> 建置(見 README「安裝」)。MoGe-2 ONNX 模型會在第一次執行 preprocess 時自動下載,不需另外設定。</div>
   {% endif %}
 </div>
