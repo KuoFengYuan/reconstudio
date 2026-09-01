@@ -155,7 +155,18 @@ def test_auto_reports_failure_when_no_key_is_shared():
     assert any("could not find a shared exposure key" in n for n in notes)
 
 
-def test_auto_needs_at_least_two_camera_folders():
-    g, notes = group_auto([f"N/N-1_{i}-100{i}.jpg" for i in range(3)])
-    assert g.cameras == []
-    assert any("at least two camera folders" in n for n in notes)
+def test_auto_falls_back_to_a_filename_prefix_when_there_are_no_folders():
+    # flat dataset, camera only distinguishable by the leading prefix
+    names = [f"{cam}_{i}-{base + i}.jpg"
+             for cam, base in (("alpha", 500), ("bravo", 900)) for i in range(3)]
+    g, notes = group_auto(names)
+    assert g.cameras == ["alpha", "bravo"]
+    assert g.complete_frames() == ["0", "1", "2"]
+    assert any("by filename prefix" in n for n in notes)
+
+
+def test_auto_reports_when_only_one_camera_can_be_identified():
+    # one folder AND one filename prefix: nothing to constrain against
+    g, notes = group_auto([f"N/img_{i}.jpg" for i in range(3)])
+    assert g.complete_frames() == []
+    assert any("only one camera" in n for n in notes)

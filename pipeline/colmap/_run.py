@@ -580,7 +580,19 @@ def _stage_rig_stage(c: _Ctx) -> None:
     """
     if not c.rig_enable:
         return
-    names = list_image_names(Path(c.img_root))
+    # Same listing as _build_image_list: names must be "<folder>/<file>", because
+    # the folder IS the camera. list_image_names() would return bare filenames
+    # from img_root itself, which for a multi layout is empty (images live one
+    # level down) and would leave every mode with nothing to group.
+    names: list[str] = []
+    for folder in c.folders:
+        names += list_images(Path(c.img_root) / folder, folder)
+    # No folder-count check here: auto also splits cameras by filename prefix, so
+    # a flat dataset can still be a rig. Whether the split worked is judged by the
+    # grouping below, which aborts when no exposure is covered by every camera.
+    c.r.log(f"rig: {len(names)} images across {len(c.folders)} folder(s): "
+            f"{' '.join(f or '.' for f in c.folders)}")
+
     gps_map = None
     if c.rig_mode == "gps":
         gps_map = {}
@@ -616,7 +628,15 @@ def _stage_rig_stage(c: _Ctx) -> None:
     c.rig_config = c.ws / "rig_config.json"
     ref = write_rig_config(grouping, c.rig_config, c.rig_ref_camera)
     c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")
-    c.img_root = str(stage_root)          # everything downstream reads the rig layout
+
+    # The staged tree IS the dataset from here on, and its shape is always one
+    # folder per camera — whatever the input layout was. The rest of the run has
+    # to be told, or _build_image_list looks for images in the wrong place and
+    # extraction assigns one camera to the whole rig.
+    c.img_root = str(stage_root)
+    c.folders = grouping.cameras
+    c.layout_name = "multi"
+    c.camera_mode = "per_folder"   # rig_configurator requires one camera per prefix
 
 
 def _stage_rig_configure(c: _Ctx) -> None:

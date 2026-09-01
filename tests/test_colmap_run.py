@@ -15,12 +15,14 @@ behaviour-preserving: these pass identically before and after.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from pipeline.colmap import _run
+from pipeline.runner import PipelineError
 
 # The slice of COLMAP's DB schema the pose-prior injectors touch, so the fake
 # feature_extractor can hand the later stages a database they can actually write to.
@@ -548,3 +550,77 @@ def test_no_region_leaves_the_image_list_whole(patched, imgroot, vocab, tmp_path
     _run.run_colmap(_params(imgroot, ws, vocab), r)
     assert len((ws / "image_list.txt").read_text().split()) == 3
     assert not any("region 選片" in m for m in r.logs)
+
+
+# --- multi-camera rig ------------------------------------------------------
+def _make_rig_images(root: Path, cams=("nadir", "forward", "backward"), n: int = 3) -> None:
+    """ROOT/<camera>/<CAM>-1_<index>-<serial>.jpg — a real oblique block's shape,
+    where the serial differs per body so only <strip>_<index> is shared."""
+    for c, base in zip(cams, (61214, 61294, 70924), strict=False):
+        d = root / c
+        d.mkdir(parents=True, exist_ok=True)
+        for i in range(n):
+            (d / f"{c[0].upper()}-1_{i}-{base + i}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+
+
+def test_rig_stage_groups_images_that_live_in_camera_subfolders(
+        patched, vocab, tmp_path):
+    """Regression: the stage listed img_root non-recursively and without folder
+    prefixes, so a multi layout yielded zero images and the rig always aborted."""
+    root = tmp_path / "rig_images"
+    _make_rig_images(root)
+    ws = tmp_path / "ws"
+    r = FakeRunner()
+
+    _run.run_colmap(_params(root, ws, vocab, rig_enable=True, layout="multi"), r)
+
+    assert "rig_configurator" in r.subcommands()
+    argv = r.argv_for("rig_configurator")
+    cfg = Path(argv[argv.index("--rig_config_path") + 1])
+    prefixes = [c["image_prefix"] for c in json.loads(cfg.read_text())[0]["cameras"]]
+    assert sorted(prefixes) == ["backward/", "forward/", "nadir/"]
+
+    # feature extraction must read the restaged tree, not the originals
+    fe = r.argv_for("feature_extractor")
+    assert fe[fe.index("--image_path") + 1] == str(ws / "rig_images")
+    # every camera exposes the same stems, which is the whole point of restaging
+    # (here the index field alone separates exposures, so the key is just "0"..)
+    for cam in ("nadir", "forward", "backward"):
+        assert (ws / "rig_images" / cam / "0.jpg").is_symlink()
+    assert (ws / "rig_images" / "nadir" / "0.jpg").resolve() == (
+        root / "nadir" / "N-1_0-61214.jpg").resolve()
+
+
+def test_rig_is_skipped_entirely_when_disabled(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert "rig_configurator" not in r.subcommands()
+
+
+def test_rig_aborts_when_only_one_camera_can_be_identified(patched, imgroot, vocab,
+                                                           tmp_path):
+    # imgroot is one flat folder of img_000.jpg.. — one folder and one filename
+    # prefix, so there is no second camera to constrain against.
+    with pytest.raises(PipelineError, match="no frame is covered by every camera"):
+        _run.run_colmap(
+            _params(imgroot, tmp_path / "ws", vocab, rig_enable=True), FakeRunner())
+
+
+def test_rig_splits_cameras_by_filename_prefix_when_there_are_no_folders(
+        patched, vocab, tmp_path):
+    """A flat dataset is still a rig when the bodies stamp a filename prefix.
+    Camera ids come from the data, not from any assumed folder naming."""
+    root = tmp_path / "flat"
+    root.mkdir()
+    for cam, base in (("alpha", 500), ("bravo", 900)):
+        for i in range(3):
+            (root / f"{cam}_{i}-{base + i}.jpg").write_bytes(b"\xff\xd8\xff\xd9")
+
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab,
+                            rig_enable=True, layout="single"), r)
+
+    argv = r.argv_for("rig_configurator")
+    cfg = Path(argv[argv.index("--rig_config_path") + 1])
+    prefixes = [c["image_prefix"] for c in json.loads(cfg.read_text())[0]["cameras"]]
+    assert sorted(prefixes) == ["alpha/", "bravo/"]

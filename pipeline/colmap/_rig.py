@@ -157,11 +157,26 @@ def auto_frame_key(per_cam: dict[str, list[str]]) -> tuple[tuple[int, ...], int]
     return best
 
 
-def group_auto(names: list[str]) -> tuple[RigGrouping, list[str]]:
-    """`auto` mode: camera from the folder, exposure key discovered from the names.
+def _camera_from_filename(name: str) -> str:
+    """The leading non-digit run of the filename: `N-1_0-61214.jpg` -> "N",
+    `CAM_A_00042.jpg` -> "CAM_A". Nothing about the value is assumed — it is
+    only used to tell one body from another."""
+    stem = Path(name).name
+    m = re.match(r"^([^\d]+?)[-_]?\d", stem)
+    return m.group(1).strip("-_") if m else ""
 
-    Also returns diagnostic lines, because the discovered key is a guess that the
-    user should be able to sanity-check in the log.
+
+def group_auto(names: list[str]) -> tuple[RigGrouping, list[str]]:
+    """`auto` mode: split cameras, then discover the exposure key from the names.
+
+    Cameras come from the folder when there is one folder per camera, and
+    otherwise from the leading non-digit part of the filename, so a flat dataset
+    whose bodies are only distinguishable by a filename prefix still works. No
+    camera name is assumed anywhere: whatever strings the data uses become the
+    camera ids.
+
+    Also returns diagnostic lines, because both the camera split and the key are
+    inferred and the user should be able to sanity-check them in the log.
     """
     notes: list[str] = []
     out = RigGrouping()
@@ -174,9 +189,22 @@ def group_auto(names: list[str]) -> tuple[RigGrouping, list[str]]:
         per_cam.setdefault(hit[0], []).append(name)
 
     if len(per_cam) < 2:
-        out.unmatched.extend(n for names_ in per_cam.values() for n in names_)
-        notes.append("rig: auto needs at least two camera folders")
-        return out, notes
+        # One folder (or none): fall back to a filename prefix as the camera id.
+        flat = sorted(names)
+        by_prefix: dict[str, list[str]] = {}
+        for name in flat:
+            cam = _camera_from_filename(name)
+            if cam:
+                by_prefix.setdefault(cam, []).append(name)
+        if len(by_prefix) >= 2 and sum(map(len, by_prefix.values())) == len(flat):
+            notes.append(f"rig: auto split {len(by_prefix)} cameras by filename prefix "
+                         f"({', '.join(sorted(by_prefix))}) — no per-camera folders found")
+            per_cam, out.unmatched = by_prefix, []
+        else:
+            out.unmatched.extend(n for names_ in per_cam.values() for n in names_)
+            notes.append("rig: auto found only one camera — expected either one folder "
+                         "per camera, or filenames that start with a per-camera prefix")
+            return out, notes
 
     combo, shared = auto_frame_key(per_cam)
     if not combo:
