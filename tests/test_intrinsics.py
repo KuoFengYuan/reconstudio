@@ -98,14 +98,14 @@ def test_discovery_finds_a_certificate_by_content_not_by_filename(tmp_path):
     # an unhelpful name on purpose: discovery must not depend on it
     (tmp_path / "images" / "scan_0001.txt").write_text(REPORT, encoding="utf-8")
 
-    cals, src = discover_calibrations([tmp_path])
+    cals, src = discover_calibrations(tmp_path)
     assert src is not None and src.name == "scan_0001.txt"
     assert {c.name for c in cals} == {"Nadir", "Forward"}
 
 
 def test_discovery_is_quiet_when_the_dataset_ships_no_calibration(tmp_path):
     (tmp_path / "a.txt").write_text("just notes", encoding="utf-8")
-    assert discover_calibrations([tmp_path]) == ([], None)
+    assert discover_calibrations(tmp_path) == ([], None)
 
 
 def test_a_hand_written_json_is_accepted_as_an_escape_hatch(tmp_path):
@@ -133,3 +133,25 @@ def test_unsupported_camera_model_is_refused():
         assert "FISHEYE" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_a_sibling_datasets_certificate_is_not_picked_up(tmp_path):
+    """The parent is searched because vendors deliver the certificate one level up,
+    but recursing there would reach sibling datasets and silently apply another
+    survey's calibration — the worst kind of wrong, because it still runs."""
+    (tmp_path / "survey_a").mkdir()
+    (tmp_path / "survey_b").mkdir()
+    (tmp_path / "survey_a" / "cert.txt").write_text(REPORT, encoding="utf-8")
+
+    assert discover_calibrations(tmp_path / "survey_b") == ([], None)
+    # ...while survey_a still finds its own
+    cals, src = discover_calibrations(tmp_path / "survey_a")
+    assert src is not None and len(cals) == 2
+
+
+def test_a_certificate_one_level_above_the_dataset_is_still_found(tmp_path):
+    (tmp_path / "images").mkdir()
+    (tmp_path / "cert.txt").write_text(REPORT, encoding="utf-8")
+    cals, src = discover_calibrations(tmp_path / "images")
+    assert src is not None and src.name == "cert.txt"
+    assert len(cals) == 2

@@ -734,8 +734,7 @@ def _stage_rig_stage(c: _Ctx) -> None:
     # Scanned for rather than configured: vendors drop it in with the imagery under
     # arbitrary names, and a document either parses as a calibration or it does not.
     intrinsics: dict[str, tuple[str, list[float]]] = {}
-    cals, src = discover_calibrations([Path(c.orig_root or c.img_root),
-                                      Path(c.orig_root or c.img_root).parent])
+    cals, src = discover_calibrations(Path(c.orig_root or c.img_root))
     if cals:
         model = str(c.d["camera_model"]).upper()
         hit, missed = match_to_cameras(cals, grouping.cameras)

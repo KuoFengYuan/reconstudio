@@ -36,7 +36,6 @@ import json
 import re
 import shutil
 import subprocess
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -162,7 +161,11 @@ def match_to_cameras(cals: list[Calibration], cameras: list[str],
 # not, which is a far more robust test than guessing at names.
 _DOC_SUFFIXES = (".pdf", ".txt", ".json")
 _MAX_DOC_BYTES = 64 * 1024 * 1024        # skip anything implausibly large
-_SCAN_DEPTH = 2                          # dataset root, plus one level of subdirs
+_DATASET_DEPTH = 2                       # dataset root, plus one level of subdirs
+# The parent is searched because vendors often deliver the certificate one level
+# up from the imagery, but ONLY its own files: recursing there would reach
+# SIBLING datasets and silently apply another survey's calibration.
+_PARENT_DEPTH = 1
 
 
 def _pdf_to_text(path: Path) -> str:
@@ -231,21 +234,31 @@ def calibrations_from_file(path: Path) -> list[Calibration]:
     return parse_australis_report(text)
 
 
-def discover_calibrations(roots: Iterable[Path],
+def discover_calibrations(dataset_root: Path, *, include_parent: bool = True,
                           ) -> tuple[list[Calibration], Path | None]:
-    """Scan `roots` for a calibration document and return the first that parses.
+    """Find a calibration document for `dataset_root`; the first that parses wins.
+
+    The dataset root is searched one level deep as well as at the top, since the
+    certificate often sits beside the per-camera folders. The parent is searched
+    too, because vendors also deliver it one level up — but only its own files,
+    never its subdirectories, or a sibling dataset's certificate would be picked
+    up and applied to the wrong survey.
 
     Deterministic: candidates are visited in sorted order, so the same dataset
     always resolves to the same certificate. Returns ([], None) when the dataset
     ships no calibration, which is the normal case and not an error.
     """
+    dataset_root = Path(dataset_root)
+    roots: list[tuple[Path, int]] = [(dataset_root, _DATASET_DEPTH)]
+    if include_parent:
+        roots.append((dataset_root.parent, _PARENT_DEPTH))
+
     seen: set[Path] = set()
     candidates: list[Path] = []
-    for root in roots:
-        root = Path(root)
+    for root, max_depth in roots:
         if not root.is_dir():
             continue
-        for depth in range(_SCAN_DEPTH):
+        for depth in range(max_depth):
             pattern = "/".join(["*"] * (depth + 1))
             for p in sorted(root.glob(pattern)):
                 rp = p.resolve()
