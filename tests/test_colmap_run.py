@@ -715,3 +715,27 @@ def test_prior_std_explicit_value_overrides_auto_per_axis():
         eo_csv = "/some/eo.csv"
         d = {"prior_std_x": "auto", "prior_std_y": "auto", "prior_std_z": "0.5"}
     assert _run._resolve_prior_std(C()) == (0.05, 0.05, 0.5)
+
+
+def test_rig_with_an_incremental_mapper_is_refused_up_front(patched, vocab, tmp_path):
+    """Our rig config carries no sensor_from_rig, and only the global pipeline can
+    calibrate that itself; the incremental family aborts — but only after extraction
+    and matching have burned their time, so this must fail before any COLMAP call."""
+    root = tmp_path / "rig_images"
+    _make_rig_images(root)
+    r = FakeRunner()
+    for mapper in ("pose_prior", "incremental", "hierarchical"):
+        with pytest.raises(ValueError, match="unknown extrinsics"):
+            _run.run_colmap(_params(root, tmp_path / f"ws_{mapper}", vocab,
+                                    rig_enable=True, layout="multi", mapper=mapper), r)
+    assert r.calls == []          # nothing was executed
+
+
+def test_rig_with_the_global_mapper_is_allowed(patched, vocab, tmp_path):
+    root = tmp_path / "rig_images2"
+    _make_rig_images(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab,
+                            rig_enable=True, layout="multi", mapper="global"), r)
+    assert "rig_configurator" in r.subcommands()
+    assert "global_mapper" in r.subcommands()

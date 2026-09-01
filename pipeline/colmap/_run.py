@@ -252,6 +252,22 @@ def _setup(p: dict, r: Runner) -> _Ctx:
                          f"'hierarchical' (got: {mapper})")
     if camera_mode not in ("per_folder", "single"):
         raise ValueError(f"CAMERA_MODE must be 'per_folder' or 'single' (got: {camera_mode})")
+    # We hand rig_configurator a config with no sensor_from_rig, so the mapper has to
+    # be able to calibrate the rig itself. Only the global pipeline can: it solves the
+    # unknown extrinsics per connected component (global_pipeline_test.cc
+    # MultiComponentsWithUnknownSensorFromRig). The incremental family instead bails
+    # with "Discarding reconstruction due to unknown sensor_from_rig poses"
+    # (incremental_pipeline.cc:777) — and only after extraction and matching have
+    # already run, so this has to be caught up front.
+    if bool(d["rig_enable"]) and mapper != "global":
+        raise ValueError(
+            f"MAPPER={mapper} cannot start from a rig with unknown extrinsics — only "
+            "'global' calibrates sensor_from_rig itself; the others abort after "
+            "extraction and matching have already run.\n"
+            "Either set MAPPER=global (it also refines the rig via "
+            "--GlobalMapper.refine_sensor_from_rig), or turn the rig off.\n"
+            "Note the trade-off: global uses the EO gravity priors but NOT the "
+            "positions, while pose_prior uses the positions but not gravity.")
     ba_backend = str(d["ba_backend"]).lower()
     if ba_backend not in ("ceres", "caspar"):
         raise ValueError(f"BA_BACKEND must be 'ceres' or 'caspar' (got: {ba_backend})")
