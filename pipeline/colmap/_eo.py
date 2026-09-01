@@ -206,7 +206,8 @@ def gravity_in_camera(omega: float, phi: float, kappa: float) -> tuple[float, fl
 
 
 def map_names_to_eo(names: list[str], rows: list[EO], img_root: str, crs: str,
-                    rig_match: bool, r: Runner, rig_max_dist: float = 5.0
+                    rig_match: bool, r: Runner, rig_max_dist: float = 5.0,
+                    orig_names: dict[str, str] | None = None
                     ) -> dict[str, tuple[EO, bool]]:
     """Map image-list entries (paths relative to `img_root`) to CSV rows.
 
@@ -218,12 +219,20 @@ def map_names_to_eo(names: list[str], rows: list[EO], img_root: str, crs: str,
 
     Returns ``{relative_name: (EO, is_exact_name_match)}``; the flag gates gravity,
     which is only valid for the head the angles actually describe.
+
+    `orig_names` maps a relative name back to the name it had before any restaging
+    renamed it (the rig staging normalises filenames so COLMAP can group frames).
+    Exact matching uses that original stem, because the CSV IDs are the vendor's
+    filenames; without it every image would fall through to the fuzzy GPS pass and
+    nothing would qualify for gravity.
     """
     by_stem = {row.stem: row for row in rows}
+    orig_names = orig_names or {}
     out: dict[str, tuple[EO, bool]] = {}
     unmatched: list[str] = []
     for rel in names:
-        row = by_stem.get(Path(rel).stem)
+        stem = Path(orig_names.get(rel, rel)).stem
+        row = by_stem.get(stem)
         if row is not None:
             out[rel] = (row, True)
         else:

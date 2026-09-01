@@ -205,6 +205,9 @@ class _Ctx:
     orig_root: str = ""
     # rig_config.json written by the rig staging stage; consumed by rig_configurator.
     rig_config: Path | None = None
+    # staged relative name -> original relative name (rig restaging renames
+    # files, and the EO CSV is keyed by the vendor's original filenames).
+    rig_orig_names: dict[str, str] = field(default_factory=dict)
 
     def stage_on(self, s: str) -> bool:
         return s in self.stages
@@ -474,7 +477,8 @@ def _resolve_eo_csv(c: _Ctx) -> None:
     rows = parse_eo_csv(Path(c.eo_csv))
     c.r.log(f"EO CSV: {len(rows)} rows from {c.eo_csv} (CRS={c.eo_crs})")
     c.eo_map = map_names_to_eo(c.lines, rows, c.img_root, c.eo_crs,
-                               c.eo_rig_match, c.r)
+                               c.eo_rig_match, c.r,
+                               orig_names=c.rig_orig_names)
     if not c.eo_map:
         raise RuntimeError(
             f"EO CSV {c.eo_csv} matched none of the {len(c.lines)} images. The CSV `ID` "
@@ -624,7 +628,8 @@ def _stage_rig_stage(c: _Ctx) -> None:
 
     stage_root = c.ws / "rig_images"
     stage_root.mkdir(parents=True, exist_ok=True)
-    n = build_staging(grouping, Path(c.img_root), stage_root)
+    c.rig_orig_names = build_staging(grouping, Path(c.img_root), stage_root)
+    n = len(c.rig_orig_names)
     c.rig_config = c.ws / "rig_config.json"
     ref = write_rig_config(grouping, c.rig_config, c.rig_ref_camera)
     c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")

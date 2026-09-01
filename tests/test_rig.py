@@ -86,7 +86,7 @@ def test_staging_normalises_names_so_colmap_can_group(tmp_path):
         p.write_bytes(b"x")
     g = group_images(OBLIQUE, "regex", regex=OBLIQUE_RX)
 
-    assert build_staging(g, root, tmp_path / "stage") == len(OBLIQUE)
+    assert len(build_staging(g, root, tmp_path / "stage")) == len(OBLIQUE)
     # the stem is identical across cameras; the extension is kept
     for cam in ("N", "F", "B"):
         assert (tmp_path / "stage" / cam / "00000.jpg").is_symlink()
@@ -107,6 +107,24 @@ def test_rig_config_puts_the_ref_sensor_first(tmp_path):
     assert cams[0] == {"image_prefix": "N/", "ref_sensor": True}
     assert sum("ref_sensor" in c for c in cams) == 1
     assert [c["image_prefix"] for c in cams[1:]] == ["B/", "F/"]
+
+
+def test_staging_reports_the_original_name_of_every_symlink(tmp_path):
+    """The EO CSV is keyed by the vendor's filenames, which restaging throws away.
+    Losing this map silently drops every *exact* match, and with it the gravity
+    priors, which are only written for exactly-name-matched images."""
+    root = tmp_path / "img"
+    for n in OBLIQUE:
+        p = root / n
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    g = group_images(OBLIQUE, "regex", regex=OBLIQUE_RX)
+
+    mapping = build_staging(g, root, tmp_path / "stage")
+    assert len(mapping) == len(OBLIQUE)
+    assert mapping["N/00000.jpg"] == "N/N-1_0-61214_00000.jpg"
+    # keys are the staged names, values the originals, and nothing is lost
+    assert sorted(mapping.values()) == sorted(OBLIQUE)
 
 
 def test_rig_config_rejects_an_unknown_ref_camera(tmp_path):

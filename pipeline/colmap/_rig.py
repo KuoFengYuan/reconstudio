@@ -302,13 +302,18 @@ def group_images(names: list[str], mode: str, regex: str = "",
     return out
 
 
-def build_staging(grouping: RigGrouping, img_root: Path, staging: Path) -> int:
-    """Materialise <staging>/<camera>/<frame_key><ext> symlinks. Returns count.
+def build_staging(grouping: RigGrouping, img_root: Path,
+                  staging: Path) -> dict[str, str]:
+    """Materialise <staging>/<camera>/<frame_key><ext> symlinks.
 
     The extension is taken from the source file so COLMAP's reader still sees a
     normal image; the *stem* is what has to match across cameras.
+
+    Returns {staged relative name: original relative name}. Downstream steps that
+    key off the vendor's filenames — the EO CSV match above all — need that map,
+    because restaging deliberately throws the original stem away.
     """
-    n = 0
+    mapping: dict[str, str] = {}
     for cam, table in grouping.frames.items():
         cam_dir = staging / cam
         cam_dir.mkdir(parents=True, exist_ok=True)
@@ -318,8 +323,8 @@ def build_staging(grouping: RigGrouping, img_root: Path, staging: Path) -> int:
             if link.is_symlink() or link.exists():
                 link.unlink()
             link.symlink_to(src)
-            n += 1
-    return n
+            mapping[f"{cam}/{link.name}"] = name
+    return mapping
 
 
 def write_rig_config(grouping: RigGrouping, path: Path,
