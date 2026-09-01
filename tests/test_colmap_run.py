@@ -756,3 +756,51 @@ def test_rig_with_global_stays_single_pass(patched, vocab, tmp_path):
 
 
 
+
+
+# --- calibrated intrinsics -------------------------------------------------
+def _calib_txt(root: Path, cams=("nadir", "forward", "backward")) -> None:
+    """Drop an Australis-shaped certificate into the dataset, unhelpfully named."""
+    secs = []
+    for i, cam in enumerate(cams):
+        secs.append(f"""
+ {i + 3}. {cam.capitalize()} Camera Calibration Report:
+ Camera:                        TestCam {cam}
+ Sensor Resolution:             x {1000 + i} * y {800 + i} (1 MP)
+ Pixel Size:                    3.76 um
+ C                  {90 + i}.0000        0.00000            {90 + i}.0000
+ XP                   0.0000        0.00000              0.0000
+ YP                 - 0.4069        0.00000            - 0.4069
+""")
+    (root / "vendor_doc.txt").write_text("\n".join(secs), encoding="utf-8")
+
+
+def test_calibrated_intrinsics_are_discovered_and_make_pp_refinable(
+        patched, vocab, tmp_path):
+    """ba_refine_principal_point defaults to 0, so an injected principal point
+    would be held — and its y sign is the one convention we have to guess. It has
+    to become refinable so a wrong guess self-corrects."""
+    root = tmp_path / "rig_images"
+    _make_rig_images(root)
+    _calib_txt(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+
+    assert any("3 calibrated head(s) found in vendor_doc.txt" in m for m in r.logs)
+    gm = r.argv_for("global_mapper")
+    assert gm[gm.index("--GlobalMapper.ba_refine_principal_point") + 1] == "1"
+    # each head keeps its own focal length in the rig config
+    rig = r.argv_for("rig_configurator")
+    cfg = json.loads(Path(rig[rig.index("--rig_config_path") + 1]).read_text())
+    focals = {c["image_prefix"]: c["camera_params"][0] for c in cfg[0]["cameras"]}
+    assert len(set(focals.values())) == 3, focals
+
+
+def test_pp_refinement_is_not_forced_without_a_calibration(patched, vocab, tmp_path):
+    root = tmp_path / "rig_images_nc"
+    _make_rig_images(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws2", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+    assert "--GlobalMapper.ba_refine_principal_point" not in r.argv_for("global_mapper")

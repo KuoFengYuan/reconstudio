@@ -226,6 +226,9 @@ class _Ctx:
     # staged relative name -> original relative name (rig restaging renames
     # files, and the EO CSV is keyed by the vendor's original filenames).
     rig_orig_names: dict[str, str] = field(default_factory=dict)
+    # camera id -> (model, params) taken from a vendor calibration, when the
+    # dataset shipped one. Empty means nothing was calibrated.
+    rig_intrinsics: dict[str, tuple[str, list[float]]] = field(default_factory=dict)
 
     def stage_on(self, s: str) -> bool:
         return s in self.stages
@@ -756,6 +759,7 @@ def _stage_rig_stage(c: _Ctx) -> None:
     c.rig_orig_names = build_staging(grouping, Path(c.img_root), stage_root)
     n = len(c.rig_orig_names)
     c.rig_config = c.ws / "rig_config.json"
+    c.rig_intrinsics = intrinsics
     ref = write_rig_config(grouping, c.rig_config, ref_camera, intrinsics)
     c.r.banner(f"rig staging: {n} symlinks -> {stage_root} (ref sensor = {ref})")
 
@@ -1026,6 +1030,15 @@ def _stage_mapper(c: _Ctx) -> None:
                 elif c.ba_gpu:
                     extra += ["--Mapper.ba_use_gpu", "1"]
                     label += " [GPU BA]"
+            if c.rig_intrinsics:
+                # ba_refine_principal_point defaults to 0, so an injected principal
+                # point would be HELD — and its y sign is the one convention this
+                # pipeline has to guess (certificate y up vs image y down). Letting
+                # the bundle move it means a wrong guess self-corrects instead of
+                # propagating; the focal length is already refined by default.
+                prefix = "GlobalMapper" if c.mapper == "global" else "Mapper"
+                extra += [f"--{prefix}.ba_refine_principal_point", "1"]
+                label += " [calibrated intrinsics, PP refinable]"
             c.r.banner(f"{label} -> {c.ws / 'sparse'}")
             c.r.run([COLMAP_BIN, sub, "--database_path", str(c.db),
                      "--image_path", c.img_root, "--output_path", str(c.ws / "sparse"), *extra])
@@ -1039,6 +1052,56 @@ def _stage_mapper(c: _Ctx) -> None:
                 (c.ws / "sparse" / "0" / stale).unlink(missing_ok=True)
         else:
             c.r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
+
+
+def _stage_intrinsics_report(c: _Ctx) -> None:
+    """4a'. Compare what the bundle converged to against the certificate.
+
+    This is the check on the one convention the calibration import has to guess:
+    the principal-point y sign. If the seed was right the bundle should barely
+    move it; a shift of roughly twice the certificate's offset, in the opposite
+    direction, is the signature of a flipped sign. The focal length is reported
+    for the same reason — it says whether a 2-year-old certificate still matches
+    the camera.
+    """
+    if not c.rig_intrinsics:
+        return
+    model_dir = c.ws / "sparse" / "0"
+    if not (model_dir / "cameras.bin").exists():
+        return
+    try:
+        from ..vendor.read_write_model import read_cameras_binary
+        solved = read_cameras_binary(str(model_dir / "cameras.bin"))
+    except Exception as exc:                            # noqa: BLE001
+        c.r.log(f"intrinsics check: could not read {model_dir}/cameras.bin ({exc})")
+        return
+
+    # The rig config assigns cameras in the order written: ref first, then the rest
+    # alphabetically — the same order rig_configurator walks.
+    ref = next((cam for cam in sorted(c.rig_intrinsics) if cam == c.rig_ref_camera), "")
+    order = ([ref] if ref else []) + [x for x in sorted(c.rig_intrinsics) if x != ref]
+    by_id = {cid: cam for cid, cam in zip(sorted(solved), order, strict=False)}
+
+    c.r.banner("intrinsics check: bundle vs certificate")
+    c.r.log("  camera      f (cert -> solved)          cx (cert -> solved)   "
+            "cy (cert -> solved)")
+    for cid in sorted(solved):
+        cam = by_id.get(cid)
+        seed = c.rig_intrinsics.get(cam or "")
+        if not seed:
+            continue
+        s = solved[cid].params
+        _, want = seed
+        # OPENCV order: fx fy cx cy ...; the shorter models put f first then cx cy
+        wf, wcx, wcy = ((want[0], want[2], want[3]) if len(want) >= 4
+                        else (want[0], want[1], want[2]))
+        gf, gcx, gcy = ((s[0], s[2], s[3]) if len(s) >= 4 else (s[0], s[1], s[2]))
+        c.r.log(f"  {cam:<11} {wf:9.1f} -> {gf:9.1f} ({gf - wf:+7.1f})  "
+                f"{wcx:8.1f} -> {gcx:8.1f} ({gcx - wcx:+6.1f})  "
+                f"{wcy:8.1f} -> {gcy:8.1f} ({gcy - wcy:+6.1f})")
+    c.r.log("  a small drift is expected (the certificate predates the mission); a cy "
+            "shift near twice the certificate's own offset, with the sign reversed, "
+            "would instead mean the principal-point y convention was read backwards")
 
 
 def _stage_simplify(c: _Ctx) -> None:
@@ -1214,6 +1277,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)
     _stage_rig_calibrate(c)     # 3b. derive sensor_from_rig for non-global mappers
     _stage_mapper(c)            # 4. mapper -> sparse/0
+    _stage_intrinsics_report(c) # 4a'. calibrated vs solved intrinsics
     _stage_simplify(c)          # 4a. simplify_images (optional)
     _stage_align(c)             # 4b. model_aligner (optional GPS)
     _stage_undistort(c)         # 5. image_undistorter -> dense_dir (+ optional masks)
