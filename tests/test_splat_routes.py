@@ -10,12 +10,24 @@ has no HTTP test client) to lock that URL shape and the 404 paths.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import sys
 import types
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
-from web.routers import viz
+# Load viz.py directly instead of `from web.routers import viz`: that runs
+# web/routers/__init__.py, which eagerly imports every router — including
+# measure.py -> pipeline.mesh_measure -> numpy. CI installs the pure-Python deps
+# only (see .github/workflows/ci.yml), so the package import fails at collection
+# and takes the whole suite with it. viz.py's own imports are numpy-free.
+_VIZ = Path(__file__).resolve().parents[1] / "web" / "routers" / "viz.py"
+_spec = importlib.util.spec_from_file_location("_viz_under_test", _VIZ)
+viz = importlib.util.module_from_spec(_spec)
+sys.modules["_viz_under_test"] = viz
+_spec.loader.exec_module(viz)
 
 
 class _Manager:
