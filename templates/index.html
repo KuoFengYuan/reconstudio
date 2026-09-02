@@ -1930,7 +1930,9 @@
       });
   }
   function mountSuperSplat(jobId, filename){
-    var src = location.origin + '/api/jobs/' + jobId + '/splat';
+    // The URL has to END in the real extension: the editor picks its reader from
+    // the URL path, and ignores the `filename` query parameter for that decision.
+    var src = location.origin + '/api/jobs/' + jobId + '/splat/' + encodeURIComponent(filename);
     var url = '/static/supersplat/index.html?load=' + encodeURIComponent(src) +
               '&filename=' + encodeURIComponent(filename);
     document.getElementById('main').innerHTML =

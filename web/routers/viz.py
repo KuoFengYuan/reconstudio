@@ -580,11 +580,27 @@ async def splat_info(job_id: str):
 
 @router.get("/api/jobs/{job_id}/splat")
 async def gaussians_splat(job_id: str):
-    """Serve the trained 3DGS cloud so it can be opened in SuperSplat for background
-    removal, or downloaded. Unlike /model.ply (the sparse COLMAP cloud), this is the
-    full Gaussian model. Any viewable container (.sog / .spz / .ply) — see
-    models.trained_splat."""
+    """Serve the trained 3DGS cloud for download. Unlike /model.ply (the sparse
+    COLMAP cloud), this is the full Gaussian model. Any viewable container
+    (.sog / .spz / .ply) — see models.trained_splat."""
     splat = _job_splat(job_id)
+    return FileResponse(splat, media_type="application/octet-stream", filename=splat.name)
+
+
+@router.get("/api/jobs/{job_id}/splat/{filename}")
+async def gaussians_splat_named(job_id: str, filename: str):
+    """The same file, at a URL that ENDS in its real extension.
+
+    The bundled SuperSplat derives the reader from the URL path (`xI()` only strips
+    the query string) — the `filename=` query parameter is display text. A .sog
+    served from `.../splat` is therefore "Unsupported input file type" no matter
+    what filename we announce, so the viewer loads this route instead.
+
+    `filename` is never used to touch the filesystem: the file comes from
+    trained_splat() and a mismatched name is a 404, so no path can be traversed."""
+    splat = _job_splat(job_id)
+    if filename != splat.name:
+        raise HTTPException(404, f"此 job 的點雲是 {splat.name}")
     return FileResponse(splat, media_type="application/octet-stream", filename=splat.name)
 
 

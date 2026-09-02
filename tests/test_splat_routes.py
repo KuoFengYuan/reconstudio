@@ -1,10 +1,11 @@
-"""The two routes that hand a trained splat to the viewer / to a download.
+"""The routes that hand a trained splat to the viewer / to a download.
 
-The bundled SuperSplat chooses its reader from the `filename` it is given — not
-from the URL, not from the MIME type — so the *name* is part of the contract, not
-cosmetic: a .sog announced as point_cloud.ply is parsed as PLY and fails. These
-call the route coroutines directly (the repo has no HTTP test client) to lock the
-filename round-trip and the 404 paths.
+The bundled SuperSplat picks its reader from the **URL path** — its `xI()` only
+strips the query string, so the `filename=` parameter is display text and cannot
+influence the decision. A .sog served from `.../splat` fails with "Unsupported
+input file type" however we announce it, which is why the viewer loads
+`.../splat/<real name>.sog`. These call the route coroutines directly (the repo
+has no HTTP test client) to lock that URL shape and the 404 paths.
 """
 from __future__ import annotations
 
@@ -73,3 +74,28 @@ def test_splat_404_explains_a_licht_only_output(tmp_path, monkeypatch):
         asyncio.run(viz.splat_info("j1"))
     assert e.value.status_code == 404
     assert "sog" in e.value.detail
+
+
+def test_named_route_serves_the_file_at_a_url_ending_in_its_extension(tmp_path, monkeypatch):
+    """The whole reason this route exists — the editor reads the extension off the
+    URL path, so `.../splat` (no extension) is rejected before a byte is fetched."""
+    d = tmp_path / "model"
+    d.mkdir()
+    f = d / "20260902_110312_5250.sog"
+    f.write_bytes(b"sogbytes")
+    _use(monkeypatch, _job(d))
+    resp = asyncio.run(viz.gaussians_splat_named("j1", "20260902_110312_5250.sog"))
+    assert str(resp.path) == str(f)
+
+
+def test_named_route_404s_on_a_name_that_is_not_the_job_splat(tmp_path, monkeypatch):
+    """The name in the path never reaches the filesystem — the file always comes
+    from trained_splat() — so traversal is impossible; a mismatch is just a 404."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "proj.sog").write_bytes(b"sogbytes")
+    _use(monkeypatch, _job(d))
+    for name in ("other.sog", "../../etc/passwd", "proj.ply"):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(viz.gaussians_splat_named("j1", name))
+        assert e.value.status_code == 404
