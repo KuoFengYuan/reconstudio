@@ -38,7 +38,7 @@ from web.services.models import (
     model_dir,
     resolve_model,
     trained_model_dir,
-    trained_ply,
+    trained_splat,
 )
 from web.shared import _page
 
@@ -554,21 +554,54 @@ async def cull_points_ep(job_id: str, request: Request):
             _CULL.pop(job_id, None)
 
 
-@router.get("/api/jobs/{job_id}/gaussians.ply")
-async def gaussians_ply(job_id: str):
-    """Serve the trained 3DGS cloud (point_cloud/iteration_*/point_cloud.ply) so it
-    can be opened in SuperSplat for background removal. Unlike /model.ply (the sparse
-    COLMAP cloud), this is the full Gaussian model the mesh stage renders from."""
+def _job_splat(job_id: str) -> Path:
+    """The trained splat file for a job, or a 404 explaining which step is missing."""
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
     md = trained_model_dir(job)
     if not md:
-        raise HTTPException(404, "此 job 沒有訓練輸出（缺 model_path / cfg_args）。")
-    ply = trained_ply(md)
-    if not ply:
-        raise HTTPException(404, "找不到 point_cloud.ply（訓練可能尚未完成）。")
-    return FileResponse(ply, media_type="application/octet-stream", filename="point_cloud.ply")
+        raise HTTPException(404, "此 job 沒有可開啟的訓練輸出（缺 model_path，或只有 "
+                                 "project.licht —— 請在訓練的「匯出格式」填 sog 後重跑）。")
+    splat = trained_splat(md)
+    if not splat:
+        raise HTTPException(404, "找不到訓練點雲（訓練可能尚未完成）。")
+    return splat
+
+
+@router.get("/api/jobs/{job_id}/splat_info")
+async def splat_info(job_id: str):
+    """Name + size of the job's trained splat. The viewer needs the name *before*
+    it loads: the bundled SuperSplat picks its reader from the filename, so a .sog
+    served as "point_cloud.ply" is parsed as PLY and fails."""
+    splat = _job_splat(job_id)
+    return JSONResponse({"ok": True, "filename": splat.name, "size": splat.stat().st_size})
+
+
+@router.get("/api/jobs/{job_id}/splat")
+async def gaussians_splat(job_id: str):
+    """Serve the trained 3DGS cloud for download. Unlike /model.ply (the sparse
+    COLMAP cloud), this is the full Gaussian model. Any viewable container
+    (.sog / .spz / .ply) — see models.trained_splat."""
+    splat = _job_splat(job_id)
+    return FileResponse(splat, media_type="application/octet-stream", filename=splat.name)
+
+
+@router.get("/api/jobs/{job_id}/splat/{filename}")
+async def gaussians_splat_named(job_id: str, filename: str):
+    """The same file, at a URL that ENDS in its real extension.
+
+    The bundled SuperSplat derives the reader from the URL path (`xI()` only strips
+    the query string) — the `filename=` query parameter is display text. A .sog
+    served from `.../splat` is therefore "Unsupported input file type" no matter
+    what filename we announce, so the viewer loads this route instead.
+
+    `filename` is never used to touch the filesystem: the file comes from
+    trained_splat() and a mismatched name is a 404, so no path can be traversed."""
+    splat = _job_splat(job_id)
+    if filename != splat.name:
+        raise HTTPException(404, f"此 job 的點雲是 {splat.name}")
+    return FileResponse(splat, media_type="application/octet-stream", filename=splat.name)
 
 
 @router.post("/api/jobs/{job_id}/edited_ply")

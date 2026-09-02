@@ -85,3 +85,38 @@ def test_build_scene_links_txt(tmp_path):
     linked = sorted(p.name for p in (scene / "sparse" / "0").iterdir())
     assert linked == ["cameras.txt", "images.txt", "points3D.txt"]
     assert (scene / "images").is_symlink()
+
+
+# --- --export / --output-name (LichtFeld) ---------------------------------
+
+def test_export_stem_prefers_the_project_name_over_a_generic_leaf(tmp_path):
+    """The panel's own convention is `<project>/model`, so `model` names nothing.
+    A folder of `splat_30000.sog` is unusable once the file leaves the panel."""
+    from pipeline.train import _export_stem
+    assert _export_stem(tmp_path / "20260902_131140_2240" / "model") == "20260902_131140_2240"
+    assert _export_stem(tmp_path / "20260902_131140_2240" / "Output") == "20260902_131140_2240"
+    # a meaningful leaf is kept as-is
+    assert _export_stem(tmp_path / "proj" / "run_a") == "run_a"
+
+
+def test_has_flag_does_not_match_a_longer_flag():
+    """`--export` must not be seen inside `--exclude-export`, or a job that only
+    excludes frozen splats would silently get an --output-name it never asked for."""
+    from pipeline.train import _has_flag
+    assert _has_flag(["--exclude-export"], "--export") is False
+    assert _has_flag(["--export", "sog"], "--export") is True
+    assert _has_flag(["--export=sog"], "--export") is True
+
+
+def test_trained_output_accepts_an_exported_sog(tmp_path):
+    """LichtFeld sometimes segfaults during CUDA teardown AFTER writing everything.
+    With the panel default (sog only, no PLY) a PLY-only check would call that a
+    failed job and throw away a finished model."""
+    from pipeline.train import _trained_output
+    assert _trained_output(tmp_path) is None
+    (tmp_path / "project.licht").write_bytes(b"x")      # not a model file on its own
+    assert _trained_output(tmp_path) is None
+    (tmp_path / "proj.sog").write_bytes(b"")            # 0 bytes = a failed write
+    assert _trained_output(tmp_path) is None
+    (tmp_path / "proj.sog").write_bytes(b"splat")
+    assert _trained_output(tmp_path) == tmp_path / "proj.sog"

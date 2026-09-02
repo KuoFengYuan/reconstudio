@@ -150,13 +150,13 @@ def block_list(job) -> list[dict]:
 
 def trained_model_dir(job) -> Path | None:
     """The trained-model output dir, from a train job's meta. Validated by the
-    presence of a trained 3DGS .ply (backend-agnostic). Distinct from model_dir,
-    which is the COLMAP sparse reconstruction."""
+    presence of a splat the viewer can open (backend-agnostic). Distinct from
+    model_dir, which is the COLMAP sparse reconstruction."""
     mp = (job.meta or {}).get("model_path")
     if not mp:
         return None
     d = Path(mp)
-    return d if (d.is_dir() and trained_ply(d)) else None
+    return d if (d.is_dir() and trained_splat(d)) else None
 
 
 def trained_ply(model_dir: Path) -> Path | None:
@@ -173,6 +173,32 @@ def trained_ply(model_dir: Path) -> Path | None:
         m = re.search(r"(\d+)", token)
         return int(m.group(1)) if m else -1
     return max(cands, key=it)
+
+
+# Splat containers the bundled SuperSplat build can load (it picks the reader from
+# the filename, so the extension has to be preserved end to end). `.sog` first:
+# it's the panel's default `--export` format and ~3% of the PLY's size.
+VIEWABLE_SPLAT_EXTS = (".sog", ".spz", ".ply")
+
+
+def trained_splat(model_dir: Path) -> Path | None:
+    """The trained splat to hand the viewer: a trainer-written .ply if there is
+    one, else a file written by LichtFeld's `--export` (`<project>.sog` by
+    default). LichtFeld MR-NF writes no .ply at all — only `project.licht`, which
+    nothing but LichtFeld reads — so a PLY-only lookup left every MR-NF job with a
+    去背 button that 404'd."""
+    ply = trained_ply(model_dir)
+    if ply is not None:
+        return ply
+    cands = [f for f in model_dir.glob("*")
+             if f.is_file() and f.suffix.lower() in VIEWABLE_SPLAT_EXTS
+             and f.stat().st_size > 0]
+    if not cands:
+        return None
+    # Prefer by format (sog before spz before ply), then newest — a re-export
+    # should win over a stale file from an earlier run.
+    return min(cands, key=lambda f: (VIEWABLE_SPLAT_EXTS.index(f.suffix.lower()),
+                                     -f.stat().st_mtime))
 
 
 def make_edited_model(model: Path) -> tuple[Path, Path]:

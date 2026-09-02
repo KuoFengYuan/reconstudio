@@ -75,6 +75,10 @@ class FakeRunner:
                 # a real (if minimal) COLMAP DB: enough schema + one images row per
                 # entry of image_list.txt for the pose-prior injectors to work against.
                 con = sqlite3.connect(db)
+                # real COLMAP reuses an existing database; re-extraction just
+                # rewrites the rows, so the fake has to be re-runnable too.
+                for tbl in ("pose_priors", "images", "cameras"):
+                    con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 con.executescript(_DB_SCHEMA)
                 lst = self._arg_after(argv, "--image_list_path")
                 names = Path(lst).read_text().split() if lst else []
@@ -845,3 +849,42 @@ def test_no_certificate_leaves_the_bundle_flags_alone(patched, vocab, tmp_path):
     gm = r.argv_for("global_mapper")
     assert "--GlobalMapper.ba_refine_focal_length" not in gm
     assert "--GlobalMapper.ba_refine_principal_point" not in gm
+
+
+# --- stale-database detection ---------------------------------------------
+def test_changing_the_sift_size_reextracts_even_without_force(
+        patched, imgroot, vocab, tmp_path):
+    """Skipping extraction is only safe when its inputs are unchanged. Flipping
+    影像解析度 away from "keep" rebases the image path, so the stored keypoints
+    describe the originals while every later stage reads the resized copies —
+    silently wrong, which is worse than redoing the work."""
+    ws = tmp_path / "ws"
+    first = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, sift_max_image_size="4096"), first)
+    assert "feature_extractor" in first.subcommands()
+    assert (ws / ".extract.json").exists()
+
+    second = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, sift_max_image_size="8192"), second)
+    assert "feature_extractor" in second.subcommands()      # not skipped
+    assert any("re-extracting" in m for m in second.logs)
+    assert any("sift_max_image_size" in m for m in second.logs)
+
+
+def test_an_unchanged_rerun_still_skips_extraction(patched, imgroot, vocab, tmp_path):
+    ws = tmp_path / "ws2"
+    _run.run_colmap(_params(imgroot, ws, vocab), FakeRunner())
+    again = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab), again)
+    assert "feature_extractor" not in again.subcommands()
+    assert any("skip extract" in m for m in again.logs)
+
+
+def test_changing_the_camera_model_reextracts(patched, imgroot, vocab, tmp_path):
+    # the model is baked into the cameras table, so the old DB cannot describe it
+    ws = tmp_path / "ws3"
+    _run.run_colmap(_params(imgroot, ws, vocab, camera_model="OPENCV"), FakeRunner())
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, camera_model="SIMPLE_RADIAL"), r)
+    assert "feature_extractor" in r.subcommands()
+    assert any("camera_model" in m for m in r.logs)

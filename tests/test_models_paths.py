@@ -227,6 +227,61 @@ def test_trained_model_dir_returns_dir_when_ply_present(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# trained_splat  (LichtFeld MR-NF writes no .ply — only project.licht + --export)
+# ---------------------------------------------------------------------------
+
+def _write(p, data=b"splat"):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return p
+
+
+def test_trained_splat_falls_back_to_an_exported_sog(tmp_path):
+    """The whole point: an MR-NF job has no .ply, so a PLY-only lookup left the
+    去背 button 404ing on a model that was sitting right there."""
+    _write(tmp_path / "project.licht")               # not viewable by anything else
+    assert M.trained_splat(tmp_path) is None
+    sog = _write(tmp_path / "20260902_131140_2240.sog")
+    assert M.trained_splat(tmp_path) == sog
+
+
+def test_trained_splat_prefers_the_trainer_ply_over_an_export(tmp_path):
+    # A GS-2M/LichtFeld trainer .ply is the full-precision original; an export is
+    # derived from it. Keep the existing behaviour for backends that write one.
+    _write(tmp_path / "proj.sog")
+    ply = _touch(tmp_path / "splat_30000.ply")
+    assert M.trained_splat(tmp_path) == ply
+
+
+def test_trained_splat_prefers_sog_over_spz_and_a_named_ply(tmp_path):
+    # `--export ply,sog,spz` writes all three under the project name (no splat_<N>
+    # to match trained_ply); the smallest the viewer handles wins.
+    _write(tmp_path / "proj.ply")
+    _write(tmp_path / "proj.spz")
+    _write(tmp_path / "proj.sog")
+    assert M.trained_splat(tmp_path) == tmp_path / "proj.sog"
+
+
+def test_trained_splat_ignores_a_zero_byte_file(tmp_path):
+    # A failed/interrupted export leaves an empty file; handing that to the viewer
+    # is a confusing parse error instead of an honest "not finished yet".
+    _write(tmp_path / "proj.sog", b"")
+    assert M.trained_splat(tmp_path) is None
+
+
+def test_trained_splat_ignores_unrelated_extensions(tmp_path):
+    for name in ("project.licht", "train.log", "cameras.json"):
+        _write(tmp_path / name)
+    assert M.trained_splat(tmp_path) is None
+
+
+def test_trained_model_dir_accepts_a_dir_with_only_an_export(tmp_path):
+    d = tmp_path / "model"
+    _write(d / "proj.sog")
+    assert M.trained_model_dir(_job(meta={"model_path": str(d)})) == d
+
+
+# ---------------------------------------------------------------------------
 # make_edited_model
 # ---------------------------------------------------------------------------
 

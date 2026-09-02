@@ -13,6 +13,7 @@ thin wrapper around one COLMAP sub-command with its own skip/sentinel guard.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -568,10 +569,52 @@ def _maybe_resize_fullhd(c: _Ctx) -> None:
                                       preserve_exif=preserve, max_size=c.resize_max)
 
 
+# What the database's features are tied to. Change any of these and the stored
+# keypoints no longer describe the images the later stages will read: the image
+# path (a resize rebases it), the SIFT size the coordinates were detected at, and
+# the camera model/mode baked into the cameras table.
+def _extract_fingerprint(c: _Ctx) -> dict[str, str]:
+    return {
+        "image_path": str(c.img_root),
+        "sift_max_image_size": _resolve_sift_size(c) or "default",
+        "camera_model": str(c.d["camera_model"]).upper(),
+        "camera_mode": c.camera_mode,
+        "layout": c.layout_name,
+        "max_features": str(c.d["max_features"]),
+    }
+
+
+def _extract_is_stale(c: _Ctx) -> list[str]:
+    """Which fingerprint fields changed since the database was built.
+
+    Without this, flipping 影像解析度 away from "keep" silently reuses features
+    detected on the full-resolution originals while every later stage reads the
+    resized copies — the keypoint coordinates then describe a different image and
+    nothing in the run says so. Skipping extraction is only safe when the inputs
+    it depends on are unchanged.
+    """
+    stamp = c.ws / ".extract.json"
+    if not stamp.exists():
+        return []                       # nothing recorded: leave the old behaviour
+    try:
+        was = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    now = _extract_fingerprint(c)
+    return [f"{k}: {was.get(k)!r} -> {now[k]!r}"
+            for k in now if str(was.get(k)) != now[k]]
+
+
 def _stage_extract(c: _Ctx) -> None:
     # 1. feature_extractor
     if c.stage_on("extract"):
-        if c.need(c.db):
+        stale = _extract_is_stale(c)
+        if stale and not c.need(c.db):
+            c.r.log("re-extracting: the database was built with different inputs, so "
+                    "its keypoints do not describe the images this run will read")
+            for line in stale:
+                c.r.log(f"  {line}")
+        if c.need(c.db) or stale:
             c.r.banner(f"feature_extractor (CAMERA_MODE={c.camera_mode}, layout={c.layout_name}) -> {c.db}")
             if c.layout_name == "single":
                 cam = ["--ImageReader.single_camera", "1"]            # one flat folder = 1 camera
@@ -598,6 +641,8 @@ def _stage_extract(c: _Ctx) -> None:
                      "--ImageReader.camera_model", str(c.d["camera_model"]),
                      "--SiftExtraction.max_num_features", str(c.d["max_features"]),
                      *sift_size])
+            (c.ws / ".extract.json").write_text(
+                json.dumps(_extract_fingerprint(c), indent=2), encoding="utf-8")
         else:
             c.r.log("skip extract (database.db exists; set FORCE=1 to redo)")
 
