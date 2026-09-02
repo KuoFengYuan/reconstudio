@@ -132,6 +132,46 @@ def _trained_ply(out: Path) -> Path | None:
     return cands[0] if cands else None
 
 
+# Formats LichtFeld's `--export` can write (see final_export_extension in
+# training/training_setup.cpp). Used only to recognise "a model was produced".
+_EXPORT_EXTS = (".ply", ".sog", ".spz", ".usd", ".usda", ".usdc", ".html", ".rad")
+
+# Output-dir leaf names that don't identify a run — the panel's own convention is
+# `<project>/model`, so for these the parent is the real name (same reasoning as
+# web.services.forms.scene_label).
+_GENERIC_OUT_LEAVES = {"model", "models", "output", "outputs", "out", "result", "results"}
+
+
+def _trained_output(out: Path) -> Path | None:
+    """Any finished model file in the output dir — a trained PLY, or a file written
+    by `--export` (sog/spz/...). Exporting *only* sog is the panel default, so the
+    PLY-only check would report "no model" on a shutdown segfault that in fact
+    produced everything."""
+    ply = _trained_ply(out)
+    if ply is not None:
+        return ply
+    for f in sorted(out.glob("*")):
+        if f.is_file() and f.suffix.lower() in _EXPORT_EXTS and f.stat().st_size > 0:
+            return f
+    return None
+
+
+def _has_flag(toks: list[str], flag: str) -> bool:
+    """Is `flag` present in an argv list, in either `--f v` or `--f=v` form?
+    A substring test on the joined command would match `--exclude-export` for
+    `--export`."""
+    return any(t == flag or t.startswith(flag + "=") for t in toks)
+
+
+def _export_stem(out: Path) -> str:
+    """Filename stem for LichtFeld `--export` outputs: the project name rather than
+    the built-in `splat_<iter>`. A folder of `splat_30000.sog` files is unusable once
+    they leave the panel, and the user has to rename every one by hand."""
+    if out.name.lower() in _GENERIC_OUT_LEAVES and out.parent.name:
+        return out.parent.name
+    return out.name or "splat"
+
+
 def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
     """Run a compiled (non-Python) trainer, e.g. LichtFeld Studio. Unlike the
     conda-python path we invoke the executable directly and point `-d` at the
@@ -169,7 +209,14 @@ def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
     extra = (p.get("extra") or "").strip()     # free escape-hatch flags
     cmd = spec.get("train_args", "-d {scene} -o {out} {config} {args} {extra}").format(
         scene=str(data_dir), out=str(out), config=config_arg, args=args, extra=extra)
-    argv = [str(exe), *shlex.split(cmd)]
+    toks = shlex.split(cmd)
+    # `--export` writes <out>/<stem><ext> with stem = --output-name, defaulting to
+    # `splat_<iter>`. Name it after the project so the file identifies itself.
+    # Skipped when the flag was given by hand (panel field or `extra`).
+    if _has_flag(toks, "--export") and not _has_flag(toks, "--output-name"):
+        toks += ["--output-name", _export_stem(out)]
+    cmd = shlex.join(toks)
+    argv = [str(exe), *toks]
 
     env = {}
     gpu = str(p.get("gpu", "")).strip()
@@ -188,12 +235,20 @@ def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
         # output has been written. Don't fail a job whose model is already on disk:
         # if the trained PLY exists, warn and treat as success; otherwise it really
         # did fail before producing a model, so surface the error.
-        ply = _trained_ply(out)
+        ply = _trained_output(out)
         if ply is None:
             raise PipelineError(f"{exe.name} exited with code {rc}")
         r.log(f"[warn] {exe.name} 退出碼 {rc}（多半是收尾時 segfault）,但模型已寫出："
               f"{ply.name} → 視為訓練成功。")
     r.banner(f"train done. model={out}")
+    exported = [f for f in sorted(out.glob("*"))
+                if f.is_file() and f.suffix.lower() in _EXPORT_EXTS]
+    if exported:
+        for f in exported:
+            r.log(f"[export] {f.name}  ({f.stat().st_size / 1e6:.1f} MB)")
+    else:
+        r.log("[note] 只寫出 project.licht(LichtFeld 內部格式)。要能直接使用的檔案,"
+              "請在「匯出格式」填 sog(或 ply)。")
     r.log("[note] 此 backend 不支援 mesh;訓練雲可用「🧹 在 SuperSplat 去背景」清背景後下載。")
 
 
