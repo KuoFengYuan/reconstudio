@@ -235,18 +235,21 @@ BUILTIN_BACKENDS: dict[str, dict] = {
                      "by_pointcloud=用稀疏點雲中位數(點雲是空的時候會靜默不置中,較不保險);"
                      "off=不平移。注意:置中後匯出的 PLY 是本地座標,位移量只寫進 .licht 專案檔 —— "
                      "距離/尺寸等相對量測不受影響,但要換回絕對 TWD97 座標時要把 world_origin 加回去。"},
-            {"key": "export_formats", "flag": "--export", "type": "text", "default": "sog",
+            {"key": "export_formats", "flag": "--export", "type": "select",
+             "options": ["sog", "sog,ply", "ply"], "default": "sog",
              "csv_options": ["ply", "sog", "spz", "usd", "usda", "usdc", "html", "rad"],
              "label": "匯出格式 (--export)",
-             "placeholder": "sog（逗號分隔可多選；留空只寫 project.licht）",
-             "hint": "訓練結束後,除了 project.licht 再另外匯出一份可直接使用的成品。"
-                     "留空 = 只有 project.licht(LichtFeld 內部格式,SuperSplat / 網頁 viewer / "
-                     "其他工具都讀不了,得事後手動 convert)。可用格式:"
-                     "**sog**(壓縮格式,約 PLY 的 3%,面板的去背和線上瀏覽都吃這個,預設);"
-                     "ply(未壓縮,通用但很大);spz(Niantic 壓縮格式);"
-                     "usd/usda/usdc(USD 場景);html(自帶 viewer 的單一網頁);rad。"
-                     "檔名自動用專案名稱(輸出目錄名,leaf 是 model/output 這類通用名時取上一層),"
-                     "不是 LichtFeld 預設的 splat_30000。"},
+             "hint": "訓練結束後,除了 project.licht 再另外匯出一份可直接使用的成品 —— "
+                     "project.licht 是 LichtFeld 的內部格式,SuperSplat / 網頁 viewer / "
+                     "其他工具都讀不了。檔名自動用專案名稱(輸出目錄名;leaf 是 model/output "
+                     "這類通用名時取上一層),不是 LichtFeld 預設的 splat_30000。"
+                     "**sog**=壓縮格式,約 PLY 的 3%(百萬高斯 ≈ 13 MB vs 400 MB),面板的去背和"
+                     "線上瀏覽都吃這個,預設;**sog,ply**=兩種都輸出,要餵給只認 PLY 的工具"
+                     "(CloudCompare、其他 3DGS repo)時選這個,代價是多一個幾百 MB 的檔案;"
+                     "**ply**=只輸出未壓縮 PLY。"
+                     "其他 LichtFeld 支援的格式(spz / usd / usda / usdc / html / rad)"
+                     "可在「進階(額外旗標)」的 extra 自己寫 --export —— extra 接在後面,"
+                     "同一個旗標重複給時以後面的為準,所以會覆蓋這一格。"},
             {"key": "use_16bit", "group": "影像與資料集", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
              "hint": "只在來源本身就是 16-bit(RAW 轉出的 TIFF/PNG、HDR 素材)才有用;一般手機/相機直出的 8-bit "
                      "JPEG/PNG 開這個沒意義。自動用無損 JPEG2000 做磁碟快取,檔案較大、稍慢。預設關。"},

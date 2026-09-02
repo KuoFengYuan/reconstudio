@@ -39,6 +39,7 @@
     {% if job.meta.get('model_path') %}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
       <button class="ghost" onclick="openSuperSplat('{{ job.id }}')">🧹 在 SuperSplat 去背景</button>
+      <a class="dl" href="/api/jobs/{{ job.id }}/splat" download>⬇ 下載點雲</a>
       {% if job.meta.get('can_mesh') %}
       <button class="ghost" onclick="fillMesh('{{ job.meta.get('model_path','') }}')">🧩 接著抽 Mesh</button>
       {% endif %}

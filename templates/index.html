@@ -1915,8 +1915,24 @@
   // the edited cloud and POSTs it back; the server stages a non-destructive _edited_ dir.
   function openSuperSplat(jobId){
     if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
-    var ply = location.origin + '/api/jobs/' + jobId + '/gaussians.ply';
-    var url = '/static/supersplat/index.html?load=' + encodeURIComponent(ply) + '&filename=point_cloud.ply';
+    // The editor picks its reader from `filename`, not from the URL or the MIME
+    // type, so a .sog announced as point_cloud.ply is parsed as PLY and fails.
+    // Ask the server what the file actually is first.
+    fetch('/api/jobs/' + jobId + '/splat_info')
+      .then(function(r){ return r.ok ? r.json() : r.text().then(function(t){ throw new Error(t); }); })
+      .then(function(j){ mountSuperSplat(jobId, j.filename || 'point_cloud.ply'); })
+      .catch(function(err){
+        document.getElementById('main').innerHTML =
+          '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
+          '<button class="ghost" onclick="loadJob(\'' + jobId + '\')">← 回 log</button></div>' +
+          '<div class="hint" style="color:var(--err);word-break:break-all">⚠ 找不到可開啟的點雲：' +
+          String(err.message || err) + '</div>';
+      });
+  }
+  function mountSuperSplat(jobId, filename){
+    var src = location.origin + '/api/jobs/' + jobId + '/splat';
+    var url = '/static/supersplat/index.html?load=' + encodeURIComponent(src) +
+              '&filename=' + encodeURIComponent(filename);
     document.getElementById('main').innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
       '<button class="ghost" onclick="loadJob(\'' + jobId + '\')">← 回 log</button>' +

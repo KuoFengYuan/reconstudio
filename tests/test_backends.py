@@ -82,3 +82,16 @@ def test_mrnf_backend_exports_sog_by_default():
     pr = next(p for p in prs if p["key"] == "export_formats")
     assert pr["default"] == "sog"
     assert build_cli(prs, {p["key"]: p.get("default") for p in prs}).count("--export sog") == 1
+
+
+def test_mrnf_export_dropdown_offers_sog_both_and_ply():
+    """A dropdown, not a text box — the only choices that matter are "the small one",
+    "the one other tools read", and "both". Each option must be a valid csv value."""
+    from pipeline.backends import BUILTIN_BACKENDS
+    prs = BUILTIN_BACKENDS["lichtfeld-mrnf"]["params"]
+    pr = next(p for p in prs if p["key"] == "export_formats")
+    assert pr["type"] == "select"
+    assert pr["options"] == ["sog", "sog,ply", "ply"]
+    assert pr["default"] in pr["options"]
+    for opt in pr["options"]:
+        assert build_cli([pr], {"export_formats": opt}) == f"--export {opt}"
