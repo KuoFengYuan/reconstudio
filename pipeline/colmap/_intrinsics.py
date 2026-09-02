@@ -35,6 +35,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sqlite3
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -271,3 +273,83 @@ def discover_calibrations(dataset_root: Path, *, include_parent: bool = True,
         if cals:
             return cals, path
     return [], None
+
+
+# --------------------------------------------------------------------------- #
+# applying a calibration to an existing database
+# --------------------------------------------------------------------------- #
+# COLMAP numbers its camera models; only the ones this module emits are listed.
+# (src/colmap/sensor/models.h)
+_MODEL_IDS = {
+    "SIMPLE_PINHOLE": 0, "PINHOLE": 1, "SIMPLE_RADIAL": 2, "RADIAL": 3,
+    "OPENCV": 4, "FULL_OPENCV": 6,
+}
+
+
+def camera_folders(db_path: Path) -> dict[int, str]:
+    """camera_id -> the folder its images live in, read from the images table.
+
+    feature_extractor with --ImageReader.single_camera_per_folder makes exactly
+    one camera per folder, so the folder is what identifies a head. A camera whose
+    images span several folders is ambiguous and is left out rather than guessed at.
+    """
+    out: dict[int, str] = {}
+    with sqlite3.connect(str(db_path)) as con:
+        rows = con.execute("SELECT camera_id, name FROM images").fetchall()
+    per_cam: dict[int, set[str]] = {}
+    for cid, name in rows:
+        per_cam.setdefault(cid, set()).add(str(name).replace("\\", "/").split("/")[0])
+    for cid, folders in per_cam.items():
+        if len(folders) == 1:
+            out[cid] = next(iter(folders))
+    return out
+
+
+def apply_to_database(db_path: Path, model: str,
+                      by_camera: dict[str, Calibration], *,
+                      use_pp: bool = True, flip_pp_y: bool = True,
+                      ) -> list[tuple[str, float, float]]:
+    """Write calibrated intrinsics into `cameras`. Returns (folder, old_f, new_f).
+
+    This is the path that works with or without a rig: rig_config.json can only
+    carry intrinsics when a rig is configured, but a certificate is just as
+    valuable for a plain multi-folder dataset — arguably more so, since there is
+    no rig constraint to compensate for a diverging self-calibration.
+
+    prior_focal_length is set so COLMAP treats the value as a prior rather than a
+    guess, and the sensor size is left alone: it is a property of the images that
+    are actually in the database, not of the certificate.
+    """
+    model = model.upper()
+    if model not in _MODEL_IDS:
+        raise ValueError(f"cannot write model {model!r} to a database; "
+                         f"expected one of {sorted(_MODEL_IDS)}")
+    folders = camera_folders(db_path)
+    changed: list[tuple[str, float, float]] = []
+    with sqlite3.connect(str(db_path)) as con:
+        for cid, folder in sorted(folders.items()):
+            cal = by_camera.get(folder)
+            if cal is None:
+                continue
+            row = con.execute(
+                "SELECT width, height, params FROM cameras WHERE camera_id=?",
+                (cid,)).fetchone()
+            if row is None:
+                continue
+            width, height, blob = row
+            old_f = struct.unpack(f"<{len(blob) // 8}d", blob)[0] if blob else 0.0
+            # Scale to the images actually in the database: they may have been
+            # resized since calibration, and a focal in pixels is resolution
+            # dependent while C in millimetres is not.
+            scale = (width / cal.width) if cal.width else 1.0
+            params = [v * scale if i < 4 else v
+                      for i, v in enumerate(cal.colmap_params(
+                          model, use_pp=use_pp, flip_pp_y=flip_pp_y))]
+            con.execute(
+                "UPDATE cameras SET model=?, params=?, prior_focal_length=1 "
+                "WHERE camera_id=?",
+                (_MODEL_IDS[model],
+                 struct.pack(f"<{len(params)}d", *params), cid))
+            changed.append((folder, old_f, params[0]))
+        con.commit()
+    return changed

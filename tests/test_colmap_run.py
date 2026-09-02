@@ -76,11 +76,21 @@ class FakeRunner:
                 # entry of image_list.txt for the pose-prior injectors to work against.
                 con = sqlite3.connect(db)
                 con.executescript(_DB_SCHEMA)
-                con.execute("INSERT INTO cameras VALUES(1,2,100,100,X'',1)")
                 lst = self._arg_after(argv, "--image_list_path")
                 names = Path(lst).read_text().split() if lst else []
+                # --ImageReader.single_camera_per_folder makes one camera per
+                # folder, which is what identifies a head downstream; modelling it
+                # as a single shared camera would hide anything keyed on that.
+                per_folder = "--ImageReader.single_camera_per_folder" in argv
+                cam_of: dict[str, int] = {}
                 for i, name in enumerate(names, 1):
-                    con.execute("INSERT INTO images VALUES(?,?,1)", (i, name))
+                    key = name.split("/")[0] if per_folder and "/" in name else ""
+                    if key not in cam_of:
+                        cam_of[key] = len(cam_of) + 1
+                        con.execute("INSERT INTO cameras VALUES(?,2,100,100,X'',1)",
+                                    (cam_of[key],))
+                    con.execute("INSERT INTO images VALUES(?,?,?)",
+                                (i, name, cam_of[key]))
                 con.commit()
                 con.close()
         elif sub in ("global_mapper", "mapper", "pose_prior_mapper", "hierarchical_mapper"):
@@ -789,6 +799,9 @@ def test_calibrated_intrinsics_are_discovered_and_make_pp_refinable(
 
     assert any("3 calibrated head(s) found in vendor_doc.txt" in m for m in r.logs)
     gm = r.argv_for("global_mapper")
+    # the focal is HELD: seeding alone let a real block's nadir head diverge +138%
+    assert gm[gm.index("--GlobalMapper.ba_refine_focal_length") + 1] == "0"
+    # ...but the principal point stays refinable, since its y convention is a guess
     assert gm[gm.index("--GlobalMapper.ba_refine_principal_point") + 1] == "1"
     # each head keeps its own focal length in the rig config
     rig = r.argv_for("rig_configurator")
@@ -804,3 +817,31 @@ def test_pp_refinement_is_not_forced_without_a_calibration(patched, vocab, tmp_p
     _run.run_colmap(_params(root, tmp_path / "ws2", vocab, rig_enable=True,
                             layout="multi", mapper="global"), r)
     assert "--GlobalMapper.ba_refine_principal_point" not in r.argv_for("global_mapper")
+
+
+def test_a_certificate_applies_without_a_rig(patched, vocab, tmp_path):
+    """The regression this exists for: intrinsics used to travel only through
+    rig_config.json, so turning the rig off silently dropped them — and without a
+    rig there is nothing to stop a head's self-calibration running away."""
+    root = tmp_path / "plain"
+    _make_rig_images(root)          # multi-folder, but no rig configured
+    _calib_txt(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws_nr", vocab,
+                            layout="multi", mapper="global"), r)
+
+    assert "rig_configurator" not in r.subcommands()
+    assert any("applied 3 calibrated camera(s)" in b for b in r.banners)
+    gm = r.argv_for("global_mapper")
+    assert gm[gm.index("--GlobalMapper.ba_refine_focal_length") + 1] == "0"
+
+
+def test_no_certificate_leaves_the_bundle_flags_alone(patched, vocab, tmp_path):
+    root = tmp_path / "plain_nc"
+    _make_rig_images(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws_nc", vocab,
+                            layout="multi", mapper="global"), r)
+    gm = r.argv_for("global_mapper")
+    assert "--GlobalMapper.ba_refine_focal_length" not in gm
+    assert "--GlobalMapper.ba_refine_principal_point" not in gm

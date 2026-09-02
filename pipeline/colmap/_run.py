@@ -24,7 +24,12 @@ from ..config import settings
 from ..runner import PipelineError, Runner
 from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
-from ._intrinsics import discover_calibrations, match_to_cameras
+from ._intrinsics import (
+    apply_to_database,
+    camera_folders,
+    discover_calibrations,
+    match_to_cameras,
+)
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
 from ._rig import (
@@ -229,6 +234,8 @@ class _Ctx:
     # camera id -> (model, params) taken from a vendor calibration, when the
     # dataset shipped one. Empty means nothing was calibrated.
     rig_intrinsics: dict[str, tuple[str, list[float]]] = field(default_factory=dict)
+    # True once a vendor calibration has been written into the database.
+    intrinsics_applied: bool = False
 
     def stage_on(self, s: str) -> bool:
         return s in self.stages
@@ -772,6 +779,48 @@ def _stage_rig_stage(c: _Ctx) -> None:
     c.camera_mode = "per_folder"   # rig_configurator requires one camera per prefix
 
 
+def _stage_apply_intrinsics(c: _Ctx) -> None:
+    """1b'. Write a vendor calibration into the database, rig or no rig.
+
+    The rig path can also carry intrinsics through rig_config.json, but that only
+    exists when a rig is configured — and a certificate matters just as much
+    without one. It arguably matters MORE: with no rig constraint, nothing stops a
+    head's self-calibration from running away. On the block this was written for,
+    a run with the rig off let the nadir focal diverge to 57k px against a
+    certificate value of 24k (+138%), which pushed that head's cameras 1600 units
+    away from the rest and made the aligned model useless.
+
+    Runs after extraction because it needs the cameras table, and before matching
+    so every later stage sees the calibrated values.
+    """
+    if not c.stage_on("extract") or not c.db.exists():
+        return
+    cals, src = discover_calibrations(Path(c.orig_root or c.img_root))
+    if not cals:
+        return
+    folders = sorted(set(camera_folders(c.db).values()))
+    hit, missed = match_to_cameras(cals, folders)
+    if not hit:
+        c.r.log(f"intrinsics: {Path(src).name} has {len(cals)} head(s) but none match "
+                f"the image folders {folders} — leaving COLMAP's EXIF estimate alone")
+        return
+
+    model = str(c.d["camera_model"]).upper()
+    changed = apply_to_database(c.db, model, hit)
+    c.r.banner(f"intrinsics: applied {len(changed)} calibrated camera(s) from "
+               f"{Path(src).name} -> {c.db}")
+    for folder, old_f, new_f in changed:
+        cal = hit[folder]
+        drift = (old_f - new_f) / new_f * 100.0 if new_f else 0.0
+        c.r.log(f"  {folder:<12} f {old_f:9.1f} -> {new_f:9.1f} px "
+                f"(EXIF estimate was {drift:+.1f}% off)  {cal.detail}")
+    if missed:
+        c.r.log(f"  no calibration for {missed}; those keep COLMAP's estimate")
+    c.r.log("  distortion stays at zero for the bundle to solve; the certificate "
+            "supplies focal length and principal point only")
+    c.intrinsics_applied = True
+
+
 def _stage_rig_configure(c: _Ctx) -> None:
     """1c. `colmap rig_configurator`: write rigs/frames into the database.
 
@@ -1029,15 +1078,22 @@ def _stage_mapper(c: _Ctx) -> None:
                 elif c.ba_gpu:
                     extra += ["--Mapper.ba_use_gpu", "1"]
                     label += " [GPU BA]"
-            if c.rig_intrinsics:
-                # ba_refine_principal_point defaults to 0, so an injected principal
-                # point would be HELD — and its y sign is the one convention this
-                # pipeline has to guess (certificate y up vs image y down). Letting
-                # the bundle move it means a wrong guess self-corrects instead of
-                # propagating; the focal length is already refined by default.
+            if c.rig_intrinsics or c.intrinsics_applied:
                 prefix = "GlobalMapper" if c.mapper == "global" else "Mapper"
+                # Hold the focal length. Seeding it is NOT enough: on the block this
+                # was written for, the nadir head was seeded from its certificate at
+                # 23884 px and the bundle still ran away to 56972 (+138%), which put
+                # that head's cameras 1600 units from the rest. Focal length trades
+                # off against depth, and nothing in the global pipeline constrains
+                # that — it does not read the position priors. A surveyed certificate
+                # is a better estimate than anything the bundle can recover here.
+                extra += [f"--{prefix}.ba_refine_focal_length", "0"]
+                # The principal point stays refinable: it is seeded too, but its y
+                # sign is the one convention this pipeline has to guess (certificate
+                # y up vs image y down), so a wrong guess must be able to correct
+                # itself. Distortion is written as zero and so must be solved.
                 extra += [f"--{prefix}.ba_refine_principal_point", "1"]
-                label += " [calibrated intrinsics, PP refinable]"
+                label += " [calibrated intrinsics: f held, PP+distortion refined]"
             c.r.banner(f"{label} -> {c.ws / 'sparse'}")
             c.r.run([COLMAP_BIN, sub, "--database_path", str(c.db),
                      "--image_path", c.img_root, "--output_path", str(c.ws / "sparse"), *extra])
@@ -1270,6 +1326,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     c.orig_root = c.img_root    # capture pre-resize originals (intact EXIF) for gps_inject
     _maybe_resize_fullhd(c)     # FullHD downscale (rebases img_root)
     _stage_extract(c)           # 1. feature_extractor
+    _stage_apply_intrinsics(c)  # 1b'. vendor calibration -> cameras table
     _stage_rig_configure(c)     # 1c. rig_configurator -> rigs/frames in the DB
     _stage_gps_inject(c)        # 1b. inject TIFF/non-JPEG EXIF GPS into DB pose_priors
     _stage_match(c)             # 2. matcher
