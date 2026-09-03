@@ -147,13 +147,45 @@ LichtFeld 的 backend(MR-NF)已內建在 `pipeline/backends.py`,只要
 - **☁️ GCS 雲端搬檔**:需 Google Cloud SDK + 登入,見[三、進階 — GCS 設定](#gcs-設定一次性)。
 - **🧹 SuperSplat(去背 + 點雲檢視)**:**免裝** — `run.sh` 啟動時自動同步到最新版
   (背景跑、不擋啟動;離線就沿用現有版本)。詳見[三、進階](#supersplat-自動更新)。
-- **🌊 深度/法向量(LichtFeld preprocess,選用)** — 為照片產生深度圖和/或法向量圖,給 LichtFeld
-  訓練做深度/法向量監督。**免額外裝 conda env** — 直接跑 LichtFeld-Studio 自己編譯出來的
-  `preprocess` 子指令(跟 lichtfeld-mrnf 訓練 backend 共用同一份 binary),模型是內建的
-  MoGe-2 ONNX(深度+法向量聯合模型),第一次執行會自動下載,不需要 torch。
+- **🌊 深度/法向量(選用)** — 為照片產生深度圖和/或法向量圖,給 LichtFeld 訓練做深度/法向量
+  監督。有**兩種引擎**,寫出的 `depth/`、`normals/` 完全同格式,下游訓練不需要知道是哪一個
+  產生的,可以混用或彼此覆蓋重跑:
 
-  只要 `../LichtFeld-Studio` 建置好(見上面「三、建置」),開 `/doctor` 就會看到「深度/法向量生成」
-  變綠燈。用法見[二、使用 — 🌊 深度](#-深度影像--深度圖法向量圖--訓練深度法向量監督)。
+  | 引擎 | 需要裝什麼 | 速度(1600px) | 特性 |
+  |---|---|---|---|
+  | **LichtFeld preprocess(MoGe-2)**(預設) | 免裝,共用訓練 backend 的 binary | ~40 ms/張 | 內建 MoGe-2 ViT-B,第一次執行自動下載權重,不需 torch |
+  | **MoGe-3(PyTorch)** | 需 `moge3` conda env(見下) | ~0.5 s/張 | 細節明顯較佳,法向量差距最明顯 |
+
+  MoGe-2 這條**免額外裝 conda env** — 直接跑 LichtFeld-Studio 自己編譯出來的 `preprocess`
+  子指令(跟 lichtfeld-mrnf 訓練 backend 共用同一份 binary)。只要 `../LichtFeld-Studio`
+  建置好(見上面「3. 訓練後端」),開 `/doctor` 就會看到「深度/法向量生成」變綠燈。
+
+  **MoGe-3 引擎安裝**(選用;想要更銳利的法向量再裝):
+
+  ```bash
+  conda create -y -n moge3 python=3.11
+  conda run -n moge3 pip install torch "git+https://github.com/microsoft/MoGe.git"
+  # 驗證:應印出 True 和 OK
+  conda run -n moge3 python -c \
+    "import torch; print(torch.cuda.is_available()); \
+     from moge.model.v3 import MoGeModel; print('OK')"
+  ```
+
+  幾個要點:
+
+  - **env 名字要正好是 `moge3`** — 面板用 `conda_env: "moge3"` 找它(跟訓練 backend 同一套
+    解析邏輯)。裝在別處就在 `backends.json` 覆寫 `python`。
+  - **要獨立的 env,不要塞進訓練 env** — MoGe 會固定自己的 torch 版本,而面板本體的 env
+    根本沒有 torch。
+  - 上面刻意**不指定 torch 的 CUDA 版本**,讓 pip 自己解。若你的網路有 SSL 攔截,
+    `download.pytorch.org` 那個 index 可能因為憑證鏈被拒,走預設 PyPI 反而會過。
+  - 權重(預設 `Ruicheng/moge-3-vitl`,370M)第一次執行時從 HuggingFace 自動下載。
+  - **需要 CUDA**;沒有可用 GPU 時這條引擎直接報錯結束,不會退回 CPU 慢跑。
+  - LichtFeld **無法**載入 MoGe-3:它是把 MoGe-2 的架構手刻成 C++/CUDA(沒有 ONNX
+    runtime),`--model` 只換權重不換架構,所以 MoGe-3 只能走這條獨立的 PyTorch 路徑。
+
+  裝好後面板「深度/法線生成」的**引擎**選單就會出現 MoGe-3。用法見
+  [二、使用 — 🌊 深度](#-深度影像--深度圖法向量圖--訓練深度法向量監督)。
 
 ### 從舊機器搬過來可以省的
 
@@ -302,17 +334,29 @@ LichtFeld backend(MR-NF)參數區有 **16-bit 色彩訓練**(`--use-16bit`)勾�
 
 為每張照片產生深度圖和/或法向量圖,輸出成 **LichtFeld 格式的 `depth/`、`normals/` 資料夾**
 (與來源**同名同尺寸**的 PNG),給訓練的[深度/法向量監督](#開啟深度法向量監督depth--normal-loss)
-讀取。用 LichtFeld-Studio 自己編譯出來的 `preprocess` 子指令(跟訓練 backend 共用同一份
-binary),模型是內建 MoGe-2 ONNX,**免裝 conda env / torch**,第一次執行自動下載。
+讀取。兩種引擎可選,安裝需求見[一、安裝 — 選用元件](#4-選用元件)。
 
 1. **`images`** — 選照片資料夾(或含 `images/` 的 COLMAP workspace)。
-2. **產生內容** — `both`(深度+法向量,**預設**)、`depth`(只有深度)、`normal`(只有法向量)。
-3. 輸出固定在資料集根目錄下的 `depth/`、`normals/`(不可自訂位置),跟 LichtFeld 自動掃描
+2. **引擎** — `LichtFeld preprocess(MoGe-2)`(**預設**,免裝、~40 ms/張)或
+   `MoGe-3(PyTorch)`(細節較佳、~0.5 s/張,需 `moge3` conda env)。
+3. **產生內容** — `both`(深度+法向量,**預設**)、`depth`(只有深度)、`normal`(只有法向量)。
+4. 輸出固定在資料集根目錄下的 `depth/`、`normals/`(不可自訂位置),跟 LichtFeld 自動掃描
    的路徑一致。
-4. 進階:**model**(自訂 ONNX 模型路徑,留空 = 自動下載官方 MoGe-2 ViT-B)、**max-side**
-   (推論最長邊,留空用內建預設 518)、**bit-depth**(輸出 PNG 位元深度,留空用內建預設
-   16——8-bit 深度先驗量化較明顯)、**強制 CPU**、**覆蓋已存在**(預設略過、可續跑)。
-5. **▶ 產生深度/法向量圖** → 右側顯示進度。
+5. 進階(依所選引擎顯示不同欄位):
+   - 兩者共用:**bit-depth**(輸出 PNG 位元深度,留空用內建預設 16——8-bit 深度先驗量化
+     較明顯)、**覆蓋已存在**(預設略過、可續跑)。
+   - 只有 MoGe-2:**model**(自訂 ONNX 模型路徑,留空 = 自動下載官方 MoGe-2 ViT-B)、
+     **max-side**(推論最長邊,留空用內建預設 518)。
+   - 只有 MoGe-3:**MoGe-3 模型**(HuggingFace id 或本機 `.pt`,留空 = `Ruicheng/moge-3-vitl`;
+     `moge-3-vitg` 1.25B 更好但慢很多、吃更多顯存)。MoGe-3 自己會把輸出上採樣回原圖尺寸,
+     所以沒有 max-side。
+6. **▶ 產生深度/法向量圖** → 右側顯示進度(兩種引擎共用同一組進度解析)。
+
+**兩種引擎要選哪個**:兩者的深度整體排序幾乎一致(實測同一批空拍圖 Spearman +0.995),
+差別在細節 —— MoGe-3 能解出梯田邊界、屋頂、電塔等結構,MoGe-2 在這些地方偏糊,法向量圖
+的差距比深度圖明顯得多。整批照片量大又只需要深度時 MoGe-2 快得多;要吃法向量監督、或場景
+本身結構細碎時再換 MoGe-3。兩者輸出可互相覆蓋,所以可以先用 MoGe-2 全跑一遍,之後只對
+關鍵資料集用 MoGe-3 重跑(記得勾**覆蓋已存在**)。
 
 > ⚠️ **像素要對齊**:深度/法向量圖是逐像素對應影像的,所以 `images` 要指到**和訓練 source
 > 相同的影像**。若用 COLMAP 去畸變後的 workspace 訓練,就對那個去畸變的 `images/` 產生;
@@ -449,12 +493,14 @@ pipeline/     領域層(torch-free,shell out 到外部工具)
 | `jobs.py` | `JobManager`(佇列、workers、cancel/delete)+ log 解析 |
 | `pipeline/colmap/` | `_run`(orchestrator:stages、sentinels)· `_layout`(版面偵測)· `_resize`(並行縮圖)· `_gps`(EXIF GPS 讀取 JPEG+TIFF、pose prior 注入) |
 | `pipeline/frames.py` / `train.py` | 抽幀去模糊 / 訓練 + mesh(+ChArUco mm 縮放) |
+| `pipeline/depth.py` / `moge3.py` | 深度/法向量的兩種引擎:LichtFeld `preprocess`(MoGe-2)/ PyTorch MoGe-3;`jobs._run_depth_engine` 依 `engine` 參數分派 |
+| `pipeline/moge3_encode.py` | 兩引擎共用的 PNG 編碼(LichtFeld `build_depth_png`/`build_normals_png` 的移植);刻意不含 torch/cv2,好讓 `tools/moge3_preprocess.py` 在 `moge3` env 裡與測試在 CI 裡都能載入 |
 | `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor()` 總報告 |
 | `pipeline/preflight.py` | 系統層檢查(ffmpeg + blurdetect / 磁碟可寫 / cudnn / gsutil / local.env 失效變數);每項回同一個 `{status, label, value, detail, hint}` 形狀,兩個 renderer 共用 |
 | `pipeline/doctor_cli.py` | `./run.sh --doctor`:同一份報告輸出到終端機,exit code 反映有無 FAIL |
 | `pipeline/model.py` | COLMAP 稀疏模型解析 + PLY 匯出(LRU 快取) |
 | `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器(`viz` / `mesh_viz` / `mesh_view`) |
-| `tools/` | `detect.sh`(conda/磁碟/ffmpeg 偵測,`run.sh` 與 `setup.sh` 共用)· `build_supersplat.sh`(自動更新也走這)· marker 量尺 / 縮放腳本 |
+| `tools/` | `detect.sh`(conda/磁碟/ffmpeg 偵測,`run.sh` 與 `setup.sh` 共用)· `build_supersplat.sh`(自動更新也走這)· `moge3_preprocess.py`(在 `moge3` env 裡跑的 MoGe-3 產生器)· marker 量尺 / 縮放腳本 |
 | `tests/` | 離線單元測試(無需 colmap/ffmpeg/GPU/網路) |
 
 ## 開發

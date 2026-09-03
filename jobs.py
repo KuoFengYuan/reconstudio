@@ -55,6 +55,21 @@ def _run_blocksplit(params: dict, runner: Runner) -> None:
     return run_blocksplit(params, runner)
 
 
+def _run_depth_engine(params: dict, runner: Runner) -> None:
+    """Pick the depth/normal engine, keeping both under the one "depth" job kind.
+
+    Same kind on purpose: the engines write the same folders and emit the same
+    progress markers, so the job view and _parse_depth below cover both. The
+    dispatch lives here rather than in depth.py because moge3.py already imports
+    from depth.py, and the reverse import would be circular. Lazy import for the
+    same reason as _run_blocksplit: moge3.py should not join the eager chain.
+    """
+    if (params.get("engine") or "lichtfeld").strip() == "moge3":
+        from pipeline.moge3 import run_moge3
+        return run_moge3(params, runner)
+    return run_depth(params, runner)
+
+
 RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "frames": run_frames,
     "colmap": run_colmap,
@@ -62,7 +77,7 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "train": run_train,
     "mesh": run_mesh,
     "gcs": _run_gcs,
-    "depth": run_depth,
+    "depth": _run_depth_engine,
 }
 
 # --- COLMAP stage parsing --------------------------------------------------- #

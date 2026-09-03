@@ -632,6 +632,15 @@
               <div class="pctl"><input id="cm_num_matches" name="NUM_MATCHES" value="{{ colmap_defaults.NUM_MATCHES }}"></div>
             </div>
           </div>
+          <div class="mgrp" data-m="seq_loop">
+            <div class="prow">
+              <label class="plabel" for="cm_seq_loop_min"><span class="ptext">SEQ_LOOP_MIN_INDEX_DIST</span>
+                <span class="info" onclick="togHint(event,'h_cm_seq_loop_min')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_seq_loop_min" name="SEQ_LOOP_MIN_INDEX_DIST" value="{{ colmap_defaults.SEQ_LOOP_MIN_INDEX_DIST }}"></div>
+            </div>
+            <div class="fhint" id="h_cm_seq_loop_min">loop closure 只看「拍攝順序上相隔這麼多張以上」的影像。相鄰影像本來就被 SEQ_OVERLAP 的滑動視窗配過了,不排除掉的話會佔用 NUM_MATCHES 的候選額度,真正繞回同一地點的重訪反而擠不進來。0 = 不限制(COLMAP 預設)。注意視窗開了 quadratic_overlap(步距 1,2,4,…,2^(SEQ_OVERLAP-1)),實際覆蓋範圍遠大於 SEQ_OVERLAP,所以這個值要設得比 SEQ_OVERLAP 大才有意義。需要 COLMAP 4.3 以上。</div>
+          </div>
           <div class="mgrp" data-m="spatial">
             <div class="prow">
               <label class="plabel" for="cm_sp_neighbors"><span class="ptext">SPATIAL_MAX_NEIGHBORS</span>
@@ -778,6 +787,22 @@
             <div class="pctl"><input type="checkbox" id="cm_ra_gravity" name="RA_USE_GRAVITY" {% if colmap_defaults.RA_USE_GRAVITY %}checked{% endif %}></div>
           </div>
           <div class="fhint" id="h_cm_ra_gravity">global_mapper 旋轉平均時使用重力先驗。</div>
+          <div class="pgrp" data-p="global">
+            <div class="prow">
+              <label class="plabel" for="cm_gm_single"><span class="ptext">GM_SINGLE_MODEL</span>
+                <span class="info" onclick="togHint(event,'h_cm_gm_single')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input type="checkbox" id="cm_gm_single" name="GM_SINGLE_MODEL" value="1" {{ 'checked' if colmap_defaults.GM_SINGLE_MODEL=='1' }}></div>
+            </div>
+            <div class="fhint" id="h_cm_gm_single">視圖圖(view graph)斷成好幾塊時,COLMAP 4.3 預設會把每一塊各自重建成 sparse/0、sparse/1…(依註冊張數由大到小);在這之前只保留最大的那一塊,其餘影像整批丟掉。勾選 = 回到只重建最大元件的舊行為。不勾 = 用 COLMAP 預設(全部重建)。注意下游(undistort / 訓練 / 匯出)目前仍只吃 sparse/0,多出來的元件會列在 log 的「mapper produced N models」區塊供你判讀。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_gm_min_size"><span class="ptext">GM_MIN_MODEL_SIZE</span>
+                <span class="info" onclick="togHint(event,'h_cm_gm_min_size')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_gm_min_size" name="GM_MIN_MODEL_SIZE" value="{{ colmap_defaults.GM_MIN_MODEL_SIZE }}" placeholder="3"></div>
+            </div>
+            <div class="fhint" id="h_cm_gm_min_size">註冊張數少於這個值的模型直接丟棄,用來濾掉零星的小碎塊。留空 = COLMAP 預設(3)。需要 COLMAP 4.3 以上。</div>
+          </div>
           <!-- 參數:僅 hierarchical 用得到（留空=COLMAP 預設） -->
           <div class="pgrp" data-p="hierarchical">
             <div class="prow">
@@ -995,13 +1020,32 @@
       <fieldset>
         <legend>深度/法線生成</legend>
         <div class="hint">為每張照片產生深度圖和/或法線圖,輸出成 LichtFeld-Studio 格式的
-          <code>depth/</code>、<code>normals/</code> 資料夾(同名同尺寸;PNG)。用 LichtFeld 自帶的
-          <code>preprocess</code> 指令(MoGe-2 ONNX,模型第一次執行會自動下載,不需 conda/torch env)。
-          訓練時加 <code>--use-depth-loss</code> / <code>--use-normal-loss</code> 會自動讀取。</div>
+          <code>depth/</code>、<code>normals/</code> 資料夾(同名同尺寸;PNG)。
+          訓練時加 <code>--use-depth-loss</code> / <code>--use-normal-loss</code> 會自動讀取。
+          兩種引擎寫出的編碼完全相同,下游不需要知道是哪一個產生的。</div>
+        <label>引擎</label>
+        <select name="engine" id="depth_engine" onchange="syncDepthEngine()"
+                {{ '' if depth_any_ready else 'disabled' }}>
+          <option value="lichtfeld">LichtFeld preprocess(MoGe-2)· 內建、免 torch 環境</option>
+          <option value="moge3">MoGe-3(PyTorch)· 細節較佳,需 moge3 conda env</option>
+        </select>
+        <div class="hint dehint" data-e="lichtfeld">用 LichtFeld 自帶的 <code>preprocess</code>
+          指令(MoGe-2 ViT-B,模型第一次執行會自動下載,不需 conda/torch env)。</div>
+        <div class="hint dehint" data-e="moge3">官方 PyTorch MoGe-3(<code>Ruicheng/moge-3-vitl</code>,
+          370M)。LichtFeld 沒有內建 MoGe-3 —— 它是把 MoGe-2 的架構手刻成 C++/CUDA,
+          <code>--model</code> 只換權重不換架構,所以 MoGe-3 只能走這條獨立路徑。
+          在同一批空拍圖上,深度整體排序與 MoGe-2 一致(Spearman +0.995),但梯田邊界、
+          屋頂、電塔等細節明顯銳利許多;代價是每張約 0.5 秒(MoGe-2 約 40 毫秒)。</div>
         {% if not depth_ready %}
-        <div class="hint" style="color:var(--err)">⚠ 找不到編譯好的 LichtFeld-Studio binary(跟
-          lichtfeld-mrnf 訓練 backend 共用同一份)。請先在 <code>../LichtFeld-Studio</code> 建置,
-          或開 <a href="/doctor" target="_blank" style="color:var(--accent)">/doctor</a> 檢查。</div>
+        <div class="hint dehint" data-e="lichtfeld" style="color:var(--err)">⚠ 找不到編譯好的
+          LichtFeld-Studio binary(跟 lichtfeld-mrnf 訓練 backend 共用同一份)。請先在
+          <code>../LichtFeld-Studio</code> 建置,或開
+          <a href="/doctor" target="_blank" style="color:var(--accent)">/doctor</a> 檢查。</div>
+        {% endif %}
+        {% if not moge3_ready %}
+        <div class="hint dehint" data-e="moge3" style="color:var(--err)">⚠ 找不到 <code>moge3</code>
+          conda env。建立方式:<code>conda create -y -n moge3 python=3.11</code>,接著
+          <code>conda run -n moge3 pip install torch "git+https://github.com/microsoft/MoGe.git"</code>。</div>
         {% endif %}
         <label>images(照片資料夾,或含 images/ 的 COLMAP workspace)</label>
         <div class="row">
@@ -1011,13 +1055,13 @@
         <div class="hint">輸出固定在資料集根目錄下的 <code>depth/</code>、<code>normals/</code>(不可自訂位置),
           跟 LichtFeld 訓練時的自動掃描路徑一致。</div>
         <label>產生內容</label>
-        <select name="mode" {{ '' if depth_ready else 'disabled' }}>
+        <select name="mode" {{ '' if depth_any_ready else 'disabled' }}>
           <option value="both" {{ 'selected' if depth_defaults.mode == 'both' }}>深度 + 法向量(both)</option>
           <option value="depth" {{ 'selected' if depth_defaults.mode == 'depth' }}>只有深度(depth)</option>
           <option value="normal" {{ 'selected' if depth_defaults.mode == 'normal' }}>只有法向量(normal)</option>
         </select>
         <label>GPU</label>
-        <select name="gpu" {{ '' if depth_ready else 'disabled' }}>
+        <select name="gpu" {{ '' if depth_any_ready else 'disabled' }}>
           {% if gpus %}{% for g in gpus %}
           <option value="{{ g.index }}">#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
           {% endfor %}{% else %}
@@ -1028,16 +1072,25 @@
       <details class="grp">
         <summary>進階</summary>
         <div class="gbody">
-          <label>model(自訂 ONNX 模型路徑;留空 = 自動下載官方 MoGe-2 ViT-B)</label>
-          <input name="model" value="{{ depth_defaults.model }}" {{ '' if depth_ready else 'disabled' }}>
-          <label style="margin-top:8px">max-side(推論最長邊,留空 = 內建預設 518)</label>
-          <input name="max_side" value="{{ depth_defaults.max_side }}" {{ '' if depth_ready else 'disabled' }}>
+          <div class="dehint" data-e="lichtfeld">
+            <label>model(自訂 ONNX 模型路徑;留空 = 自動下載官方 MoGe-2 ViT-B)</label>
+            <input name="model" value="{{ depth_defaults.model }}">
+            <label style="margin-top:8px">max-side(推論最長邊,留空 = 內建預設 518)</label>
+            <input name="max_side" value="{{ depth_defaults.max_side }}">
+          </div>
+          <div class="dehint" data-e="moge3">
+            <label>MoGe-3 模型(HuggingFace id 或本機 .pt;留空 = 預設 vitl)</label>
+            <input name="moge3_model" value="{{ moge3_defaults.moge3_model }}"
+                   placeholder="Ruicheng/moge-3-vitl">
+            <div class="hint"><code>Ruicheng/moge-3-vitg</code>(1.25B)品質更高但慢很多、吃更多顯存;
+              兩者都含法線頭。MoGe-3 自己就會把輸出上採樣回原圖尺寸,所以沒有 max-side 這個選項。</div>
+          </div>
           <label style="margin-top:8px">bit-depth(輸出 PNG 位元深度,留空 = 內建預設 16;8-bit 深度先驗量化較明顯)</label>
-          <input name="bit_depth" value="{{ depth_defaults.bit_depth }}" {{ '' if depth_ready else 'disabled' }}>
+          <input name="bit_depth" value="{{ depth_defaults.bit_depth }}">
           <label class="chk" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1"> <span>覆蓋已存在的深度/法向量圖(預設略過,可續跑)</span></label>
         </div>
       </details>
-      <button class="submit" type="submit" {{ '' if depth_ready else 'disabled' }}>▶ 產生深度/法向量圖</button>
+      <button class="submit" type="submit" {{ '' if depth_any_ready else 'disabled' }}>▶ 產生深度/法向量圖</button>
     </form>
 
     <!-- ----- blocksplit form ----- -->
@@ -1594,10 +1647,19 @@
     var sel = document.getElementById('matcher-sel'); if (!sel) return;
     var m = sel.value;
     document.querySelectorAll('.mhint').forEach(function(e){ e.style.display = (e.dataset.m === m) ? '' : 'none'; });
-    var show = {sequential:['seq_overlap','num_matches'], vocab:['num_matches'],
+    // seq_loop only under `sequential`: that's the one value of MATCHER that turns
+    // loop_detection on (see pipeline/colmap/_run.py::_stage_match).
+    var show = {sequential:['seq_overlap','num_matches','seq_loop'], vocab:['num_matches'],
                 both:['seq_overlap','num_matches'], spatial:['spatial'],
                 custom:['custom_matcher']}[m] || [];
     document.querySelectorAll('.mgrp').forEach(function(e){ e.style.display = (show.indexOf(e.dataset.m) >= 0) ? '' : 'none'; });
+  }
+  function syncDepthEngine(){
+    var sel = document.getElementById('depth_engine'); if (!sel) return;
+    var e = sel.value;
+    document.querySelectorAll('.dehint').forEach(function(el){
+      el.style.display = (el.dataset.e === e) ? '' : 'none';
+    });
   }
   function syncMapper(){
     var sel = document.getElementById('mapper-sel'); if (!sel) return;
@@ -1608,7 +1670,7 @@
       e.style.display = (e.dataset.p.split(' ').indexOf(m) >= 0) ? '' : 'none';
     });
   }
-  syncMatcher(); syncMapper();   // set initial visibility from the prefilled defaults
+  syncMatcher(); syncMapper(); syncDepthEngine();  // initial visibility from the prefilled defaults
   document.addEventListener('change', function(e){
     if (e.target && e.target.name === 'auto_voxel'){
       var f = e.target.closest('form');

@@ -185,19 +185,26 @@ async def create_frames(request: Request):
 
 @router.post("/ui/depth", response_class=HTMLResponse)
 async def create_depth(request: Request):
-    """LichtFeld-Studio `preprocess` -> depth/ and/or normals/ folders next to
-    images/. Non-destructive: only creates those folders; originals untouched."""
+    """depth/ and/or normals/ next to images/, from either engine: LichtFeld's
+    `preprocess` (MoGe-2) or PyTorch MoGe-3. Both write the same folders in the
+    same encoding, so downstream training reads either without knowing which.
+    Non-destructive: only creates those folders; originals untouched."""
     form = dict(await request.form())
     images = (form.get("images") or "").strip().rstrip("/")
     mode = (form.get("mode") or "both").strip()
     model = (form.get("model") or "").strip()
     gpu = (form.get("gpu") or "").strip()
+    engine = (form.get("engine") or "lichtfeld").strip()
     try:
         if not Path(images).is_dir():
             raise ValueError(f"images 不是資料夾: {images!r}")
         if mode not in ("depth", "normal", "both"):
             raise ValueError(f"mode 必須是 depth/normal/both: {mode!r}")
+        if engine not in ("lichtfeld", "moge3"):
+            raise ValueError(f"engine 必須是 lichtfeld/moge3: {engine!r}")
         params = {"images": images, "mode": mode, "model": model, "gpu": gpu,
+                  "engine": engine,
+                  "moge3_model": (form.get("moge3_model") or "").strip(),
                   "max_side": (form.get("max_side") or "").strip(),
                   "bit_depth": (form.get("bit_depth") or "").strip(),
                   "overwrite": bool(form.get("overwrite"))}
@@ -211,7 +218,8 @@ async def create_depth(request: Request):
     if mode in ("normal", "both"):
         dests.append(str(dataset_root / "normals"))
     job = Job(id=new_id(), kind="depth",
-              title=f"🌊 深度/法向量({mode}) · {Path(images).name}",
+              title=f"🌊 深度/法向量({mode}"
+                    f"{'· MoGe-3' if engine == 'moge3' else ''}) · {Path(images).name}",
               subtitle=f"{images}  →  {' + '.join(dests)}",
               params=params, meta={"images": images, "mode": mode})
     manager.submit(job)
