@@ -57,6 +57,15 @@ COLMAP_DEFAULTS = {
     # warns when that combination is selected.
     "camera_model": "OPENCV", "max_features": "4096", "camera_mode": "per_folder",
     "matcher": "vocab", "seq_overlap": "10", "num_matches": "50",
+    # sequential_matcher loop detection: drop retrieval candidates closer than this many
+    # images in sequence order (COLMAP 4.3 --SequentialMatching.loop_detection_min_index_
+    # distance). Neighbours are already covered by the overlap window, so without this they
+    # eat the loop_detection_num_images budget that should go to genuine revisits. Note the
+    # window reaches much further than SEQ_OVERLAP because quadratic_overlap is on (steps
+    # 1,2,4,…,2^(overlap-1)), so a useful value is well above SEQ_OVERLAP. "0" = COLMAP's
+    # default (no restriction) and, since the flag is then not passed at all, also keeps
+    # the stage working against pre-4.3 COLMAP builds, which reject the unknown option.
+    "seq_loop_min_index_distance": "0",
     "guided_matching": "1", "mapper": "global", "dataset_name": "training_dataset",
     "force": False, "nested_layout": False, "resize": "fullhd",
     # resize longest-side cap for the "fullhd" option (default 1920). Raise for higher-res
@@ -93,6 +102,17 @@ COLMAP_DEFAULTS = {
     "pose_prior_gravity": True,
     # global_mapper: use the DB gravity priors in rotation averaging.
     "ra_use_gravity": False, "ra_max_rotation_error_deg": "10",
+    # global_mapper multi-component (COLMAP 4.3 #4589): the view graph is split into
+    # connected components and each is reconstructed into its own sparse/N, largest first.
+    # Before 4.3 everything outside the largest component was silently dropped, so a
+    # capture with coverage gaps lost whole areas. COLMAP now does this by default, so the
+    # knob here is the opt-OUT: set it to go back to largest-component-only. Phrasing it as
+    # the deviation is what lets a caller that never mentions it inherit COLMAP's default —
+    # and keeps the flag off the command line entirely, so a default run still works
+    # against pre-4.3 builds, which reject the unknown option outright. Same for the
+    # blank-means-COLMAP-default min size. Only sparse/0 flows downstream; the extra
+    # components are reported by _stage_models_report, not consumed.
+    "gm_single_model": False, "gm_min_model_size": "",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
     # BA solver backend: "ceres" (default; the ba_gpu flag above then chooses CPU vs
@@ -216,6 +236,8 @@ class _Ctx:
     eo_rig_match: bool
     eo_gravity: bool
     ra_use_gravity: bool
+    gm_single: bool
+    gm_min_size: str
     db: Path
     lst: Path
     dense_dir: Path
@@ -397,6 +419,8 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         eo_rig_match=bool(d["pose_prior_rig_match"]),
         eo_gravity=bool(d["pose_prior_gravity"]),
         ra_use_gravity=bool(d["ra_use_gravity"]),
+        gm_single=bool(d["gm_single_model"]),
+        gm_min_size=str(d["gm_min_model_size"]).strip(),
         db=db, lst=lst, dense_dir=dense_dir,
     )
 
@@ -949,7 +973,10 @@ def _stage_match(c: _Ctx) -> None:
         if c.need(sentinel):
             if c.matcher in ("sequential", "both"):
                 loop = 1 if c.matcher == "sequential" else 0
-                c.r.banner(f"sequential_matcher (overlap={c.d['seq_overlap']}, loop_detection={loop})")
+                min_idx = str(c.d["seq_loop_min_index_distance"]).strip()
+                c.r.banner(f"sequential_matcher (overlap={c.d['seq_overlap']}, loop_detection={loop}"
+                           + (f", loop_min_index_distance={min_idx}"
+                              if loop and min_idx not in ("", "0") else "") + ")")
                 seq = ["--SequentialMatching.overlap", str(c.d["seq_overlap"]),
                        "--SequentialMatching.quadratic_overlap", "1"]
                 if c.matcher == "sequential":
@@ -957,6 +984,12 @@ def _stage_match(c: _Ctx) -> None:
                             "--SequentialMatching.loop_detection_period", str(c.d["seq_overlap"]),
                             "--SequentialMatching.loop_detection_num_images", str(c.d["num_matches"]),
                             "--SequentialMatching.vocab_tree_path", str(c.vocab_tree)]
+                    # Only pass the 4.3 flag when it actually restricts something: the
+                    # default of 0 is COLMAP's own, and omitting it keeps this stage
+                    # runnable against older COLMAP builds (an unknown option is a hard
+                    # parse error there, not a warning).
+                    if min_idx not in ("", "0"):
+                        seq += ["--SequentialMatching.loop_detection_min_index_distance", min_idx]
                 c.r.run([COLMAP_BIN, "sequential_matcher", "--database_path", str(c.db),
                          "--FeatureMatching.guided_matching", str(c.d["guided_matching"]), *seq])
             if c.matcher in ("vocab", "both"):
@@ -1075,6 +1108,13 @@ def _stage_mapper(c: _Ctx) -> None:
                     # about in _setup); Caspar always runs on GPU, no separate toggle needed.
                     extra += ["--GlobalMapper.ba_backend", "CASPAR"]
                     label += " [Caspar GPU BA]"
+                if c.gm_single:
+                    # COLMAP 4.3 reconstructs every connected component by default; this
+                    # asks for the pre-4.3 behaviour of keeping only the largest.
+                    extra += ["--GlobalMapper.multiple_models", "0"]
+                    label += " [largest component only]"
+                if c.gm_min_size:
+                    extra += ["--GlobalMapper.min_model_size", c.gm_min_size]
             elif c.mapper == "pose_prior":
                 # GPS priors folded into BA -> the output is already georeferenced
                 # and metric (model_aligner is then redundant). overwrite_priors_
@@ -1152,6 +1192,62 @@ def _stage_mapper(c: _Ctx) -> None:
                 (c.ws / "sparse" / "0" / stale).unlink(missing_ok=True)
         else:
             c.r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
+
+
+def _model_dirs(sparse: Path) -> list[Path]:
+    """The sparse/N model dirs, numerically ordered.
+
+    Name must be all digits, which is what skips sparse/0_heavy (the simplify backup)
+    and sparse/0/masks (the mask-undistort model copy).
+    """
+    if not sparse.is_dir():
+        return []
+    return sorted((p for p in sparse.iterdir() if p.is_dir() and p.name.isdigit()),
+                  key=lambda p: int(p.name))
+
+
+def _bin_count(path: Path) -> int | None:
+    """Element count from a COLMAP .bin header, which is a little-endian uint64 length
+    prefix (see vendor/read_write_model.py). Reading just those 8 bytes keeps this
+    report cheap on models whose images.bin is gigabytes of 2D points."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(8)
+        return int.from_bytes(head, "little") if len(head) == 8 else None
+    except OSError:
+        return None
+
+
+def _stage_models_report(c: _Ctx) -> None:
+    """4a''. Report every sparse/N the mapper wrote, not just the one that is used.
+
+    A mapper run can produce several models: the incremental mapper always could
+    (Mapper.multiple_models), and global_mapper does so as of COLMAP 4.3 (#4589) —
+    it reconstructs every connected component of the view graph, largest first,
+    where before everything outside the largest was silently discarded. Only
+    sparse/0 is carried downstream by the stages below, so without this the extra
+    components are invisible: real registered images that never reach training.
+    """
+    models = _model_dirs(c.ws / "sparse")
+    if len(models) < 2:
+        return                       # the ordinary single-model case: nothing to say
+    counts = [(m, _bin_count(m / "images.bin"), _bin_count(m / "points3D.bin"))
+              for m in models]
+    total = sum(n for _, n, _ in counts if n)
+    c.r.banner(f"mapper produced {len(models)} models (only sparse/0 goes downstream)")
+    for m, imgs, pts in counts:
+        c.r.log(f"  sparse/{m.name:<3} {'?' if imgs is None else imgs:>7} images  "
+                f"{'?' if pts is None else pts:>9} points")
+    used = counts[0][1] or 0
+    rest = total - used
+    if rest and total:
+        c.r.log(f"  {rest} of {total} registered images ({rest / total:.0%}) sit in the "
+                f"{len(models) - 1} component(s) below sparse/0 and are not undistorted, "
+                f"trained on, or exported.")
+        c.r.log("  A split like this means the view graph is disconnected — usually a "
+                "coverage gap or a stretch too textureless to match across. Bridging it "
+                "(more overlap / loop-closure pairs) is what merges them into one model; "
+                "tick GM_SINGLE_MODEL to go back to reconstructing only the largest.")
 
 
 def _stage_intrinsics_report(c: _Ctx) -> None:
@@ -1378,6 +1474,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)
     _stage_rig_calibrate(c)     # 3b. derive sensor_from_rig for non-global mappers
     _stage_mapper(c)            # 4. mapper -> sparse/0
+    _stage_models_report(c)     # 4a''. report extra sparse/N components, if any
     _stage_intrinsics_report(c) # 4a'. calibrated vs solved intrinsics
     _stage_simplify(c)          # 4a. simplify_images (optional)
     _stage_align(c)             # 4b. model_aligner (optional GPS)

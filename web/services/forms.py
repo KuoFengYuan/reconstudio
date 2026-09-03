@@ -124,6 +124,9 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "rig_gps_tol": g("RIG_GPS_TOL", "0.5"),
         "seq_overlap": g("SEQ_OVERLAP", "10"),
         "num_matches": g("NUM_MATCHES", "50"),
+        # sequential_matcher loop detection (MATCHER=sequential): skip retrieval hits
+        # within this many images in sequence order. 0 = COLMAP default (no restriction).
+        "seq_loop_min_index_distance": g("SEQ_LOOP_MIN_INDEX_DIST", "0"),
         "guided_matching": "1" if form.get("GUIDED_MATCHING") else "0",
         "mapper": g("MAPPER", "global"),
         "dataset_name": g("DATASET_NAME", "training_dataset"),
@@ -154,6 +157,11 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         "pose_prior_gravity": bool(form.get("POSE_PRIOR_GRAVITY")),
         "ra_use_gravity": bool(form.get("RA_USE_GRAVITY")),
         "ra_max_rotation_error_deg": g("RA_MAX_ROTATION_ERROR_DEG", "10"),
+        # global_mapper multi-component (MAPPER=global): COLMAP 4.3 reconstructs every
+        # connected component by default, so this is the opt-out — tick to keep only the
+        # largest. Blank min size = COLMAP's 3.
+        "gm_single_model": bool(form.get("GM_SINGLE_MODEL")),
+        "gm_min_model_size": (form.get("GM_MIN_MODEL_SIZE") or "").strip(),
         "ba_gpu": bool(form.get("MAPPER_BA_GPU")),
         "ba_backend": g("BA_BACKEND", "ceres"),
         "colmap_gpu": (form.get("COLMAP_GPU") or "").strip(),
@@ -202,6 +210,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         if params[key] not in allowed:
             raise ValueError(f"{key} must be one of {allowed}")
     for key in ("max_features", "seq_overlap", "num_matches", "spatial_max_neighbors",
+                "seq_loop_min_index_distance",
                 "cm_n_seq", "cm_n_quad", "cm_n_loop", "cm_n_gps", "resize_max"):
         if not str(params[key]).isdigit():
             raise ValueError(f"{key} must be an integer")
@@ -224,7 +233,8 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
     # optional numerics: validated only when provided (blank = "use COLMAP default")
     for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
                        ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),
-                       ("hm_image_overlap", "HM_IMAGE_OVERLAP")):
+                       ("hm_image_overlap", "HM_IMAGE_OVERLAP"),
+                       ("gm_min_model_size", "GM_MIN_MODEL_SIZE")):
         if params[key] and not params[key].isdigit():
             raise ValueError(f"{label} must be a positive integer (or blank)")
     # SIFT size also takes "auto" (follow the undistort cap) and -1 (COLMAP's own

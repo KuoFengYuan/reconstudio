@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -229,6 +231,35 @@ def test_matcher_sequential_adds_loop_detection(patched, imgroot, vocab, tmp_pat
     assert "vocab_tree_matcher" not in r.subcommands()
 
 
+def test_loop_min_index_distance_is_omitted_at_its_default(patched, imgroot, vocab, tmp_path):
+    # 0 is COLMAP's own default, and leaving the flag off is what keeps the stage
+    # runnable against pre-4.3 COLMAP builds, which reject the unknown option.
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, matcher="sequential"), r)
+    assert ("--SequentialMatching.loop_detection_min_index_distance"
+            not in r.argv_for("sequential_matcher"))
+
+
+def test_loop_min_index_distance_is_passed_when_set(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, matcher="sequential",
+                            seq_loop_min_index_distance="600"), r)
+    seq = r.argv_for("sequential_matcher")
+    flag = "--SequentialMatching.loop_detection_min_index_distance"
+    assert seq[seq.index(flag) + 1] == "600"
+
+
+def test_loop_min_index_distance_needs_loop_detection(patched, imgroot, vocab, tmp_path):
+    # matcher='both' runs sequential_matcher WITHOUT loop detection, so the retrieval
+    # restriction has nothing to restrict and must not reach the command line.
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, matcher="both",
+                            seq_loop_min_index_distance="600"), r)
+    seq = r.argv_for("sequential_matcher")
+    assert "--SequentialMatching.loop_detection" not in seq
+    assert "--SequentialMatching.loop_detection_min_index_distance" not in seq
+
+
 def test_matcher_vocab_only(patched, imgroot, vocab, tmp_path):
     r = FakeRunner()
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, matcher="vocab"), r)
@@ -416,6 +447,77 @@ def test_ra_use_gravity_composes_with_the_caspar_backend(patched, imgroot, vocab
     argv = r.argv_for("global_mapper")
     assert "--GlobalMapper.ra_use_gravity" in argv       # not clobbered by the backend flag
     assert "--GlobalMapper.ba_backend" in argv
+
+
+# --------------------------------------------------------------------------- #
+# global_mapper multi-component (COLMAP 4.3 #4589)
+# --------------------------------------------------------------------------- #
+def test_multi_component_flags_are_omitted_by_default(patched, imgroot, vocab, tmp_path):
+    # Reconstructing every connected component IS COLMAP 4.3's default, so a default
+    # run must say nothing: that's what lets it inherit the default and still run
+    # against builds that predate the options.
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global"), r)
+    argv = r.argv_for("global_mapper")
+    assert "--GlobalMapper.multiple_models" not in argv
+    assert "--GlobalMapper.min_model_size" not in argv
+
+
+def test_gm_single_model_asks_for_the_largest_component_only(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global",
+                            gm_single_model=True), r)
+    argv = r.argv_for("global_mapper")
+    assert argv[argv.index("--GlobalMapper.multiple_models") + 1] == "0"
+
+
+def test_gm_min_model_size_is_passed_when_set(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global",
+                            gm_min_model_size="10"), r)
+    argv = r.argv_for("global_mapper")
+    assert argv[argv.index("--GlobalMapper.min_model_size") + 1] == "10"
+
+
+def _fake_model(d: Path, n_images: int, n_points: int) -> None:
+    """A model dir carrying only the .bin headers, which is all the report reads:
+    COLMAP's binary format opens with a little-endian uint64 element count."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "images.bin").write_bytes(struct.pack("<Q", n_images))
+    (d / "points3D.bin").write_bytes(struct.pack("<Q", n_points))
+
+
+def test_models_report_stays_silent_for_a_single_model(tmp_path):
+    r = FakeRunner()
+    _fake_model(tmp_path / "sparse" / "0", 1204, 842193)
+    _run._stage_models_report(SimpleNamespace(ws=tmp_path, r=r))
+    assert not r.banners and not r.logs        # the ordinary case adds no noise
+
+
+def test_models_report_lists_components_and_ignores_non_model_dirs(tmp_path):
+    r = FakeRunner()
+    _fake_model(tmp_path / "sparse" / "0", 1204, 842193)
+    _fake_model(tmp_path / "sparse" / "1", 312, 187442)
+    _fake_model(tmp_path / "sparse" / "2", 7, 2011)
+    _fake_model(tmp_path / "sparse" / "0_heavy", 9999, 9999)   # simplify's backup
+    (tmp_path / "sparse" / "0" / "masks").mkdir()              # mask-undistort copy
+    _run._stage_models_report(SimpleNamespace(ws=tmp_path, r=r))
+
+    assert "3 models" in r.banners[0]
+    body = "\n".join(r.logs)
+    for name in ("sparse/0", "sparse/1", "sparse/2"):
+        assert name in body
+    assert "0_heavy" not in body and "9999" not in body       # neither is a component
+    assert "319 of 1523" in body                              # images stranded off sparse/0
+
+
+def test_models_report_does_not_invent_counts_for_an_unreadable_model(tmp_path):
+    r = FakeRunner()
+    _fake_model(tmp_path / "sparse" / "0", 500, 1000)
+    _fake_model(tmp_path / "sparse" / "1", 10, 20)
+    (tmp_path / "sparse" / "1" / "images.bin").write_bytes(b"\x01\x02")   # truncated
+    _run._stage_models_report(SimpleNamespace(ws=tmp_path, r=r))
+    assert "? images" in "\n".join(r.logs)
 
 
 def test_no_eo_csv_leaves_the_pipeline_untouched(patched, imgroot, vocab, tmp_path):

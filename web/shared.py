@@ -47,6 +47,10 @@ def _page(request: Request, name: str, **ctx) -> HTMLResponse:
 COLMAP_DEFAULTS = {
     "CAMERA_MODEL": "OPENCV", "MAX_FEATURES": "4096", "CAMERA_MODE": "per_folder",
     "MATCHER": "vocab", "SEQ_OVERLAP": "10", "NUM_MATCHES": "50",
+    # sequential_matcher loop detection: ignore retrieval hits closer than this many
+    # images in sequence order, so the candidate budget goes to real revisits.
+    # "0" = COLMAP default (no restriction).
+    "SEQ_LOOP_MIN_INDEX_DIST": "0",
     # multi-camera rig: off by default; RIG_MODE picks how frames are grouped.
     "RIG_ENABLE": "0", "RIG_MODE": "auto", "RIG_REGEX": "",
     "RIG_REF_CAMERA": "", "RIG_GPS_TOL": "0.5",
@@ -64,6 +68,10 @@ COLMAP_DEFAULTS = {
     "POSE_PRIOR_CSV": "", "POSE_PRIOR_CRS": "twd97_tm2_121",
     "POSE_PRIOR_RIG_MATCH": "1", "POSE_PRIOR_GRAVITY": "1",
     "RA_USE_GRAVITY": "0", "RA_MAX_ROTATION_ERROR_DEG": "10",
+    # global_mapper multi-component (COLMAP 4.3): every connected component becomes its
+    # own sparse/N. That is COLMAP's default, so the knob is the opt-out — ticking it
+    # reconstructs only the largest component. GM_MIN_MODEL_SIZE blank = COLMAP's 3.
+    "GM_SINGLE_MODEL": "0", "GM_MIN_MODEL_SIZE": "",
     # GPU bundle adjustment (incremental / pose_prior / hierarchical) — on by default.
     # global_mapper isn't in this set: its Ceres BA defaults to GPU on its own.
     "MAPPER_BA_GPU": "1",
