@@ -83,6 +83,23 @@ def colmap_check() -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# exiftool: strips Canon's empty-string Artist/Copyright before undistort so
+# OIIO 2.4.17's IPTC-IIM encoder doesn't SIGABRT (see colmap._run._sanitize_exif)
+# --------------------------------------------------------------------------- #
+def exiftool_check() -> dict:
+    path = shutil.which("exiftool")
+    if not path:
+        return make_check(
+            "exiftool", "exiftool (Canon EXIF 消毒)", "warn", "找不到執行檔",
+            "Canon 機身常把 Artist/Copyright 寫成空字串;image_undistorter 重新編碼這類影像時,"
+            "OIIO 的 IPTC 編碼器會 assert 崩潰(SIGABRT)。沒有 exiftool 就不會自動修,"
+            "只有踩到才會發現,而且會讓整個 undistort 階段失敗",
+            "sudo apt install libimage-exiftool-perl")
+    return make_check("exiftool", "exiftool (Canon EXIF 消毒)", "ok", path,
+                      probe([path, "-ver"]).strip())
+
+
+# --------------------------------------------------------------------------- #
 # ffmpeg: the binary, the one filter we require, and the configured hwaccel
 # --------------------------------------------------------------------------- #
 def ffmpeg_checks() -> list[dict]:
@@ -350,5 +367,5 @@ def env_var_check() -> dict:
 # --------------------------------------------------------------------------- #
 def system_report(deep: bool = True) -> list[dict]:
     """All system-level checks, in the order they matter when standing up a box."""
-    return [colmap_check(), *ffmpeg_checks(), *storage_checks(), cudnn_check(),
+    return [colmap_check(), exiftool_check(), *ffmpeg_checks(), *storage_checks(), cudnn_check(),
             *gcs_checks(deep), *supersplat_checks(), env_var_check()]

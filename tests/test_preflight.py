@@ -12,6 +12,7 @@ from pipeline.preflight import (
     STATUSES,
     _dir_check,
     env_var_check,
+    exiftool_check,
     ffmpeg_checks,
     known_env_vars,
     make_check,
@@ -66,6 +67,27 @@ def test_system_report_entries_all_have_valid_status(monkeypatch, tmp_path):
         assert set(c) == _KEYS, c
         assert c["status"] in STATUSES, c
         assert c["label"], c
+
+
+# --------------------------------------------------------------------------- #
+# exiftool: optional, but its absence lets a Canon SIGABRT through unfixed
+# --------------------------------------------------------------------------- #
+def test_missing_exiftool_warns_not_fails(monkeypatch):
+    # Unlike colmap/ffmpeg this can't be "err": most datasets never hit the
+    # Canon empty-tag bug, so a machine without exiftool still works most of
+    # the time — it just won't self-heal the one camera model that needs it.
+    monkeypatch.setattr("shutil.which", lambda b: None)
+    chk = exiftool_check()
+    assert chk["status"] == "warn"
+    assert chk["hint"]
+
+
+def test_exiftool_found_is_ok(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda b: "/usr/bin/exiftool" if b == "exiftool" else None)
+    monkeypatch.setattr(preflight, "probe", lambda argv, timeout=None: "13.25\n")
+    chk = exiftool_check()
+    assert chk["status"] == "ok"
+    assert chk["value"] == "/usr/bin/exiftool"
 
 
 # --------------------------------------------------------------------------- #
