@@ -95,6 +95,17 @@ imported from that env.
 The depth stage is **non-destructive**: it only creates `depth/`/`normals/` next to
 `images/` and never touches the source images. That convention holds across the pipeline.
 
+**`_stage_undistort` sanitizes EXIF before every `image_undistorter` call** (both the
+image pass and, when `MASKS_DIR` is set, the masks pass). Canon bodies write
+empty-string `Artist`/`Copyright` tags rather than omitting them; OIIO 2.4.17's
+IPTC-IIM encoder asserts a non-null pointer for every tag it re-encodes, so
+`image_undistorter` SIGABRTs the instant it writes one of these images back out.
+`_sanitize_exif` (`pipeline/colmap/_run.py`) shells out to `exiftool -if '$Artist eq ""
+or $Copyright eq ""' -Artist= -Copyright=`, which is a no-op for any camera that
+doesn't do this and pixel-lossless where it fires. Missing `exiftool` degrades to a
+logged warning, not a failure — most datasets never hit the bug, so its absence
+shouldn't block them (`preflight.exiftool_check()` surfaces it as `warn` on `/doctor`).
+
 ## Testing
 
 Tests run fully offline. `tests/test_colmap_run.py` is the model to follow for pipeline

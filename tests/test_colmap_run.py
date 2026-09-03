@@ -115,15 +115,21 @@ class FakeRunner:
                     (sp / f).write_bytes(b"")
                 (Path(out) / "images").mkdir(parents=True, exist_ok=True)
 
-    # convenience views over the recorded calls
+    # convenience views over the recorded calls. Filtered to argv[0] == colmap so
+    # a non-colmap call (currently just the exiftool sanitize pass ahead of
+    # image_undistorter) doesn't masquerade as a "subcommand" here — its own
+    # argv[1] is a flag like -q, not something these helpers should ever match.
     def subcommands(self) -> list[str]:
-        return [c[1] for c in self.calls if len(c) > 1]
+        return [c[1] for c in self.calls if len(c) > 1 and c[0] == _run.COLMAP_BIN]
 
     def argv_for(self, sub: str) -> list[str]:
         for c in self.calls:
-            if len(c) > 1 and c[1] == sub:
+            if len(c) > 1 and c[0] == _run.COLMAP_BIN and c[1] == sub:
                 return c
         raise AssertionError(f"{sub} was not called; got {self.subcommands()}")
+
+    def exiftool_calls(self) -> list[list[str]]:
+        return [c for c in self.calls if c and c[0] == "/usr/bin/exiftool"]
 
 
 @pytest.fixture
@@ -133,6 +139,7 @@ def patched(monkeypatch):
     class Knobs:
         gps = (0, 0)          # (n_gps, n_total) returned by gps_coverage; (0,0)->no GPS
         which = "/usr/bin/colmap"
+        exiftool = "/usr/bin/exiftool"    # None -> simulate it missing from PATH
 
     k = Knobs()
 
@@ -141,11 +148,14 @@ def patched(monkeypatch):
             return (len(lines), len(lines))
         return (0, len(lines))
 
+    def fake_which(name):
+        return k.exiftool if name == "exiftool" else k.which
+
     monkeypatch.setattr(_run, "gps_coverage", fake_gps_coverage)
     monkeypatch.setattr(_run, "resize_to_fullhd",
                         lambda img_root, lines, ws, force, r, preserve_exif=False,
                         max_size="1920": img_root)
-    monkeypatch.setattr(_run.shutil, "which", lambda _name: k.which)
+    monkeypatch.setattr(_run.shutil, "which", fake_which)
     return k
 
 
@@ -210,6 +220,29 @@ def test_dense_dir_and_paths(patched, imgroot, vocab, tmp_path):
     und = r.argv_for("image_undistorter")
     # dense_dir = <ws>/<dataset_name>_<mapper>_mapper, default training_dataset / global
     assert FakeRunner._arg_after(und, "--output_path") == str(ws / "training_dataset_global_mapper")
+
+
+# --------------------------------------------------------------------------- #
+# exif sanitize: strips Canon's empty-string Artist/Copyright ahead of
+# image_undistorter, which otherwise SIGABRTs in OIIO's IPTC-IIM encoder
+# --------------------------------------------------------------------------- #
+def test_exif_sanitize_runs_before_undistort_when_exiftool_present(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    [exif] = r.exiftool_calls()
+    assert "-Artist=" in exif and "-Copyright=" in exif
+    assert exif[-1] == str(imgroot)                      # sanitizes the undistort image_path
+    assert r.calls.index(exif) < r.calls.index(r.argv_for("image_undistorter"))
+
+
+def test_exif_sanitize_skipped_when_exiftool_missing(patched, imgroot, vocab, tmp_path):
+    patched.exiftool = None
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert r.exiftool_calls() == []
+    assert any("exiftool not on PATH" in msg for msg in r.logs)
+    # missing exiftool must never block the actual reconstruction
+    assert r.argv_for("image_undistorter")
 
 
 # --------------------------------------------------------------------------- #

@@ -1371,6 +1371,32 @@ def _stage_align(c: _Ctx) -> None:
             c.r.log("skip align (sentinel exists; set FORCE=1 to redo)")
 
 
+# Canon bodies write empty-string Artist/Copyright EXIF tags instead of omitting
+# them (the in-camera "set copyright info" screen left blank). OIIO 2.4.17's
+# IPTC-IIM encoder asserts a non-null data pointer for every tag it re-encodes,
+# so image_undistorter SIGABRTs the moment it has to write one of these images
+# back out -- reproduced with plain `oiiotool src.jpg -o out.jpg`, so it is an
+# OIIO bug, not something the colmap upgrade introduced. Stripping the two empty
+# tags first is pixel-lossless (verified with oiiotool --diff) and a no-op for
+# any camera that doesn't do this: the -if guard means exiftool touches nothing
+# when there is nothing to fix.
+_EXIF_SANITIZE_IF = '$Artist eq "" or $Copyright eq ""'
+
+
+def _sanitize_exif(c: _Ctx, root: str, label: str) -> None:
+    exe = shutil.which("exiftool")
+    if not exe:
+        c.r.log(f"  exif sanitize skipped ({label}): exiftool not on PATH -- "
+                 "a Canon-style empty Artist/Copyright tag would crash image_undistorter")
+        return
+    ext_args = [a for ext in sorted(IMAGE_EXTS) for a in ("-ext", ext.lstrip("."))]
+    argv = [exe, "-q", "-overwrite_original", "-r", *ext_args,
+            "-if", _EXIF_SANITIZE_IF, "-Artist=", "-Copyright=", root]
+    rc = c.r.run(argv, check=False)
+    if rc:
+        c.r.log(f"  exif sanitize ({label}): exiftool exited {rc} -- continuing anyway")
+
+
 def _stage_undistort(c: _Ctx) -> None:
     # 5. image_undistorter -> dense_dir
     if c.stage_on("undistort"):
@@ -1378,6 +1404,7 @@ def _stage_undistort(c: _Ctx) -> None:
         if c.need(c.dense_dir / "sparse" / "cameras.bin"):
             if not (c.ws / "sparse" / "0" / "cameras.bin").is_file():
                 raise RuntimeError("sparse model missing, cannot undistort")
+            _sanitize_exif(c, c.img_root, "images")
             c.r.banner(f"image_undistorter -> {c.dense_dir}"
                        + (f" (max_image_size={c.max_image_size})" if c.max_image_size else ""))
             c.r.run([COLMAP_BIN, "image_undistorter", "--image_path", c.img_root,
@@ -1404,6 +1431,7 @@ def _stage_undistort(c: _Ctx) -> None:
                                                     mask_model / "images.bin")
                 tmp_masks = c.ws / "tmp_masks"
                 shutil.rmtree(tmp_masks, ignore_errors=True)
+                _sanitize_exif(c, c.masks_dir, "masks")
                 c.r.banner(f"image_undistorter (masks) -> {c.dense_dir / 'masks'}")
                 c.r.run([COLMAP_BIN, "image_undistorter", "--image_path", c.masks_dir,
                          "--input_path", str(mask_model), "--output_path", str(tmp_masks),

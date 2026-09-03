@@ -59,13 +59,22 @@ bash Miniconda3-latest-Linux-x86_64.sh
 |------|------|------|
 | **colmap**(3.x / 4.x) | 重建核心 | 不在 `PATH` 就在 `local.env` 設 `COLMAP_BIN` |
 | **ffmpeg** | 抽幀去模糊、縮圖 | **必須含 `blurdetect` filter**;有 NVDEC build 可 GPU 解碼 |
+| **exiftool**(選用) | undistort 前消毒 Canon 空字串 EXIF | 沒裝也能跑,只是踩到才知道(見下) |
 
 多數情況 apt 版就夠:
 
 ```bash
-sudo apt install -y colmap ffmpeg
+sudo apt install -y colmap ffmpeg libimage-exiftool-perl
 ffmpeg -hide_banner -filters | grep blurdetect   # 必須有這行,否則抽幀會失敗
 ```
+
+> **exiftool 是做什麼的**:Canon 機身沒設定版權資訊時,仍會把 `Artist`/`Copyright`
+> 寫成空字串(而不是完全不寫)。COLMAP 的 `image_undistorter` 重新編碼這種影像時,
+> OpenImageIO 2.4.17 的 IPTC 編碼器會 assert 崩潰(`SIGABRT`),整個 undistort 階段
+> 直接失敗。裝了 exiftool,pipeline 會在每次 undistort 前自動清掉這兩個空字串欄位
+> (只在欄位是空字串時才動手,對其他相機是完全無感的 no-op,而且只改 metadata、
+> 像素不變)。沒裝 exiftool 不影響大多數素材,只是 Canon 拍的資料集有機率在
+> undistort 卡死,`./run.sh --doctor` 會提醒。
 
 > **什麼時候需要自己編 colmap**:要用 Caspar BA(`MAPPER=global-caspar` 後端)、或
 > 要讀航拍大圖的 IPTC/大小寫副檔名時,apt 版不夠 —— 得從源碼編。編完把路徑寫進
@@ -218,7 +227,7 @@ worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航�
 ## 6. 環境檢查
 
 ```bash
-./run.sh --doctor          # 終端機版:colmap / ffmpeg / 磁碟 / cudnn / 後端 / GPU 全部逐項
+./run.sh --doctor          # 終端機版:colmap / ffmpeg / exiftool / 磁碟 / cudnn / 後端 / GPU 全部逐項
 ./run.sh --doctor --fast   # 跳過每個後端的 torch/CUDA 探測(快)
 ./run.sh --doctor --json   # 給腳本吃的 JSON
 ```
@@ -279,7 +288,8 @@ worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航�
 
 - **影像解析度**:預設把每張縮成長邊 ≤1920 的實體副本(`workspace/images_1920/`)再跑整條
   COLMAP——4K / 航拍原圖直接跑又慢又容易出問題。要高解析訓練圖可選 2560 / 4096;
-  「保持原樣」用原始檔(髒的航測 TIFF 可能在 undistort 階段崩潰,縮圖重編碼順便修掉這個)。
+  「保持原樣」用原始檔。(Canon 空字串 EXIF 導致 undistort 崩潰的問題,現在不論選哪個
+  解析度都會在 undistort 前自動消毒,不用靠縮圖重編碼側面繞過——見[一、安裝 — 外部工具](#1-外部工具)的 exiftool 說明。)
 - **版面(layout)**:自動偵測;`single` = 一夾照片一台相機、`multi` = 每個子資料夾一台相機、
   `nested` = 抽幀輸出的兩層結構。
 
