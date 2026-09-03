@@ -16,7 +16,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.8"]
+# numpy here is a TEST dependency only — it stays out of [project.dependencies] above, so
+# the panel's runtime install remains pure-Python (see jobs._run_blocksplit). Having it in
+# dev is what lets CI actually run the numpy-bound suites instead of importorskip-ing past
+# them; chief among those is the depth/normal PNG encoding contract in
+# tests/test_moge3_encode.py, which fails silently — by feeding the training losses wrong
+# numbers — rather than raising, so it is the last thing that should go unchecked.
+dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.8", "numpy>=1.24"]
 
 [tool.setuptools]
 py-modules = ["app", "jobs"]

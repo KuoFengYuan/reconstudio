@@ -12,9 +12,15 @@ thing rather than against a re-derivation of the same formula.
 """
 from __future__ import annotations
 
-import numpy as np
+import pytest
 
-from pipeline.moge3_encode import MAX_VALUE, encode_depth, encode_normals
+# The encoders are numpy by nature, and the panel deliberately keeps numpy out of
+# its base/CI install (see jobs._run_blocksplit), so skip rather than fail there —
+# same as test_blocksplit / test_scale_check. Note the consequence: these rules are
+# NOT guarded by CI, only by a local run in an env that has numpy.
+np = pytest.importorskip("numpy")
+
+from pipeline.moge3_encode import MAX_VALUE, encode_depth, encode_normals  # noqa: E402
 
 U16 = MAX_VALUE[16]
 U8 = MAX_VALUE[8]
