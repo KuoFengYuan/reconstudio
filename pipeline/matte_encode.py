@@ -21,10 +21,15 @@ from __future__ import annotations
 import numpy as np
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+# Everything this tool writes goes under ONE folder rather than two loose ones
+# beside the photos: pointing the tool at a plain photo folder otherwise drops
+# `cutout/` and `masks/` straight into it, next to the originals.
+OUTPUT_ROOT = "no_bg"
 # This tool's own output folders plus the depth stage's. In a flat dataset layout
 # they sit directly under the root a recursive scan walks, so they must never be
-# read back as inputs (a second run would matte its own cut-outs).
-OUTPUT_DIR_NAMES = {"depth", "normals", "masks", "cutout"}
+# read back as inputs (a second run would matte its own cut-outs). The bare
+# `cutout`/`masks` names stay in the set for datasets produced before OUTPUT_ROOT.
+OUTPUT_DIR_NAMES = {"depth", "normals", "masks", "cutout", OUTPUT_ROOT}
 # Everything a recursive photo scan must skip: the above, plus COLMAP's own
 # subtrees — a workspace's `colmap/` holds undistorted copies of the same photos,
 # so descending into it mattes every image two or three times over. Must stay

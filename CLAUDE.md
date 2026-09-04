@@ -102,11 +102,13 @@ conda env and shells out to `tools/sam_matte.py`; the pure maths lives in
 from CI, like `moge3_encode.py`) and is pinned by `tests/test_matte_encode.py`.
 The differences:
 
-1. **Outputs land inside the folder you picked** (`resolve_matte_dataset`), not
-   beside it. `depth.resolve_dataset` returns the PARENT for a loose photo
-   folder because LichtFeld scans for `depth/` next to `images/`; nothing
-   downstream requires that here, and the parent of a photo folder is usually a
-   folder of *other* datasets that would then share one `cutout/`.
+1. **Outputs land inside the folder you picked** (`resolve_matte_dataset`), under
+   a single `no_bg/` root (`OUTPUT_ROOT`). `depth.resolve_dataset` returns the
+   PARENT for a loose photo folder because LichtFeld scans for `depth/` next to
+   `images/`; nothing downstream requires that here, and the parent of a photo
+   folder is usually a folder of *other* datasets that would then share one
+   `cutout/`. The `no_bg/` level exists so a plain photo directory does not get
+   two loose output folders dropped in beside the originals.
 2. **Two output folders, and which one a consumer wants is not obvious.**
    COLMAP's `MASKS_DIR` needs `cutout/` — `_stage_undistort` runs
    `image_undistorter` and then `large_scene.make_mask_uint8`, which reads the
@@ -136,10 +138,23 @@ simply wrong — so each has a guard and a test rather than a comment:
   size and runs one session per group; a group with no box of its own is
   reported, never inferred from another group's masks.
 
-`SKIP_DIR_NAMES` (this tool's outputs plus COLMAP's subtrees) is duplicated in
-`pipeline/matte.py` and `matte_encode.py` — the first cannot import numpy, the
-second cannot be imported from the `sam` env — and the two are pinned equal by a
-test.
+`SKIP_DIR_NAMES` (this tool's outputs plus COLMAP's subtrees) and `OUTPUT_ROOT`
+are duplicated in `pipeline/matte.py` and `matte_encode.py` — the first cannot
+import numpy, the second cannot be imported from the `sam` env — and the pairs
+are pinned equal by a test.
+
+**Reviewing and repairing is part of the stage, not a separate tool.** A running
+job polls `/ui/matte_live` for the newest cut-outs (a poll, not SSE: the images
+are written by a subprocess, so there is no event to forward). `/matte_review`
+grids them on switchable backdrops, and `/matte_repair` re-cuts a single frame
+from a box plus **+/- point prompts** — the information a box cannot carry, since
+the box is what produced the bad result in the first place. Repair submits an
+ordinary `matte` job whose boxes file carries `only: [rel]`, so it reuses the
+queue, the log parser and the overwrite rules rather than growing a second code
+path. Both the review and live views serve PNG thumbnails through
+`/api/matte/imagefile`, never the gallery's JPEG ones: JPEG has no alpha, and a
+cut-out flattened onto black looks exactly like the fringe defect these pages
+exist to find.
 
 **`_stage_undistort` sanitizes EXIF before every `image_undistorter` call** (both the
 image pass and, when `MASKS_DIR` is set, the masks pass). Canon bodies write

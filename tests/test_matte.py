@@ -242,3 +242,30 @@ def test_meta_does_not_shadow_the_parsed_box_count():
     _parse_matte(job, "[1/2] a.jpg  boxes=3 cover=10.0%")
     assert job.meta["boxes"] == 3
     assert job.meta["box_source"] == "track"
+
+
+def test_outputs_are_announced_under_no_bg(dataset, fake_env):
+    """Both folders live under no_bg/ so a plain photo directory does not get two
+    loose output dirs dropped in beside the originals."""
+    r = _run(dataset)
+    joined = " ".join(r.lines)
+    assert str(dataset / "no_bg" / "cutout") in joined
+    assert str(dataset / "no_bg" / "masks") in joined
+
+
+# --- repair: point prompts, scoped to one frame ------------------------------ #
+REPAIR = json.dumps({
+    "norm": True, "only": ["a.jpg"],
+    "per_image": {"a.jpg": {"boxes": [[0.1, 0.1, 0.9, 0.9]],
+                            "points": [[0.5, 0.5, 1], [0.02, 0.02, 0]]}},
+})
+
+
+def test_repair_json_reaches_the_script_unchanged(dataset, fake_env):
+    """The whole repair prompt travels in the boxes file — no new argv — so the
+    only thing to assert here is that it lands on disk intact."""
+    r = _run(dataset, {"boxes": "json", "boxes_json": REPAIR, "overwrite": True})
+    written = json.loads((dataset / "matte_boxes.json").read_text())
+    assert written["only"] == ["a.jpg"]
+    assert written["per_image"]["a.jpg"]["points"] == [[0.5, 0.5, 1], [0.02, 0.02, 0]]
+    assert "--overwrite" in r.argv

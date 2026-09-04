@@ -17,14 +17,14 @@ import os
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 from pipeline.config import settings
-from pipeline.matte import SKIP_DIR_NAMES, resolve_matte_dataset
+from pipeline.matte import OUTPUT_ROOT, SKIP_DIR_NAMES, resolve_matte_dataset
 from web.routers.viewer import _safe_image_dir, _safe_image_file
 from web.shared import IMAGE_EXTS_ALL, _page
 
@@ -52,6 +52,19 @@ def _walk(root: Path) -> list[str]:
             if len(rels) >= _PICK_MAX:
                 return rels
     return rels
+
+
+def _cutout_dir(root: Path) -> Path | None:
+    """Where this dataset's RGBA cut-outs live, or None if it has none.
+
+    Outputs moved under `no_bg/`; datasets matted before that have a bare
+    `cutout/` at the root, and silently telling their owner "還沒有去背結果"
+    would be worse than the one extra stat.
+    """
+    for candidate in (root / OUTPUT_ROOT / "cutout", root / "cutout"):
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 @router.get("/ui/matte_pick", response_class=HTMLResponse)
@@ -164,15 +177,101 @@ async def matte_review(request: Request, images: str = ""):
         raise HTTPException(400, "images is required")
     root, folder = resolve_matte_dataset(Path(images).expanduser())
     images_dir = _safe_image_dir(str(root / folder if folder else root))
-    cutout_dir = root / "cutout"
-    if not cutout_dir.is_dir():
+    cutout_dir = _cutout_dir(root)
+    if cutout_dir is None:
         return _page(request, "_error.html",
-                     message=f"還沒有去背結果: 找不到 {cutout_dir}")
+                     message=f"還沒有去背結果: 找不到 {root / OUTPUT_ROOT / 'cutout'}")
     items, orphans = await asyncio.to_thread(_pair, images_dir, cutout_dir)
     total_src = sum(1 for p in images_dir.rglob("*")
                     if p.is_file() and p.suffix.lower() in IMAGE_EXTS_ALL
                     and p.relative_to(images_dir).parts[0] not in _SKIP_DIRS)
-    return _page(request, "matte_review.html", root=str(root),
+    return _page(request, "matte_review.html", root=str(root), images=images,
                  cut_root=str(cutout_dir), img_root=str(images_dir),
                  items=items, orphans=orphans, total_src=total_src,
                  missing=max(0, total_src - len(items)))
+
+
+# --------------------------------------------------------------------------- #
+# live: watch the cut-outs land while the job runs
+# --------------------------------------------------------------------------- #
+_LIVE_MAX = 12
+
+
+def _newest_cutouts(cutout_dir: Path, limit: int) -> tuple[list[dict], int]:
+    """The most recently written cut-outs, newest first, plus the total count.
+
+    Sorted by mtime rather than by name: the point of this strip is to show what
+    the running job just produced, and a resumed run fills gaps out of
+    alphabetical order. The mtime also goes into the thumbnail URL, so a frame
+    that gets re-cut by a repair job busts the browser's cache for that one file.
+    """
+    files = []
+    for p in cutout_dir.rglob("*.png"):
+        try:
+            files.append((p.stat().st_mtime, p))
+        except OSError:
+            continue
+    files.sort(key=lambda t: t[0], reverse=True)
+    items = [{"rel": p.relative_to(cutout_dir).as_posix(), "t": int(m)}
+             for m, p in files[:limit]]
+    return items, len(files)
+
+
+@router.get("/ui/matte_live", response_class=HTMLResponse)
+async def matte_live(request: Request, images: str = "", n: int = 8):
+    """htmx fragment polled by a running 去背 job: the newest cut-outs so far.
+
+    Deliberately a poll rather than a push. The job's own SSE stream carries log
+    lines, and these images are produced by a *subprocess* writing to disk — there
+    is no event to forward, so a 3 s re-read of the directory is both simpler and
+    exactly as fresh.
+    """
+    images = (images or "").strip().rstrip("/")
+    if not images:
+        raise HTTPException(400, "images is required")
+    root, _ = resolve_matte_dataset(Path(images).expanduser())
+    cutout_dir = _cutout_dir(root)
+    if cutout_dir is None:
+        return HTMLResponse('<div class="hint">還沒有輸出…</div>')
+    items, total = await asyncio.to_thread(
+        _newest_cutouts, cutout_dir, max(1, min(n, _LIVE_MAX)))
+    return _page(request, "_matte_live.html", images=images, items=items,
+                 total=total, cut_root=str(cutout_dir))
+
+
+# --------------------------------------------------------------------------- #
+# repair: fix one cut-out that came out wrong
+# --------------------------------------------------------------------------- #
+@router.get("/matte_repair", response_class=HTMLResponse)
+async def matte_repair(request: Request, images: str = "", rel: str = ""):
+    """Single-image refine view: the photo, its current mask, and +/- clicks.
+
+    A box alone is what already produced the bad cut-out, so the tool here is
+    point prompts — "this pixel is subject", "this one is not" — which is the
+    information SAM was missing. Applying runs a normal `matte` job scoped to
+    this one frame, so the fix goes through the same queue, log parser and
+    overwrite rules as a full run.
+    """
+    images = (images or "").strip().rstrip("/")
+    rel = (rel or "").strip().lstrip("/")
+    if not images or not rel:
+        raise HTTPException(400, "images and rel are required")
+    root, folder = resolve_matte_dataset(Path(images).expanduser())
+    images_dir = _safe_image_dir(str(root / folder if folder else root))
+    cutout_dir = _cutout_dir(root)
+    # `rel` names the cut-out (always .png); the photo it came from keeps its own
+    # extension, so it is matched on the stem rather than assumed to be .png.
+    stem = PurePosixPath(rel).with_suffix("")
+    source = None
+    for candidate in sorted(images_dir.glob(f"{stem}.*")):
+        if candidate.suffix.lower() in IMAGE_EXTS_ALL:
+            source = candidate
+            break
+    if source is None:
+        return _page(request, "_error.html", message=f"找不到這張的原圖: {rel}")
+    cut = cutout_dir / rel if cutout_dir else None
+    return _page(request, "matte_repair.html", images=images, rel=rel,
+                 src=f"/api/matte/imagefile?path={quote(str(source))}&w=1600",
+                 cut=(f"/api/matte/imagefile?path={quote(str(cut))}&w=1600"
+                      f"&t={int(cut.stat().st_mtime)}") if cut and cut.is_file() else "",
+                 source=str(source))

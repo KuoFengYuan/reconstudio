@@ -297,6 +297,25 @@
   .mp-summary{ margin:6px 0 2px; font-size:13px; display:flex; align-items:center;
                gap:8px; flex-wrap:wrap; }
   .mp-summary .ok{ color:var(--accent); font-weight:600; }
+  /* ---- live cut-out strip inside a running 去背 job ---- */
+  .mlive{ margin-top:12px; }
+  .mlive-head{ display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
+  .mlive-strip{ display:flex; gap:8px; overflow-x:auto; padding-bottom:6px; }
+  .mlive-cell{ position:relative; flex:0 0 auto; width:132px; height:132px; border-radius:8px;
+               overflow:hidden; border:1px solid var(--line2); text-decoration:none;
+               /* Checkerboard, not a flat colour: on a plain background a cut-out
+                  that kept its whole background looks identical to a good one. */
+               background-color:#7c828c;
+               background-image:linear-gradient(45deg,#5a606a 25%,transparent 25%),
+                                linear-gradient(-45deg,#5a606a 25%,transparent 25%),
+                                linear-gradient(45deg,transparent 75%,#5a606a 75%),
+                                linear-gradient(-45deg,transparent 75%,#5a606a 75%);
+               background-size:14px 14px;
+               background-position:0 0,0 7px,7px -7px,-7px 0; }
+  .mlive-cell img{ width:100%; height:100%; object-fit:contain; display:block; }
+  .mlive-cell .nm{ position:absolute; left:0; right:0; bottom:0; padding:2px 5px; font-size:10px;
+                   color:#fff; background:linear-gradient(transparent,rgba(0,0,0,.75));
+                   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .mp-fchips{ display:flex; gap:7px; flex-wrap:wrap; margin:10px 0 2px; }
   .mp-fchips .fchip{ font-size:13px; padding:5px 11px; border-radius:13px; cursor:pointer;
                      border:1px solid var(--line2); background:rgba(247,240,223,.7);
@@ -1151,7 +1170,7 @@
       <fieldset>
         <legend>去背 / 前景遮罩(SAM)</legend>
         <div class="hint">在照片上<b>匡選要保留的物體</b>,SAM 就把整個資料夾一起去背,輸出
-          <code>cutout/</code>(去背後的 RGBA PNG)和 <code>masks/</code>(0/255 遮罩)。
+          <code>no_bg/cutout/</code>(去背後的 RGBA PNG)和 <code>no_bg/masks/</code>(0/255 遮罩)。
           原始照片不會被改動。一張圖裡匡多個物體時,各自的遮罩會<b>聯集</b>成同一張 alpha,
           所以「一排並列的主體」一次就全部保留。</div>
         {% if not matte_ready %}
@@ -1233,8 +1252,9 @@
           <option value="cutout">只要 cutout/(去背 RGBA)</option>
           <option value="masks">只要 masks/(單通道遮罩)</option>
         </select>
-        <div class="hint">COLMAP 的 <code>MASKS_DIR</code> 要填 <code>cutout/</code> —— 遮罩階段讀的是
-          <b>alpha 通道</b>,所以必須是 RGBA;訓練器的 <code>--masks</code> 則吃 <code>masks/</code>。</div>
+        <div class="hint">兩包都寫在 <code>no_bg/</code> 底下,不會散在照片旁邊。COLMAP 的
+          <code>MASKS_DIR</code> 要填 <code>no_bg/cutout/</code> —— 遮罩階段讀的是 <b>alpha 通道</b>,
+          所以必須是 RGBA;訓練器的 <code>--masks</code> 則吃 <code>no_bg/masks/</code>。</div>
 
         <label>GPU</label>
         <select name="gpu" {{ '' if matte_ready else 'disabled' }}>

@@ -100,14 +100,22 @@
       {# 沒偵測到物體的張數：這是提示詞沒對上的第一個徵兆，比翻 PNG 早得多 #}
       {% if job.meta.get('empty') %}<span class="chip" style="color:var(--err)">未偵測到 {{ job.meta.empty }}</span>{% endif %}
     </div>
+    {% if job.status in ('running', 'done') and job.meta.get('images') %}
+    {# Live contact strip. Polls while running (the cut-outs are written by a
+       subprocess, so there is no event to push) and stops once the job ends. #}
+    <div id="matte_live"
+         hx-get="/ui/matte_live?images={{ job.meta.get('images','') | urlencode }}&n=8"
+         hx-trigger="load{% if job.status == 'running' %}, every 4s [!document.hidden]{% endif %}"
+         hx-swap="innerHTML"></div>
+    {% endif %}
     {% if job.status == 'done' %}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <a class="dl primary" target="_blank"
          href="/matte_review?images={{ job.meta.get('images','') | urlencode }}">🖼 檢視去背結果</a>
     </div>
-    <div class="hint pathline" style="margin-top:10px">✅ 輸出：<code>{{ job.meta.get('dataset_root','') }}/cutout</code>、<code>{{ job.meta.get('dataset_root','') }}/masks</code></div>
+    <div class="hint pathline" style="margin-top:10px">✅ 輸出：<code>{{ job.meta.get('dataset_root','') }}/no_bg/</code> 底下的 <code>cutout/</code> 與 <code>masks/</code></div>
     <div class="hint">COLMAP 的 <code>MASKS_DIR</code> 填 <code>cutout/</code>（遮罩階段讀 alpha 通道，必須是 RGBA）；
-      訓練器的 <code>--masks</code> 則吃 <code>masks/</code>。到 🖼 圖片 分頁瀏覽 <code>cutout/</code> 可以直接檢查去背結果。</div>
+      訓練器的 <code>--masks</code> 則吃 <code>no_bg/masks/</code>。</div>
     {% endif %}
 
   {% elif job.kind == 'blocksplit' %}

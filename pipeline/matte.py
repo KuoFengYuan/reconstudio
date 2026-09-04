@@ -35,8 +35,9 @@ ENGINES = ("sam2", "sam3", "sam1")
 # image two or three times over and quietly triple the run. Mirrored in
 # matte_encode.SKIP_DIR_NAMES for the subprocess side; the two are pinned equal by
 # tests/test_matte_encode.py.
+OUTPUT_ROOT = "no_bg"           # mirrors matte_encode.OUTPUT_ROOT
 SKIP_DIR_NAMES = frozenset({
-    "cutout", "masks", "depth", "normals",
+    OUTPUT_ROOT, "cutout", "masks", "depth", "normals",
     "colmap", "sparse", "dense", "stereo", "distorted",
 })
 # Where the prompt boxes come from. Ordered as the form presents them.
@@ -213,7 +214,7 @@ def run_matte(p: dict, r: Runner) -> None:
     if gpu != "":
         env["CUDA_VISIBLE_DEVICES"] = gpu
 
-    dests = [str(dataset_root / f) for f in outputs.split(",") if f.strip()]
+    dests = [str(dataset_root / OUTPUT_ROOT / f) for f in outputs.split(",") if f.strip()]
     r.banner(f"去背 start | engine={engine} boxes={boxes} dataset={dataset_root} "
              f"images={images_folder}")
     r.log(f"exec: {' '.join(argv)}")
@@ -223,7 +224,8 @@ def run_matte(p: dict, r: Runner) -> None:
 
     r.banner(f"去背 done. out={', '.join(dests)}")
     if "cutout" in outputs:
-        r.log(f"[next] COLMAP 的 MASKS_DIR 填 {dataset_root / 'cutout'} "
+        r.log(f"[next] COLMAP 的 MASKS_DIR 填 {dataset_root / OUTPUT_ROOT / 'cutout'} "
               f"(遮罩階段讀的是 alpha 通道,所以要 RGBA 的 cutout/,不是 masks/)。")
     if "masks" in outputs:
-        r.log(f"[next] 訓練時 --masks {dataset_root / 'masks'} 可只擬合前景物件。")
+        r.log(f"[next] 訓練時 --masks {dataset_root / OUTPUT_ROOT / 'masks'} "
+              "可只擬合前景物件。")

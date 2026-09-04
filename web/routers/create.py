@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from jobs import COLMAP_STAGES, Job, manager, new_id
 from pipeline import (
@@ -23,6 +23,7 @@ from pipeline import (
     resolve_dataset,
     resolve_matte_dataset,
 )
+from pipeline.matte import OUTPUT_ROOT
 from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
@@ -286,7 +287,8 @@ async def create_matte(request: Request):
         return _page(request, "_error.html", message=str(exc))
 
     dataset_root, _ = resolve_matte_dataset(Path(images))
-    dests = [str(dataset_root / f) for f in params["outputs"].split(",") if f.strip()]
+    dests = [str(dataset_root / OUTPUT_ROOT / f)
+             for f in params["outputs"].split(",") if f.strip()]
     job = Job(id=new_id(), kind="matte",
               title=f"✂️ 去背({boxes}) · {Path(images).name}",
               subtitle=f"{images}  →  {' + '.join(dests)}",
@@ -297,6 +299,70 @@ async def create_matte(request: Request):
                                    "dataset_root": str(dataset_root)})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/matte_repair")
+async def create_matte_repair(request: Request):
+    """Re-cut ONE frame from a box plus +/- clicks, and hand back the job id.
+
+    JSON rather than an htmx fragment: the repair page is a standalone view that
+    polls the job and swaps its own image in place, so a rendered job card would
+    only take the user away from the thing they are fixing.
+
+    The job itself is an ordinary `matte` job — same queue, same log parser, same
+    console — scoped by the `only` list inside the boxes file and forced to
+    overwrite, since the whole point is replacing an output that already exists.
+    """
+    form = dict(await request.form())
+    images = (form.get("images") or "").strip().rstrip("/")
+    rel = (form.get("rel") or "").strip().lstrip("/")
+    try:
+        prompt = json.loads(form.get("prompt") or "{}")
+    except json.JSONDecodeError as exc:
+        return JSONResponse({"error": f"修圖資料不是合法的 JSON: {exc}"}, status_code=400)
+    box, points = prompt.get("box"), prompt.get("points") or []
+    if not Path(images).is_dir():
+        return JSONResponse({"error": f"images 不是資料夾: {images}"}, status_code=400)
+    if not rel:
+        return JSONResponse({"error": "缺少 rel"}, status_code=400)
+    if not points and not box:
+        return JSONResponse({"error": "請先在圖上點出要保留 / 去除的位置"}, status_code=400)
+
+    # The source photo keeps its own extension while the output is always .png,
+    # and `only` is matched against the SOURCE's relative path.
+    dataset_root, folder = resolve_matte_dataset(Path(images))
+    images_dir = dataset_root / folder if folder else dataset_root
+    stem = Path(rel).with_suffix("")
+    source_rel = next(
+        (c.relative_to(images_dir).as_posix()
+         for c in sorted(images_dir.glob(f"{stem}.*")) if c.is_file()),
+        None)
+    if source_rel is None:
+        return JSONResponse({"error": f"找不到原圖: {rel}"}, status_code=404)
+
+    boxes_json = json.dumps({
+        "norm": True, "apply": "all", "only": [source_rel],
+        "per_image": {source_rel: {"boxes": [box] if box else [], "points": points}},
+    })
+    params = {
+        "images": images, "boxes": "json", "boxes_json": boxes_json,
+        # sam2 explicitly: SAM 3 prompts with concepts, not +/- clicks.
+        "matte_engine": "sam2", "outputs": "cutout,masks",
+        "on_empty": "skip", "overwrite": True,
+        "matte_model": "", "checkpoint": "", "detector": "", "text": "",
+        "erode": "", "dilate": "", "feather": "", "min_area": "", "box_chunk": "",
+        "gpu": (form.get("gpu") or "0").strip(),
+        "row_filter": False, "largest_only": False, "soft_masks": False,
+        "no_bleed": False,
+    }
+    job = Job(id=new_id(), kind="matte",
+              title=f"🖌 修圖 · {Path(source_rel).name}",
+              subtitle=f"{images}  ·  {source_rel}  ({len(points)} 個點提示)",
+              params=params, meta={"images": images, "box_source": "repair",
+                                   "repair_rel": source_rel,
+                                   "dataset_root": str(dataset_root)})
+    manager.submit(job)
+    return JSONResponse({"job": job.id})
 
 
 @router.post("/ui/jobs", response_class=HTMLResponse)

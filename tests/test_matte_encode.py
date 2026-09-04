@@ -19,6 +19,8 @@ import pytest
 np = pytest.importorskip("numpy")
 
 from pipeline.matte_encode import (  # noqa: E402
+    OUTPUT_ROOT,
+    SKIP_DIR_NAMES,
     as_boxes,
     bleed_color,
     box_blur,
@@ -193,3 +195,24 @@ def test_encode_mask_l_thresholds_or_keeps_the_ramp():
     alpha = np.array([[0.0, 0.4, 0.6, 1.0]], np.float32)
     assert encode_mask_l(alpha, 0.5).tolist() == [[0, 0, 255, 255]]
     assert encode_mask_l(alpha).tolist() == [[0, 102, 153, 255]]
+
+
+# --------------------------------------------------------------------------- #
+# the two copies of the shared constants
+# --------------------------------------------------------------------------- #
+def test_skip_dirs_match_the_panel_side_copy():
+    """These are duplicated on purpose — pipeline/matte.py cannot import numpy,
+    and this module cannot be imported from the `sam` env — so the equality has
+    to be asserted somewhere."""
+    from pipeline.matte import SKIP_DIR_NAMES as PANEL_SKIP
+    assert set(SKIP_DIR_NAMES) == set(PANEL_SKIP)
+
+
+def test_output_root_matches_the_panel_side_copy():
+    from pipeline.matte import OUTPUT_ROOT as PANEL_ROOT
+    assert OUTPUT_ROOT == PANEL_ROOT
+
+
+def test_the_output_root_is_itself_skipped():
+    """Otherwise a second run walks into no_bg/ and mattes its own cut-outs."""
+    assert OUTPUT_ROOT in SKIP_DIR_NAMES

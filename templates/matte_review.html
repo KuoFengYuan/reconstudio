@@ -32,6 +32,14 @@
   .cell .nm { position:absolute; left:0; right:0; bottom:0; padding:3px 6px; font-size:10px;
               color:#dfe4ec; background:linear-gradient(transparent,rgba(0,0,0,.72));
               overflow:hidden; text-overflow:ellipsis; white-space:nowrap; pointer-events:none; }
+  /* The repair button lives on the cell, not behind a selection mode: spotting a
+     bad cut-out and fixing it should be one click, not three. */
+  .cell .fix { position:absolute; top:5px; right:5px; z-index:2; font-size:11px;
+               padding:3px 7px; border-radius:6px; background:rgba(10,12,16,.78);
+               color:#e6e9ef; border:1px solid var(--line); text-decoration:none;
+               opacity:0; transition:opacity .12s; }
+  .cell:hover .fix, .cell .fix:focus { opacity:1; }
+  .cell .fix:hover { border-color:var(--accent); color:var(--accent); }
   /* The four backdrops are the whole point of this page: a cut-out that looks
      clean on the transparency grid can still show a dark rim on white and a pale
      rim on black, and 綠 is the classic screen-comp test. */
@@ -92,6 +100,9 @@
 <div id="lb" onclick="if(event.target.id==='lb')closeLb()">
   <div class="wrap" id="lbwrap"><img id="lbimg" alt=""></div>
   <div class="cap"><span class="sub" id="lbname"></span><small id="lbpos"></small></div>
+  <a id="lbfix" target="_blank" style="position:fixed;left:16px;top:16px;z-index:21;
+     background:var(--panel);border:1px solid var(--line);border-radius:8px;
+     padding:8px 12px;color:var(--fg);text-decoration:none">🖌 修這張</a>
   <button id="prev" onclick="step(-1)">‹</button>
   <button id="next" onclick="step(1)">›</button>
   <button id="close" onclick="closeLb()">✕</button>
@@ -100,6 +111,7 @@
 <script>
   var ITEMS = {{ items|tojson }};
   var CUT_ROOT = {{ cut_root|tojson }}, IMG_ROOT = {{ img_root|tojson }};
+  var IMAGES = {{ images|tojson }};
   var bg = 'grid', srcMode = 'cut', cur = 0;
 
   function url(rel, root, w){
@@ -108,6 +120,10 @@
   }
   // The original is only there to compare against; an item whose source photo is
   // gone still shows its cut-out rather than a broken image.
+  function repairUrl(it){
+    return '/matte_repair?images=' + encodeURIComponent(IMAGES) +
+           '&rel=' + encodeURIComponent(it.cut);
+  }
   function itemUrl(it, w){
     return (srcMode === 'orig' && it.orig) ? url(it.orig, IMG_ROOT, w)
                                            : url(it.cut, CUT_ROOT, w);
@@ -116,6 +132,8 @@
     var g = document.getElementById('grid'); if (!g) return;
     g.innerHTML = ITEMS.map(function(it, i){
       return '<div class="cell bg-' + bg + '" onclick="openLb(' + i + ')">' +
+             '<a class="fix" target="_blank" onclick="event.stopPropagation()" href="' +
+               repairUrl(it) + '">🖌 修</a>' +
              '<img loading="lazy" src="' + itemUrl(it, 320) + '" alt="">' +
              '<div class="nm">' + it.cut + '</div></div>';
     }).join('');
@@ -138,6 +156,7 @@
     var it = ITEMS[cur]; if (!it) return;
     document.getElementById('lbimg').src = itemUrl(it, 0);
     document.getElementById('lbname').textContent = it.cut;
+    document.getElementById('lbfix').href = repairUrl(it);
     document.getElementById('lbpos').textContent = (cur + 1) + ' / ' + ITEMS.length;
   }
   function openLb(i){ cur = i; render(); document.getElementById('lb').classList.add('open'); }

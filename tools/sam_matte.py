@@ -59,6 +59,7 @@ def _load_shared():
 _enc = _load_shared()
 IMAGE_EXTS = _enc.IMAGE_EXTS
 SKIP_DIR_NAMES = _enc.SKIP_DIR_NAMES
+OUTPUT_ROOT = _enc.OUTPUT_ROOT
 
 DEFAULT_MODELS = {
     "sam2": "facebook/sam2.1-hiera-large",
@@ -87,13 +88,16 @@ def list_images(images_dir: Path) -> list[Path]:
 
 
 def output_path_for(dataset_root: Path, folder: str, image: Path, images_dir: Path) -> Path:
-    """Mirror the image's relative path under <root>/<folder>, extension -> .png.
+    """Mirror the image's relative path under <root>/no_bg/<folder>, ext -> .png.
 
-    Identical to the depth stage's rule, and required by COLMAP's mask pass:
+    The relative path and the .png are required by COLMAP's mask pass:
     `replace_images_by_masks` rewrites every image name in the model to `.png`,
-    so a mask that isn't at exactly that relative path is simply not found.
+    so a mask that isn't at exactly that relative path is simply not found. Only
+    the `no_bg/` prefix is ours — it keeps both output folders out of the photo
+    directory itself.
     """
-    return dataset_root / folder / image.relative_to(images_dir).with_suffix(".png")
+    return (dataset_root / OUTPUT_ROOT / folder
+            / image.relative_to(images_dir).with_suffix(".png"))
 
 
 _EXIF_ORIENTATION = 274          # the tag id, so PIL's ExifTags table isn't needed
@@ -163,16 +167,16 @@ def load_boxes_file(path: Path) -> dict:
     """
     raw = json.loads(Path(path).read_text())
     out = {"ref": "", "apply": "all", "norm": False, "boxes": [], "per_image": {},
-           "refs": {}}
+           "refs": {}, "only": []}
     if isinstance(raw, list):
         out["boxes"] = raw
         return out
     if not isinstance(raw, dict):
         raise ValueError(f"unsupported boxes JSON: {path}")
-    if "boxes" not in raw and "per_image" not in raw and "refs" not in raw:
+    if not ({"boxes", "per_image", "refs", "only"} & set(raw)):
         out["per_image"] = raw            # bare {rel: [[...]]} map
         return out
-    keys = ("ref", "apply", "norm", "boxes", "per_image", "refs")
+    keys = ("ref", "apply", "norm", "boxes", "per_image", "refs", "only")
     out.update({k: raw[k] for k in keys if k in raw})
     # `refs` is the multi-frame seed map: the SAME object boxed on several frames.
     # Single-frame files predate it, so synthesise it rather than special-casing
@@ -199,11 +203,35 @@ def denorm(boxes, spec: dict, width: int, height: int):
 def boxes_for_image(spec: dict, rel: str, width: int, height: int):
     """Per-image boxes from a loaded boxes file, honouring apply=all|ref."""
     per = spec.get("per_image") or {}
-    if rel in per:
-        return denorm(_enc.as_boxes(per[rel]), spec, width, height)
+    entry = per.get(rel)
+    if isinstance(entry, dict):
+        entry = entry.get("boxes") or []
+    if entry is not None and rel in per:
+        return denorm(_enc.as_boxes(entry), spec, width, height)
     if spec.get("apply") == "ref" and spec.get("ref") and rel != spec["ref"]:
         return _enc.as_boxes([])
     return denorm(_enc.as_boxes(spec.get("boxes") or []), spec, width, height)
+
+
+def points_for_image(spec: dict, rel: str, width: int, height: int):
+    """(coords, labels) for the repair prompts on this image, or (None, None).
+
+    Points are how SAM is *corrected*: a box says "the subject is roughly here",
+    which is exactly the information that already failed if the cut-out came out
+    wrong. A click labelled 1 says "this pixel is subject" and 0 says "this pixel
+    is not", which is new information and usually fixes a bad mask in one or two
+    clicks. Stored as [x, y, label] triples alongside the box.
+    """
+    import numpy as np
+    entry = (spec.get("per_image") or {}).get(rel)
+    if not isinstance(entry, dict) or not entry.get("points"):
+        return None, None
+    raw = entry["points"]
+    coords = np.asarray([[float(p[0]), float(p[1])] for p in raw], dtype=np.float32)
+    labels = np.asarray([int(p[2]) for p in raw], dtype=np.int32)
+    if spec.get("norm") and len(coords):
+        coords = coords * np.asarray([float(width), float(height)], dtype=np.float32)
+    return coords, labels
 
 
 def auto_row_boxes(rgb, min_area_frac: float):
@@ -306,6 +334,16 @@ class MaskRunner:
         """(masks, boxes, scores) for a phrase — text-native engines only."""
         raise NotImplementedError
 
+    def masks_for_prompt(self, boxes, points, labels):
+        """ONE object from a box plus +/- clicks — the repair path.
+
+        Separate from `masks_for_boxes` because the shapes mean different things:
+        there, N boxes are N independent objects decoded together; here a single
+        object is being argued about, and the box and the clicks must reach the
+        decoder as one prompt or the corrections are ignored.
+        """
+        raise NotImplementedError
+
 
 def _as_nhw(masks, hw):
     """Normalise every SAM's mask output to a bool (N, H, W) numpy array.
@@ -368,6 +406,14 @@ class Sam2Runner(MaskRunner):
                                          box=boxes, multimask_output=False)
         return _as_nhw(masks, self._hw)
 
+    def masks_for_prompt(self, boxes, points, labels):
+        import torch
+        box = boxes[0] if boxes is not None and len(boxes) else None
+        with torch.inference_mode(), torch.autocast(self.device.type, dtype=self.dtype):
+            masks, _, _ = self.p.predict(point_coords=points, point_labels=labels,
+                                         box=box, multimask_output=False)
+        return _as_nhw(masks, self._hw)
+
 
 class Sam1Runner(MaskRunner):
     """Original segment-anything. Batched boxes go through `predict_torch`.
@@ -390,6 +436,12 @@ class Sam1Runner(MaskRunner):
     def set_image(self, rgb) -> None:
         self._hw = rgb.shape[:2]
         self.p.set_image(rgb)
+
+    def masks_for_prompt(self, boxes, points, labels):
+        box = boxes[0] if boxes is not None and len(boxes) else None
+        masks, _, _ = self.p.predict(point_coords=points, point_labels=labels,
+                                     box=box, multimask_output=False)
+        return _as_nhw(masks, self._hw)
 
     def masks_for_boxes(self, boxes):
         import torch
@@ -487,6 +539,11 @@ class Sam3Runner(MaskRunner):
         which is the point: one example, every match."""
         masks, _, _ = self._run(self._rgb, None, boxes)
         return masks
+
+    def masks_for_prompt(self, boxes, points, labels):
+        raise RuntimeError(
+            "SAM 3 的提示是「概念」(文字或範例框),沒有 +/- 點提示;"
+            "修圖請用 --engine sam2。")
 
     def masks_for_text(self, rgb, text: str):
         return self._run(rgb, text, None)
@@ -831,6 +888,17 @@ def main() -> int:
     dtype = torch.bfloat16
 
     spec = load_boxes_file(args.boxes_json) if args.boxes_json else {}
+    # `only` scopes a run to named frames. That is what makes the repair loop
+    # cheap: fixing one bad cut-out re-runs one image, not the folder, and it
+    # goes through the same job/log/parse machinery as a full run.
+    only = {str(r) for r in (spec.get("only") or [])}
+    if only:
+        images = [p for p in images if p.relative_to(images_dir).as_posix() in only]
+        if not images:
+            print(f"error: --boxes-json 的 only 清單沒有對到任何影像: {sorted(only)[:5]}",
+                  file=sys.stderr)
+            return 2
+        print(f"note: 只處理 {len(images)} 張指定的影像(修圖模式)", flush=True)
     if args.boxes in ("json", "track") and not spec:
         print(f"error: --boxes {args.boxes} 需要 --boxes-json", file=sys.stderr)
         return 2
@@ -877,6 +945,7 @@ def main() -> int:
 
         masks = None
         scores = None
+        points, labels = points_for_image(spec, rel, w, h)
         if args.boxes == "json":
             boxes = boxes_for_image(spec, rel, w, h)
         elif args.boxes == "full":
@@ -904,7 +973,13 @@ def main() -> int:
         # frame that already has one would pay the encoder cost — the expensive
         # part — a second time.
         staged = False
-        if masks is None:
+        if points is not None and len(points):
+            # Repair: one object, box + clicks in a single prompt.
+            runner.set_image(rgb)
+            staged = True
+            masks = runner.masks_for_prompt(boxes, points, labels)
+            mask = _enc.merge_masks(masks, (h, w))
+        elif masks is None:
             runner.set_image(rgb)
             staged = True
             if len(boxes) == 0:
@@ -930,7 +1005,8 @@ def main() -> int:
         finish_image(rgb, mask, args, args.dataset_root, image, images_dir)
         used_boxes[rel] = np.asarray(boxes).round(1).tolist()
         written += 1
-        print(f"[{i}/{total}] {image.name}  boxes={len(boxes)} "
+        pts = f" points={len(points)}" if points is not None and len(points) else ""
+        print(f"[{i}/{total}] {image.name}  boxes={len(boxes)}{pts} "
               f"cover={100.0 * float(mask.mean()):.1f}%  "
               f"inference {(time.perf_counter() - started) * 1000:.0f} ms", flush=True)
 
