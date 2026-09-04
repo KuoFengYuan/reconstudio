@@ -1,0 +1,59 @@
+<!-- 去背 box picker, rendered into the 執行 panel (#main) rather than the narrow
+     form column: you are judging a photo, and a 260px-wide thumbnail is not
+     enough to place a box on a real subject. The boxes live in the left form's
+     hidden #matte_boxes field, which stays mounted while this swaps, so paging
+     through frames never loses them. -->
+<div class="rs-panel mp" data-rel="{{ rel }}" data-idx="{{ idx }}" data-total="{{ total }}">
+  <div class="mp-head">
+    <div>
+      <div class="mp-title">⬚ 匡選要保留的物體</div>
+      <div class="hint" style="margin:2px 0 0">{{ dir }}</div>
+    </div>
+    <span class="mp-spacer"></span>
+    <span class="chip" id="mp_count">0 框</span>
+    <button type="button" class="ghost" onclick="mpUndo()">↶ 復原</button>
+    <button type="button" class="ghost" onclick="mpClear()">✕ 清除這張</button>
+    <button type="button" class="ghost" onclick="mpClearAll()">✕ 清除全部影格</button>
+  </div>
+
+  <div class="mp-stage" id="mp_stage">
+    {# The overlay is a sibling of the IMG inside a shrink-wrapping frame, not of
+       the stage: a portrait photo leaves letterbox bars either side, and an
+       overlay covering those would map every drag onto the wrong rectangle. #}
+    <div class="mp-frame">
+      <img id="mp_img" src="{{ src }}" alt="{{ rel }}" draggable="false">
+      <div class="mp-ov" id="mp_ov"></div>
+    </div>
+  </div>
+
+  <div class="mp-bar">
+    <button type="button" class="ghost" title="上一張"
+            hx-get="/ui/matte_pick?images={{ images|urlencode }}&i={{ idx - 1 }}"
+            hx-target="#main" hx-swap="innerHTML"
+            {{ 'disabled' if idx == 0 }}>◀ 上一張</button>
+    <span class="mp-name">{{ idx + 1 }} / {{ total }} · <b>{{ rel }}</b></span>
+    <button type="button" class="ghost" title="下一張"
+            hx-get="/ui/matte_pick?images={{ images|urlencode }}&i={{ idx + 1 }}"
+            hx-target="#main" hx-swap="innerHTML"
+            {{ 'disabled' if idx + 1 >= total }}>下一張 ▶</button>
+    <select class="mp-jump" name="i"
+            hx-get="/ui/matte_pick?images={{ images|urlencode }}"
+            hx-target="#main" hx-swap="innerHTML" hx-include="this">
+      {% for n in names %}
+      <option value="{{ loop.index0 }}" {{ 'selected' if loop.index0 == idx }}>{{ n }}</option>
+      {% endfor %}
+      {% if total > names|length %}
+      <option disabled>… 只列出前 {{ names|length }} 張,其餘請用 ◀ ▶</option>
+      {% endif %}
+    </select>
+  </div>
+
+  {# Every annotated frame, clickable. In 追蹤 mode each one is a conditioning
+     frame, so this row is also the answer to "where did I already box this?" #}
+  <div class="mp-fchips" id="mp_frames"></div>
+  <div class="hint mp-status" id="mp_status"></div>
+  <div class="hint">畫好之後回到左邊按「▶ 開始去背」。座標是<b>相對比例</b>存的,
+    所以資料夾裡就算混著不同解析度的照片也對得上。<b>追蹤模式建議在序列的頭、中、尾各匡一次</b>
+    (同一個物體用同一個號碼),中間的影格會被兩側的錨點一起修正。</div>
+</div>
+<script>mpInit({{ rel|tojson }});</script>

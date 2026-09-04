@@ -6,15 +6,24 @@ _jobview fragment (or _error.html on a ValueError).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from jobs import COLMAP_STAGES, Job, manager, new_id
-from pipeline import build_cli, default_dest, gcs_multi_plan, get_backend, resolve_dataset
+from pipeline import (
+    build_cli,
+    default_dest,
+    gcs_multi_plan,
+    get_backend,
+    resolve_dataset,
+    resolve_matte_dataset,
+)
+from pipeline.matte import OUTPUT_ROOT
 from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
@@ -224,6 +233,136 @@ async def create_depth(request: Request):
               params=params, meta={"images": images, "mode": mode})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/matte", response_class=HTMLResponse)
+async def create_matte(request: Request):
+    """去背: SAM-prompted foreground extraction -> cutout/ (RGBA) + masks/ (0/255).
+
+    Validation stays thin on purpose — engine/box-source/output names are checked
+    by `run_matte` itself, so the CLI and the panel cannot drift apart on what is
+    legal. What this handler owns is the two things only the web layer knows: the
+    folder exists, and the drawn boxes came through as parsable JSON (an empty
+    hidden field means the user never opened the picker, which is worth catching
+    here rather than as a subprocess exit code two minutes later).
+    """
+    form = dict(await request.form())
+    images = (form.get("images") or "").strip().rstrip("/")
+    boxes = (form.get("boxes") or "track").strip()
+    boxes_json = (form.get("boxes_json") or "").strip()
+    try:
+        if not Path(images).is_dir():
+            raise ValueError(f"images 不是資料夾: {images!r}")
+        if boxes in ("track", "json", "exemplar"):
+            if not boxes_json:
+                raise ValueError("請先按「⬚ 匡選物體」,在照片上框出要保留的物體")
+            try:
+                drawn = json.loads(boxes_json)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"匡選資料不是合法的 JSON: {exc}") from exc
+            if not (drawn.get("boxes") if isinstance(drawn, dict) else drawn):
+                raise ValueError("匡選資料裡沒有任何框")
+        params = {
+            "images": images, "boxes": boxes, "boxes_json": boxes_json,
+            "matte_engine": (form.get("matte_engine") or "sam2").strip(),
+            "matte_model": (form.get("matte_model") or "").strip(),
+            "checkpoint": (form.get("checkpoint") or "").strip(),
+            "detector": (form.get("detector") or "").strip(),
+            "text": (form.get("text") or "").strip(),
+            "outputs": (form.get("outputs") or "cutout,masks").strip(),
+            "erode": (form.get("erode") or "").strip(),
+            "dilate": (form.get("dilate") or "").strip(),
+            "feather": (form.get("feather") or "").strip(),
+            "min_area": (form.get("min_area") or "").strip(),
+            "box_chunk": (form.get("box_chunk") or "").strip(),
+            "on_empty": (form.get("on_empty") or "").strip(),
+            "gpu": (form.get("gpu") or "").strip(),
+            "row_filter": bool(form.get("row_filter")),
+            "largest_only": bool(form.get("largest_only")),
+            "soft_masks": bool(form.get("soft_masks")),
+            "no_bleed": bool(form.get("no_bleed")),
+            "overwrite": bool(form.get("overwrite")),
+        }
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    dataset_root, _ = resolve_matte_dataset(Path(images))
+    dests = [str(dataset_root / OUTPUT_ROOT / f)
+             for f in params["outputs"].split(",") if f.strip()]
+    job = Job(id=new_id(), kind="matte",
+              title=f"✂️ 去背({boxes}) · {Path(images).name}",
+              subtitle=f"{images}  →  {' + '.join(dests)}",
+              # NOT "boxes": _parse_matte counts the per-image box total into
+              # meta["boxes"], and this string would shadow it — the job chip read
+              # "共 track 個框".
+              params=params, meta={"images": images, "box_source": boxes,
+                                   "dataset_root": str(dataset_root)})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/matte_repair")
+async def create_matte_repair(request: Request):
+    """Re-cut ONE frame from a box plus +/- clicks, and hand back the job id.
+
+    JSON rather than an htmx fragment: the repair page is a standalone view that
+    polls the job and swaps its own image in place, so a rendered job card would
+    only take the user away from the thing they are fixing.
+
+    The job itself is an ordinary `matte` job — same queue, same log parser, same
+    console — scoped by the `only` list inside the boxes file and forced to
+    overwrite, since the whole point is replacing an output that already exists.
+    """
+    form = dict(await request.form())
+    images = (form.get("images") or "").strip().rstrip("/")
+    rel = (form.get("rel") or "").strip().lstrip("/")
+    try:
+        prompt = json.loads(form.get("prompt") or "{}")
+    except json.JSONDecodeError as exc:
+        return JSONResponse({"error": f"修圖資料不是合法的 JSON: {exc}"}, status_code=400)
+    box, points = prompt.get("box"), prompt.get("points") or []
+    if not Path(images).is_dir():
+        return JSONResponse({"error": f"images 不是資料夾: {images}"}, status_code=400)
+    if not rel:
+        return JSONResponse({"error": "缺少 rel"}, status_code=400)
+    if not points and not box:
+        return JSONResponse({"error": "請先在圖上點出要保留 / 去除的位置"}, status_code=400)
+
+    # The source photo keeps its own extension while the output is always .png,
+    # and `only` is matched against the SOURCE's relative path.
+    dataset_root, folder = resolve_matte_dataset(Path(images))
+    images_dir = dataset_root / folder if folder else dataset_root
+    stem = Path(rel).with_suffix("")
+    source_rel = next(
+        (c.relative_to(images_dir).as_posix()
+         for c in sorted(images_dir.glob(f"{stem}.*")) if c.is_file()),
+        None)
+    if source_rel is None:
+        return JSONResponse({"error": f"找不到原圖: {rel}"}, status_code=404)
+
+    boxes_json = json.dumps({
+        "norm": True, "apply": "all", "only": [source_rel],
+        "per_image": {source_rel: {"boxes": [box] if box else [], "points": points}},
+    })
+    params = {
+        "images": images, "boxes": "json", "boxes_json": boxes_json,
+        # sam2 explicitly: SAM 3 prompts with concepts, not +/- clicks.
+        "matte_engine": "sam2", "outputs": "cutout,masks",
+        "on_empty": "skip", "overwrite": True,
+        "matte_model": "", "checkpoint": "", "detector": "", "text": "",
+        "erode": "", "dilate": "", "feather": "", "min_area": "", "box_chunk": "",
+        "gpu": (form.get("gpu") or "0").strip(),
+        "row_filter": False, "largest_only": False, "soft_masks": False,
+        "no_bleed": False,
+    }
+    job = Job(id=new_id(), kind="matte",
+              title=f"🖌 修圖 · {Path(source_rel).name}",
+              subtitle=f"{images}  ·  {source_rel}  ({len(points)} 個點提示)",
+              params=params, meta={"images": images, "box_source": "repair",
+                                   "repair_rel": source_rel,
+                                   "dataset_root": str(dataset_root)})
+    manager.submit(job)
+    return JSONResponse({"job": job.id})
 
 
 @router.post("/ui/jobs", response_class=HTMLResponse)

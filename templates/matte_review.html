@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>去背結果 · {{ items|length }} 張</title>
+<style>
+  :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#35d07f; --panel:rgba(22,26,33,.92);
+          --err:#f85149; --warn:#e3b341; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:#0b0d11; color:var(--fg);
+              font:13px/1.45 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif; }
+  #bar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:12px;
+         padding:9px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+         backdrop-filter:blur(6px); flex-wrap:wrap; }
+  #bar .ttl { font-weight:600; }
+  #bar .pth { color:var(--mut); font-size:11px; overflow:hidden; text-overflow:ellipsis;
+              white-space:nowrap; flex:1; min-width:140px; }
+  #bar .cnt { color:var(--accent); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  #bar .warn { color:var(--warn); white-space:nowrap; }
+  .seg { display:flex; border:1px solid var(--line); border-radius:7px; overflow:hidden; }
+  .seg button { background:transparent; color:var(--mut); border:0; padding:5px 10px;
+                cursor:pointer; font:inherit; }
+  .seg button.on { background:#1d232c; color:var(--fg); }
+  .seg button:hover { color:var(--fg); }
+  .lbl { color:var(--mut); font-size:11px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(170px,1fr));
+          gap:8px; padding:10px 12px 16px; }
+  .cell { position:relative; aspect-ratio:1/1; border:1px solid var(--line);
+          border-radius:8px; overflow:hidden; cursor:zoom-in; }
+  .cell img { width:100%; height:100%; object-fit:contain; display:block; }
+  .cell .nm { position:absolute; left:0; right:0; bottom:0; padding:3px 6px; font-size:10px;
+              color:#dfe4ec; background:linear-gradient(transparent,rgba(0,0,0,.72));
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; pointer-events:none; }
+  /* The repair button lives on the cell, not behind a selection mode: spotting a
+     bad cut-out and fixing it should be one click, not three. */
+  .cell .fix { position:absolute; top:5px; right:5px; z-index:2; font-size:11px;
+               padding:3px 7px; border-radius:6px; background:rgba(10,12,16,.78);
+               color:#e6e9ef; border:1px solid var(--line); text-decoration:none;
+               opacity:0; transition:opacity .12s; }
+  .cell:hover .fix, .cell .fix:focus { opacity:1; }
+  .cell .fix:hover { border-color:var(--accent); color:var(--accent); }
+  /* The four backdrops are the whole point of this page: a cut-out that looks
+     clean on the transparency grid can still show a dark rim on white and a pale
+     rim on black, and 綠 is the classic screen-comp test. */
+  .bg-grid { background-color:#7c828c;
+             background-image:linear-gradient(45deg,#5a606a 25%,transparent 25%),
+                              linear-gradient(-45deg,#5a606a 25%,transparent 25%),
+                              linear-gradient(45deg,transparent 75%,#5a606a 75%),
+                              linear-gradient(-45deg,transparent 75%,#5a606a 75%);
+             background-size:16px 16px;
+             background-position:0 0,0 8px,8px -8px,-8px 0; }
+  .bg-white { background:#fff; } .bg-black { background:#000; } .bg-green { background:#00b140; }
+  .empty { color:var(--mut); padding:40px 14px; text-align:center; }
+  /* lightbox */
+  #lb { position:fixed; inset:0; z-index:20; display:none; align-items:center; justify-content:center;
+        background:rgba(6,8,12,.95); }
+  #lb.open { display:flex; }
+  #lb .wrap { max-width:94vw; max-height:88vh; border-radius:6px; overflow:hidden;
+              box-shadow:0 10px 50px rgba(0,0,0,.6); }
+  #lb img { max-width:94vw; max-height:88vh; object-fit:contain; display:block; }
+  #lb .cap { position:fixed; left:0; right:0; bottom:14px; text-align:center;
+             font-size:13px; text-shadow:0 1px 4px #000; pointer-events:none; }
+  #lb .cap .sub { color:var(--accent); } #lb .cap small { color:var(--mut); margin-left:8px; }
+  #lb button { position:fixed; top:50%; transform:translateY(-50%); background:var(--panel);
+               color:var(--fg); border:1px solid var(--line); border-radius:50%; width:46px; height:46px;
+               font-size:22px; cursor:pointer; user-select:none; }
+  #lb #prev { left:16px; } #lb #next { right:16px; }
+  #lb #close { top:16px; right:16px; transform:none; width:40px; height:40px; font-size:18px;
+               border-radius:8px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span class="ttl">✂️ 去背結果</span>
+  <span class="pth" title="{{ cut_root }}">{{ cut_root }}</span>
+  <span class="cnt">{{ items|length }} / {{ total_src }} 張</span>
+  {% if missing %}<span class="warn" title="這些照片沒有對應的 cutout">⚠ 缺 {{ missing }} 張</span>{% endif %}
+  {% if orphans %}<span class="warn" title="cutout 存在但找不到來源照片">⚠ {{ orphans }} 張找不到原圖</span>{% endif %}
+  <span class="lbl">背景</span>
+  <span class="seg" id="segbg">
+    <button class="on" data-bg="grid">透明格</button>
+    <button data-bg="white">白</button>
+    <button data-bg="black">黑</button>
+    <button data-bg="green">綠</button>
+  </span>
+  <span class="lbl">顯示</span>
+  <span class="seg" id="segsrc">
+    <button class="on" data-src="cut">去背後</button>
+    <button data-src="orig">原圖</button>
+  </span>
+</div>
+
+{% if not items %}
+<div class="empty">這個資料夾還沒有 <code>cutout/</code> 輸出。</div>
+{% else %}
+<div class="grid" id="grid"></div>
+{% endif %}
+
+<div id="lb" onclick="if(event.target.id==='lb')closeLb()">
+  <div class="wrap" id="lbwrap"><img id="lbimg" alt=""></div>
+  <div class="cap"><span class="sub" id="lbname"></span><small id="lbpos"></small></div>
+  <a id="lbfix" target="_blank" style="position:fixed;left:16px;top:16px;z-index:21;
+     background:var(--panel);border:1px solid var(--line);border-radius:8px;
+     padding:8px 12px;color:var(--fg);text-decoration:none">🖌 修這張</a>
+  <button id="prev" onclick="step(-1)">‹</button>
+  <button id="next" onclick="step(1)">›</button>
+  <button id="close" onclick="closeLb()">✕</button>
+</div>
+
+<script>
+  var ITEMS = {{ items|tojson }};
+  var CUT_ROOT = {{ cut_root|tojson }}, IMG_ROOT = {{ img_root|tojson }};
+  var IMAGES = {{ images|tojson }};
+  var bg = 'grid', srcMode = 'cut', cur = 0;
+
+  function url(rel, root, w){
+    return "/api/matte/imagefile?path=" + encodeURIComponent(root + "/" + rel) +
+           (w ? "&w=" + w : "");
+  }
+  // The original is only there to compare against; an item whose source photo is
+  // gone still shows its cut-out rather than a broken image.
+  function repairUrl(it){
+    return '/matte_repair?images=' + encodeURIComponent(IMAGES) +
+           '&rel=' + encodeURIComponent(it.cut);
+  }
+  function itemUrl(it, w){
+    return (srcMode === 'orig' && it.orig) ? url(it.orig, IMG_ROOT, w)
+                                           : url(it.cut, CUT_ROOT, w);
+  }
+  function paint(){
+    var g = document.getElementById('grid'); if (!g) return;
+    g.innerHTML = ITEMS.map(function(it, i){
+      return '<div class="cell bg-' + bg + '" onclick="openLb(' + i + ')">' +
+             '<a class="fix" target="_blank" onclick="event.stopPropagation()" href="' +
+               repairUrl(it) + '">🖌 修</a>' +
+             '<img loading="lazy" src="' + itemUrl(it, 320) + '" alt="">' +
+             '<div class="nm">' + it.cut + '</div></div>';
+    }).join('');
+    document.getElementById('lbwrap').className = 'wrap bg-' + bg;
+  }
+  document.getElementById('segbg').onclick = function(e){
+    if (!e.target.dataset.bg) return;
+    bg = e.target.dataset.bg;
+    this.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b === e.target); });
+    paint(); render();
+  };
+  document.getElementById('segsrc').onclick = function(e){
+    if (!e.target.dataset.src) return;
+    srcMode = e.target.dataset.src;
+    this.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b === e.target); });
+    paint(); render();
+  };
+
+  function render(){
+    var it = ITEMS[cur]; if (!it) return;
+    document.getElementById('lbimg').src = itemUrl(it, 0);
+    document.getElementById('lbname').textContent = it.cut;
+    document.getElementById('lbfix').href = repairUrl(it);
+    document.getElementById('lbpos').textContent = (cur + 1) + ' / ' + ITEMS.length;
+  }
+  function openLb(i){ cur = i; render(); document.getElementById('lb').classList.add('open'); }
+  function closeLb(){ document.getElementById('lb').classList.remove('open'); }
+  function step(d){ cur = (cur + d + ITEMS.length) % ITEMS.length; render(); }
+  document.addEventListener('keydown', function(e){
+    if (!document.getElementById('lb').classList.contains('open')) return;
+    if (e.key === 'Escape') closeLb();
+    else if (e.key === 'ArrowLeft') step(-1);
+    else if (e.key === 'ArrowRight') step(1);
+    // Space flips between 去背後 / 原圖 in place — the fastest way to judge an edge.
+    else if (e.key === ' ') {
+      e.preventDefault();
+      srcMode = (srcMode === 'cut') ? 'orig' : 'cut';
+      document.querySelectorAll('#segsrc button').forEach(function(b){
+        b.classList.toggle('on', b.dataset.src === srcMode);
+      });
+      render();
+    }
+  });
+  paint();
+</script>
+</body>
+</html>

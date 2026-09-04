@@ -1,0 +1,26 @@
+{# Live strip inside a running 去背 job. Polled (see matte_live): the images come
+   from a subprocess writing files, so there is no event to push. #}
+<div class="mlive">
+  <div class="mlive-head">
+    <span class="chip ok">已輸出 {{ total }} 張</span>
+    <span class="hint" style="margin:0">最新的在最前面 · 點縮圖可放大檢查</span>
+    <span class="mp-spacer"></span>
+    <a class="dl" target="_blank" href="/matte_review?images={{ images|urlencode }}">🖼 全部結果</a>
+  </div>
+  <div class="mlive-strip">
+    {% for it in items %}
+    {# `t` is the file's mtime: a frame re-cut by a repair job keeps its name, so
+       without it the browser would keep showing the stale thumbnail. #}
+    <a class="mlive-cell" target="_blank"
+       href="/api/matte/imagefile?path={{ (cut_root ~ '/' ~ it.rel)|urlencode }}&t={{ it.t }}"
+       title="{{ it.rel }}">
+      <img loading="lazy"
+           src="/api/matte/imagefile?path={{ (cut_root ~ '/' ~ it.rel)|urlencode }}&w=220&t={{ it.t }}"
+           alt="{{ it.rel }}">
+      <span class="nm">{{ it.rel }}</span>
+    </a>
+    {% else %}
+    <div class="hint">還沒有輸出…</div>
+    {% endfor %}
+  </div>
+</div>

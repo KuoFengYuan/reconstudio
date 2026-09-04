@@ -1,5 +1,5 @@
 """All API routers, collected for the app factory to include in one loop."""
-from . import browse, create, doctor, jobs, measure, pages, viewer, viz
+from . import browse, create, doctor, jobs, matte, measure, pages, viewer, viz
 
 ROUTERS = [
     pages.router,
@@ -9,5 +9,6 @@ ROUTERS = [
     viz.router,
     viewer.router,
     measure.router,
+    matte.router,
     doctor.router,
 ]

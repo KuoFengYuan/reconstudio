@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>修圖 · {{ rel }}</title>
+<style>
+  :root { --fg:#e6e9ef; --mut:#8b93a3; --line:#2a3038; --accent:#35d07f; --err:#f85149;
+          --panel:rgba(22,26,33,.92); }
+  * { box-sizing:border-box; }
+  html,body { margin:0; min-height:100%; background:#0b0d11; color:var(--fg);
+              font:15px/1.55 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif; }
+  #bar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:10px;
+         padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+         backdrop-filter:blur(6px); flex-wrap:wrap; }
+  #bar .ttl { font-weight:600; font-size:17px; }
+  #bar .pth { color:var(--mut); font-size:12px; flex:1; min-width:120px;
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  button { background:#1d232c; color:var(--fg); border:1px solid var(--line);
+           border-radius:8px; padding:7px 13px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.go { background:var(--accent); color:#08210f; border-color:var(--accent);
+              font-weight:700; }
+  button:disabled { opacity:.45; cursor:default; }
+  .seg { display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; background:transparent; color:var(--mut); }
+  .seg button.on { background:#1d232c; color:var(--fg); }
+  .wrap { padding:12px 14px 20px; }
+  .stage { position:relative; display:inline-block; line-height:0; max-width:100%;
+           border:1px solid var(--line); border-radius:10px; overflow:hidden; background:#12100d; }
+  .stage img { display:block; max-width:100%; max-height:74vh; width:auto; height:auto;
+               user-select:none; }
+  /* The current cut-out sits on top of the photo at low opacity, so you are
+     judging the mask against the pixels it was cut from rather than flipping
+     between two views. */
+  .stage img.cut { position:absolute; inset:0; width:100%; height:100%; opacity:.55;
+                   pointer-events:none; }
+  .ov { position:absolute; inset:0; cursor:crosshair; }
+  .bx { position:absolute; border:2px solid #4aa3ff; background:rgba(74,163,255,.12);
+        box-sizing:border-box; }
+  .pt { position:absolute; width:20px; height:20px; margin:-10px 0 0 -10px; border-radius:50%;
+        border:2px solid #fff; box-shadow:0 0 0 1px rgba(0,0,0,.6); cursor:pointer; }
+  .pt.keep { background:#35d07f; } .pt.drop { background:#f85149; }
+  .hint { color:var(--mut); font-size:13.5px; margin-top:10px; max-width:1100px; }
+  .hint b { color:var(--fg); }
+  .kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:12px; }
+  #msg { margin-top:10px; font-size:14px; }
+  #msg.err { color:var(--err); } #msg.ok { color:var(--accent); }
+</style>
+</head>
+<body>
+<div id="bar">
+  <span class="ttl">🖌 修圖</span>
+  <span class="pth" title="{{ source }}">{{ rel }}</span>
+  <span class="seg" id="segtool">
+    <button class="on" data-tool="keep">＋ 保留</button>
+    <button data-tool="drop">－ 去除</button>
+    <button data-tool="box">⬚ 重畫框</button>
+  </span>
+  <button onclick="rpUndo()">↶ 復原</button>
+  <button onclick="rpClear()">✕ 清除</button>
+  <button id="toggle" onclick="rpToggle()">👁 隱藏目前遮罩</button>
+  <button class="go" id="apply" onclick="rpApply()">✔ 重新去背這一張</button>
+</div>
+
+<div class="wrap">
+  <div class="stage" id="stage">
+    <img id="photo" src="{{ src }}" alt="{{ rel }}" draggable="false">
+    {% if cut %}<img class="cut" id="cut" src="{{ cut }}" alt="" draggable="false">{% endif %}
+    <div class="ov" id="ov"></div>
+  </div>
+  <div class="hint">
+    在<b>錯的地方點一下</b>就好:少切到的部分用 <b>＋ 保留</b>,多切到的背景用 <b>－ 去除</b>。
+    通常一兩點就夠 —— 單純再畫一次框沒有用,因為當初就是那個框產生了這個結果,
+    點提示才帶進新資訊。<span class="kbd">Shift</span>+點 = 去除,
+    <span class="kbd">Alt</span>+拖曳 = 重畫框,點在標記上可刪除它。
+  </div>
+  <div id="msg"></div>
+</div>
+
+<script>
+  var IMAGES = {{ images|tojson }}, REL = {{ rel|tojson }};
+  var st = { box:null, points:[], tool:'keep', order:[] };
+
+  function ov(){ return document.getElementById('ov'); }
+  function pt(ev){
+    var r = ov().getBoundingClientRect();
+    return [ Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+             Math.min(1, Math.max(0, (ev.clientY - r.top ) / r.height)) ];
+  }
+  function render(){
+    var o = ov();
+    o.querySelectorAll('.bx,.pt').forEach(function(e){ e.remove(); });
+    if (st.box) {
+      var d = document.createElement('div');
+      d.className = 'bx';
+      d.style.left = (st.box[0]*100)+'%';  d.style.top = (st.box[1]*100)+'%';
+      d.style.width = ((st.box[2]-st.box[0])*100)+'%';
+      d.style.height = ((st.box[3]-st.box[1])*100)+'%';
+      o.appendChild(d);
+    }
+    st.points.forEach(function(p, i){
+      var d = document.createElement('div');
+      d.className = 'pt ' + (p[2] ? 'keep' : 'drop');
+      d.style.left = (p[0]*100)+'%'; d.style.top = (p[1]*100)+'%';
+      d.title = (p[2] ? '保留點' : '去除點') + ' — 點一下刪除';
+      d.onmousedown = function(e){ e.stopPropagation(); };
+      d.onclick = function(e){
+        e.stopPropagation();
+        st.points.splice(i,1);
+        st.order.splice(st.order.lastIndexOf('p'), 1);
+        render();
+      };
+      o.appendChild(d);
+    });
+    document.getElementById('apply').disabled = !st.points.length && !st.box;
+  }
+  document.getElementById('segtool').onclick = function(e){
+    if (!e.target.dataset.tool) return;
+    st.tool = e.target.dataset.tool;
+    this.querySelectorAll('button').forEach(function(b){ b.classList.toggle('on', b === e.target); });
+  };
+
+  (function bind(){
+    var o = ov(), draft = null, sx = 0, sy = 0, moved = false;
+    o.onmousedown = function(ev){
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      var p = pt(ev); sx = p[0]; sy = p[1]; moved = false;
+      if (st.tool === 'box' || ev.altKey) {
+        draft = document.createElement('div');
+        draft.className = 'bx'; o.appendChild(draft);
+      }
+    };
+    o.onmousemove = function(ev){
+      if (!draft) return;
+      moved = true;
+      var p = pt(ev);
+      draft.style.left = (Math.min(sx,p[0])*100)+'%';
+      draft.style.top  = (Math.min(sy,p[1])*100)+'%';
+      draft.style.width  = (Math.abs(p[0]-sx)*100)+'%';
+      draft.style.height = (Math.abs(p[1]-sy)*100)+'%';
+    };
+    window.addEventListener('mouseup', function(ev){
+      var p = pt(ev);
+      if (draft) {
+        draft.remove(); draft = null;
+        var x0=Math.min(sx,p[0]), y0=Math.min(sy,p[1]), x1=Math.max(sx,p[0]), y1=Math.max(sy,p[1]);
+        if (moved && x1-x0 > 0.005 && y1-y0 > 0.005) {
+          st.box = [+x0.toFixed(5), +y0.toFixed(5), +x1.toFixed(5), +y1.toFixed(5)];
+          st.order.push('b');
+        }
+        render();
+        return;
+      }
+      // A click, not a drag: only count it if it landed on the overlay.
+      if (ev.target !== ov()) return;
+      var keep = (st.tool === 'keep') && !ev.shiftKey;
+      if (st.tool === 'box') return;
+      st.points.push([+p[0].toFixed(5), +p[1].toFixed(5), keep ? 1 : 0]);
+      st.order.push('p');
+      render();
+    });
+  })();
+
+  function rpUndo(){
+    var last = st.order.pop();
+    if (last === 'p') st.points.pop();
+    else if (last === 'b') st.box = null;
+    render();
+  }
+  function rpClear(){ st.box = null; st.points = []; st.order = []; render(); }
+  function rpToggle(){
+    var c = document.getElementById('cut'); if (!c) return;
+    var on = c.style.display !== 'none';
+    c.style.display = on ? 'none' : '';
+    document.getElementById('toggle').textContent = on ? '👁 顯示目前遮罩' : '👁 隱藏目前遮罩';
+  }
+
+  function rpApply(){
+    var msg = document.getElementById('msg');
+    msg.className = ''; msg.textContent = '送出中…';
+    var body = new URLSearchParams({
+      images: IMAGES, rel: REL,
+      prompt: JSON.stringify({ box: st.box, points: st.points })
+    });
+    fetch('/ui/matte_repair', {method:'POST', body: body})
+      .then(function(r){ return r.json(); })
+      .then(function(j){
+        if (j.error) { msg.className='err'; msg.textContent = j.error; return; }
+        msg.className='ok';
+        msg.textContent = '已送出,等待重新去背… (job ' + j.job + ')';
+        poll(j.job, 0);
+      })
+      .catch(function(e){ msg.className='err'; msg.textContent = String(e); });
+  }
+  // Poll the job rather than block: it is one image, so this is seconds, and the
+  // reload has to wait for the file on disk to actually change.
+  function poll(job, n){
+    if (n > 150) return;
+    fetch('/api/jobs/' + job).then(function(r){ return r.json(); }).then(function(j){
+      var msg = document.getElementById('msg');
+      if (j.status === 'done') {
+        msg.className='ok'; msg.textContent = '完成,重新載入結果…';
+        var c = document.getElementById('cut');
+        if (c) c.src = c.src.split('&t=')[0] + '&t=' + Date.now();
+        else location.reload();
+        rpClear();
+      } else if (j.status === 'failed' || j.status === 'cancelled') {
+        msg.className='err'; msg.textContent = '失敗:' + (j.error || j.status);
+      } else {
+        setTimeout(function(){ poll(job, n+1); }, 1000);
+      }
+    });
+  }
+  render();
+</script>
+</body>
+</html>

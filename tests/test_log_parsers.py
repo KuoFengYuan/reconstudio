@@ -19,6 +19,7 @@ from jobs import (
     _parse_depth,
     _parse_frames,
     _parse_gcs,
+    _parse_matte,
     _parse_mesh,
     _parse_train,
 )
@@ -386,6 +387,45 @@ def test_depth_unrelated_line_is_ignored():
 
 
 # --------------------------------------------------------------------------- #
+# _parse_matte  (去背 — reuses the depth marker vocabulary, adds two counters)
+# --------------------------------------------------------------------------- #
+def test_matte_reuses_the_depth_markers_but_names_its_own_stage():
+    job = _job("matte")
+    _parse_matte(job, "Images: 12 under /data/scene/images")
+    assert job.meta["total"] == 12
+    # Same wording as depth on the wire, but the job must not claim to be depth.
+    assert job.current_stage == "matte"
+
+
+def test_matte_accumulates_the_box_count():
+    job = _job("matte")
+    _feed(_parse_matte, job, [
+        "[1/2] a.jpg  boxes=3 cover=12.0%  inference 210 ms",
+        "[2/2] b.jpg  boxes=2 cover=9.0%  inference 190 ms",
+    ])
+    assert job.meta["boxes"] == 5
+    assert job.meta["cur"] == 2
+
+
+def test_matte_counts_the_empty_fallbacks():
+    # The tally that says "your prompt is not matching" before anyone opens a PNG.
+    job = _job("matte")
+    _feed(_parse_matte, job, [
+        "[1/2] a.jpg  [warn] no boxes -> opaque",
+        "[2/2] b.jpg  boxes=1 cover=8.0%  inference 200 ms",
+    ])
+    assert job.meta["empty"] == 1
+    assert job.meta["boxes"] == 1
+
+
+def test_matte_done_marks_done():
+    job = _job("matte")
+    _parse_matte(job, "Done. processed=11 skipped=1")
+    assert job.meta["written"] == 11
+    assert job.current_stage == "done"
+
+
+# --------------------------------------------------------------------------- #
 # PARSERS registry
 # --------------------------------------------------------------------------- #
 def test_parsers_registry_maps_to_correct_callables():
@@ -395,10 +435,12 @@ def test_parsers_registry_maps_to_correct_callables():
     assert PARSERS["mesh"] is _parse_mesh
     assert PARSERS["gcs"] is _parse_gcs
     assert PARSERS["depth"] is _parse_depth
+    assert PARSERS["matte"] is _parse_matte
 
 
 def test_parsers_registry_has_exactly_the_known_kinds():
-    assert set(PARSERS) == {"colmap", "frames", "train", "mesh", "gcs", "blocksplit", "depth"}
+    assert set(PARSERS) == {"colmap", "frames", "train", "mesh", "gcs", "blocksplit",
+                            "depth", "matte"}
 
 
 def test_parsers_registry_dispatch_round_trips():
