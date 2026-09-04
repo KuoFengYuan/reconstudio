@@ -267,6 +267,58 @@
   /* ---- scrollbars as faded paper ---- */
   ::-webkit-scrollbar-thumb{ background:#cdbf9f; border:2px solid var(--bg); }
   ::-webkit-scrollbar-thumb:hover{ background:#b9a87f; }
+
+  /* ---- 去背 box picker: the photo + the drag-to-keep overlay ---- */
+  /* The picker is a full-panel working view, not a sidebar widget: everything in
+     it is sized up from the form column's 12-13px, because you read the frame
+     name and the box count while your eye is on a photo across the screen. */
+  .mp{ font-size:15px; line-height:1.55; }
+  .mp .hint{ font-size:14px; line-height:1.6; }
+  .mp-head{ display:flex; align-items:center; gap:10px; margin-bottom:10px; flex-wrap:wrap; }
+  .mp-title{ font-family:var(--serif); font-size:20px; letter-spacing:.04em; }
+  .mp-head .chip{ font-size:14px; padding:4px 11px; }
+  .mp-head .ghost, .mp-bar .ghost{ font-size:14px; padding:6px 12px; }
+  .mp-bar{ display:flex; align-items:center; gap:10px; margin-top:12px; flex-wrap:wrap; }
+  .mp-bar .mp-name{ font-size:15px; opacity:.85; }
+  .mp-bar .mp-jump{ max-width:320px; font-size:14px; padding:6px 8px; }
+  .mp-spacer{ flex:1; }
+  /* The stage is sized by the VIEWPORT, not the image: a portrait photo at its
+     natural size would push the toolbar below the fold, and the whole point of
+     moving the picker here was to see the subject while framing it. */
+  .mp-stage{ position:relative; display:flex; align-items:center; justify-content:center;
+             max-height:66vh; border:1px solid var(--line2); border-radius:10px;
+             overflow:hidden; background:#12100d; line-height:0; }
+  .mp-stage img{ display:block; max-width:100%; max-height:66vh; width:auto; height:auto;
+                 user-select:none; }
+  /* The overlay tracks the IMG box, not the stage: letterboxing around a portrait
+     photo would otherwise be drawable, and every box drawn there would be a
+     fraction of the wrong rectangle. */
+  .mp-summary:empty{ display:none; }
+  .mp-summary{ margin:6px 0 2px; font-size:13px; display:flex; align-items:center;
+               gap:8px; flex-wrap:wrap; }
+  .mp-summary .ok{ color:var(--accent); font-weight:600; }
+  .mp-fchips{ display:flex; gap:7px; flex-wrap:wrap; margin:10px 0 2px; }
+  .mp-fchips .fchip{ font-size:13px; padding:5px 11px; border-radius:13px; cursor:pointer;
+                     border:1px solid var(--line2); background:rgba(247,240,223,.7);
+                     font-variant-numeric:tabular-nums; }
+  .mp-fchips .fchip:hover{ border-color:var(--accent); color:var(--accent); }
+  .mp-fchips .fchip.on{ background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+  /* The overlay is the drag surface AND the box canvas: crosshair everywhere, so
+     there is never a dead zone where a drag silently does nothing. */
+  .mp-frame{ position:relative; display:inline-block; line-height:0; max-width:100%; }
+  .mp-ov{ position:absolute; inset:0; cursor:crosshair; }
+  .mp-box{ position:absolute; border:2px solid #35d07f; background:rgba(53,208,127,.14);
+           box-sizing:border-box; }
+  .mp-box.draft{ border-style:dashed; }
+  .mp-box .x{ position:absolute; top:-14px; right:-14px; width:26px; height:26px;
+              border-radius:50%; background:#35d07f; color:#0b2c1b; font-size:17px;
+              line-height:26px; text-align:center; cursor:pointer; font-weight:700; }
+  .mp-box .n{ position:absolute; top:-14px; left:-14px; min-width:26px; height:26px;
+              padding:0 7px; border-radius:13px; background:#0b2c1b; color:#8ef0bd;
+              font-size:15px; line-height:26px; text-align:center; font-weight:700;
+              font-variant-numeric:tabular-nums; }
+  .mp-status{ font-size:14.5px !important; }
+  .mp-status b{ color:var(--accent); }
 </style>
 </head>
 <body>
@@ -294,6 +346,7 @@
         <span class="lbl">工具</span>
         <div class="tabbtns">
           <button class="ghost" id="t-depth" onclick="showForm('depth')">🌊 深度/法線</button>
+          <button class="ghost" id="t-matte" onclick="showForm('matte')">✂️ 影像去背</button>
           <button class="ghost" id="t-blocksplit" onclick="showForm('blocksplit')">🧱 分塊</button>
         </div>
       </div>
@@ -1093,6 +1146,162 @@
       <button class="submit" type="submit" {{ '' if depth_any_ready else 'disabled' }}>▶ 產生深度/法向量圖</button>
     </form>
 
+    <!-- ----- matte (去背) form ----- -->
+    <form id="form-matte" style="display:none" hx-post="/ui/matte" hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>去背 / 前景遮罩(SAM)</legend>
+        <div class="hint">在照片上<b>匡選要保留的物體</b>,SAM 就把整個資料夾一起去背,輸出
+          <code>cutout/</code>(去背後的 RGBA PNG)和 <code>masks/</code>(0/255 遮罩)。
+          原始照片不會被改動。一張圖裡匡多個物體時,各自的遮罩會<b>聯集</b>成同一張 alpha,
+          所以「一排並列的主體」一次就全部保留。</div>
+        {% if not matte_ready %}
+        <div class="hint" style="color:var(--err)">⚠ 找不到 <code>sam</code> conda env。建立方式:
+          <code>conda create -y -n sam python=3.11</code>,接著
+          <code>conda run -n sam pip install torch torchvision opencv-python
+          "git+https://github.com/facebookresearch/sam2.git"</code>。
+          文字提示(SAM 3 / Grounding DINO)再加 <code>pip install -U transformers accelerate</code>。</div>
+        {% endif %}
+
+        <label>images(照片資料夾,或含 images/ 的 COLMAP workspace)</label>
+        <div class="row">
+          <input name="images" id="matte_images" placeholder="{{ browse_root }}" required>
+          <button type="button" class="ghost" onclick="openPicker('matte_images')">瀏覽</button>
+          <button type="button" class="ghost" id="matte_pick_btn"
+                  hx-get="/ui/matte_pick" hx-include="#matte_images"
+                  hx-target="#main" hx-swap="innerHTML"
+                  onclick="mpOpen()">⬚ 匡選物體</button>
+        </div>
+        {# Only a summary lives in the form column — the picker itself opens in the
+           執行 panel on the right, which is the only place a photo is big enough
+           to place a box on. #}
+        <div id="matte_pick_slot" class="mp-summary"></div>
+        <div class="hint" style="margin-top:2px">跑過的資料夾可以直接
+          <a href="#" onclick="mpReview(event)" style="color:var(--accent)">🖼 檢視去背結果</a>
+          （新分頁開啟，可切換透明格 / 白 / 黑 / 綠底，空白鍵切換原圖對照）。</div>
+        <input type="hidden" name="boxes_json" id="matte_boxes" value="">
+
+        <label>提示方式</label>
+        <select name="boxes" id="matte_boxes_mode" onchange="syncMatte()"
+                {{ '' if matte_ready else 'disabled' }}>
+          <option value="track">匡選 + 追蹤傳播(SAM 2 影片模式)· 相機會動的序列</option>
+          <option value="json">匡選固定框(每張都用同一組框)· 固定機位 / 轉盤</option>
+          <option value="text">文字提示(每張自動偵測)· 例如 parrot</option>
+          <option value="exemplar">範例提示(SAM 3:匡一個,自動找同類)</option>
+          <option value="auto">自動偵測(單純背景;不需模型)</option>
+          <option value="full">整張當一個框(單一主體、滿版)</option>
+        </select>
+        <div class="hint bgrp" data-b="track">框畫在<b>一張</b>參考影格上,SAM 2 的記憶注意力沿著序列往前後傳播,
+          主體移動或相機繞行都跟得上。需要照片本身是有順序的序列(抽幀出來的就是)。</div>
+        <div class="hint bgrp" data-b="json">同一組框直接套用到每一張。機位固定時最省算力,
+          相機一動框就會對不上。</div>
+        <div class="hint bgrp" data-b="text">SAM 2 / SAM 1 本身看不懂文字,會先用 Grounding DINO
+          把名詞變成框再交給 SAM(Grounded-SAM 的標準組合);SAM 3 則直接吃文字。請填英文名詞,
+          多個用逗號分隔。</div>
+        <div class="hint bgrp" data-b="exemplar">SAM 3 專用:匡出的框當成「範例」,模型在<b>每一張</b>
+          裡找出所有輪廓相符的物件(可能比框的數量還多,這正是重點)。</div>
+        <div class="hint bgrp" data-b="auto">不用任何模型,直接用 Otsu 門檻 + 連通元件切出主體框。
+          背景單純(棚拍、白背景)時很好用,背景雜亂就會整張變成一個框。</div>
+
+        <div class="bgrp" data-b="text">
+          <label>要保留的物體(英文名詞)</label>
+          <input name="text" id="matte_text" placeholder="parrot, bird">
+        </div>
+
+        <label>模型</label>
+        <select name="matte_engine" id="matte_engine" onchange="syncMatte()"
+                {{ '' if matte_ready else 'disabled' }}>
+          <option value="sam3" {{ 'selected' if matte_defaults.matte_engine == 'sam3' }}>SAM 3 · 預設,支援文字 / 範例提示</option>
+          <option value="sam2" {{ 'selected' if matte_defaults.matte_engine == 'sam2' }}>SAM 2.1 Hiera-L · 框提示最穩,免申請</option>
+          <option value="sam1" {{ 'selected' if matte_defaults.matte_engine == 'sam1' }}>SAM 1 · 需另外指定 .pth checkpoint</option>
+        </select>
+        <div class="bgrp" data-b="sam3-only">
+          <div class="hint"><code>facebook/sam3</code> 在 HuggingFace 是<b>需要申請的 gated repo</b>:
+            要先到 <a href="https://huggingface.co/facebook/sam3" target="_blank"
+            style="color:var(--accent)">huggingface.co/facebook/sam3</a> 同意條款(人工審核),
+            核准後在這台機器跑一次 <code>conda run -n sam hf auth login</code>。
+            還沒核准就先用 SAM 2.1 —— 框提示的品質一樣好。</div>
+        </div>
+        <div class="hint bgrp" data-b="track" style="color:var(--warn,#b8860b)">⚠ <b>追蹤傳播固定使用
+          SAM 2.1 影片模式</b>,上面的模型選單在這個模式下不生效(選單會變灰)。
+          原因:SAM 3 的影片工作階段會把整段序列一次載進記憶體(每張放大到 1024²),
+          幾百張 4K 會吃光 RAM;SAM 2 的是從磁碟逐張讀。
+          <b>想真的用 SAM 3 就選「範例提示」</b> —— 它每張獨立推論,不需要影片工作階段。</div>
+
+        <label>輸出</label>
+        <select name="outputs" {{ '' if matte_ready else 'disabled' }}>
+          <option value="cutout,masks">cutout/(RGBA)+ masks/(0/255)</option>
+          <option value="cutout">只要 cutout/(去背 RGBA)</option>
+          <option value="masks">只要 masks/(單通道遮罩)</option>
+        </select>
+        <div class="hint">COLMAP 的 <code>MASKS_DIR</code> 要填 <code>cutout/</code> —— 遮罩階段讀的是
+          <b>alpha 通道</b>,所以必須是 RGBA;訓練器的 <code>--masks</code> 則吃 <code>masks/</code>。</div>
+
+        <label>GPU</label>
+        <select name="gpu" {{ '' if matte_ready else 'disabled' }}>
+          {% if gpus %}{% for g in gpus %}
+          <option value="{{ g.index }}">#{{ g.index }} · {{ g.name }} · {{ (g.mem_mb/1024)|round(0,'floor')|int }}GB</option>
+          {% endfor %}{% else %}
+          <option value="0">0(預設;未偵測到 nvidia-smi)</option>
+          {% endif %}
+        </select>
+      </fieldset>
+
+      <details class="grp">
+        <summary>邊緣處理</summary>
+        <div class="gbody">
+          <label>erode(先內縮 N px,留空 = 預設 1)</label>
+          <input name="erode" value="{{ matte_defaults.erode }}">
+          <div class="hint">去背的黑邊多半不是遮罩畫錯,而是邊緣那圈半透明像素的 RGB 其實是<b>背景色</b>。
+            先內縮再羽化,羽化的漸層就落在前景像素上,黑邊自然消失。</div>
+          <label>dilate(外擴 N px,留空 = 0)</label>
+          <input name="dilate" value="{{ matte_defaults.dilate }}">
+          <div class="hint">主體被切太瘦時才用(頭髮、電線這類細物)。</div>
+          <label>feather(羽化半徑,留空 = 預設 2;0 = 硬邊)</label>
+          <input name="feather" value="{{ matte_defaults.feather }}">
+          <label class="chk"><input type="checkbox" name="no_bleed" value="1">
+            <span>不要把前景顏色往外擴散(關掉黑邊修正,除錯用)</span></label>
+          <label class="chk"><input type="checkbox" name="soft_masks" value="1">
+            <span>masks/ 保留羽化灰階(預設輸出硬 0/255)</span></label>
+          <label class="chk"><input type="checkbox" name="largest_only" value="1">
+            <span>只保留最大的一塊(單一主體時可去掉零星碎塊)</span></label>
+          <label class="chk"><input type="checkbox" name="row_filter" value="1">
+            <span>只留「橫向同一排」的主體(以中位數垂直中心對齊)</span></label>
+        </div>
+      </details>
+
+      <details class="grp">
+        <summary>進階</summary>
+        <div class="gbody">
+          <label>model(HuggingFace id 或本機 checkpoint;留空 = 各引擎預設)</label>
+          <input name="matte_model" value="{{ matte_defaults.matte_model }}"
+                 placeholder="facebook/sam2.1-hiera-large">
+          <div class="bgrp" data-b="sam1-only">
+            <label>checkpoint(SAM 1 的 .pth)</label>
+            <input name="checkpoint" placeholder="/path/sam_vit_h_4b8939.pth">
+          </div>
+          <label>detector(文字提示時的偵測器;SAM 3 不需要)</label>
+          <input name="detector" placeholder="IDEA-Research/grounding-dino-base">
+          <label>min-area(小於整張畫面這個比例的框直接丟掉,留空 = 不過濾)</label>
+          <input name="min_area" value="{{ matte_defaults.min_area }}" placeholder="0.001">
+          <label>box-chunk(一次送進解碼器的框數,留空 = 預設 32)</label>
+          <input name="box_chunk" value="{{ matte_defaults.box_chunk }}">
+          <div class="hint">顯存不夠時會自動減半重試;這裡是起始值。真正吃顯存的是「框的數量 ×
+            整張解析度」的遮罩,不是編碼器。</div>
+          <label>找不到任何物體時</label>
+          <select name="on_empty">
+            <option value="opaque">整張視為前景(不去背,檔案數維持一致)</option>
+            <option value="skip">跳過這張(不產生檔案)</option>
+            <option value="image">用整張當框再試一次</option>
+          </select>
+          <div class="hint">COLMAP 的遮罩階段要求每張照片都有對應遮罩,所以預設是
+            <code>opaque</code> —— 缺檔會讓後面的 <code>image_undistorter</code> 直接失敗。</div>
+          <label class="chk" style="margin-top:8px"><input type="checkbox" name="overwrite" value="1">
+            <span>覆蓋已存在的輸出(預設略過,可續跑)</span></label>
+        </div>
+      </details>
+      <button class="submit" type="submit" {{ '' if matte_ready else 'disabled' }}>▶ 開始去背</button>
+    </form>
+
     <!-- ----- blocksplit form ----- -->
     <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
@@ -1482,7 +1691,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','blocksplit','depth','train','mesh','gcs','gallery','viewer','measure','supersplat'].forEach(function(k){
+    ['frames','colmap','blocksplit','depth','matte','train','mesh','gcs','gallery','viewer','measure','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -1661,6 +1870,198 @@
       el.style.display = (el.dataset.e === e) ? '' : 'none';
     });
   }
+
+  // ── 去背 box picker ────────────────────────────────────────────────────────
+  // Boxes are kept NORMALISED (0..1 of the image) in the form's hidden field, not
+  // in pixels: this canvas is a downscaled JPEG preview, and a folder may mix
+  // resolutions, so pixel corners would be wrong twice over. tools/sam_matte.py
+  // scales them back per image (see `denorm` there).
+  var mpState = { frames:{}, rel:'', up:null };
+
+  function mpRead(){
+    var h = document.getElementById('matte_boxes');
+    if (!h || !h.value) return {};
+    try {
+      var v = JSON.parse(h.value);
+      if (v.refs) return v.refs;
+      return (v.ref && v.boxes && v.boxes.length) ? (function(){ var o={}; o[v.ref]=v.boxes; return o; })() : {};
+    } catch(e){ return {}; }
+  }
+  function mpFrames(){
+    return Object.keys(mpState.frames).filter(function(k){
+      return mpState.frames[k] && mpState.frames[k].length;
+    }).sort();
+  }
+  function mpWrite(){
+    var h = document.getElementById('matte_boxes'); if (!h) return;
+    var order = mpFrames(), refs = {};
+    order.forEach(function(k){ refs[k] = mpState.frames[k]; });
+    // `ref`/`boxes` keep the single-frame shape the other prompt modes read;
+    // `refs` is what 追蹤 seeds every conditioning frame from. `per_image` lets
+    // 固定框 mode use each annotated frame's own boxes for that frame.
+    h.value = order.length ? JSON.stringify({
+      ref: order[0], apply: 'all', norm: true,
+      boxes: refs[order[0]], refs: refs, per_image: refs
+    }) : '';
+    mpRender();
+  }
+  function mpCur(){ return mpState.frames[mpState.rel] || []; }
+  function mpRender(){
+    var ov = document.getElementById('mp_ov');
+    var boxes = mpCur();
+    if (ov) {
+      ov.querySelectorAll('.mp-box:not(.draft)').forEach(function(b){ b.remove(); });
+      boxes.forEach(function(b, i){
+        var d = document.createElement('div');
+        d.className = 'mp-box';
+        d.style.left   = (b[0]*100)+'%';  d.style.top    = (b[1]*100)+'%';
+        d.style.width  = ((b[2]-b[0])*100)+'%'; d.style.height = ((b[3]-b[1])*100)+'%';
+        // Numbered because the number IS the object identity across frames: box #1
+        // on this frame and box #1 on another frame are seeded as one tracked
+        // object, so the order you draw them in matters.
+        var tag = document.createElement('div');
+        tag.className = 'n'; tag.textContent = (i + 1);
+        var x = document.createElement('div');
+        x.className = 'x'; x.textContent = '×'; x.title = '刪除第 ' + (i + 1) + ' 個框';
+        // mousedown too, not just click: the overlay starts a new draft box on
+        // mousedown, so without this the delete button also begins a drag.
+        x.onmousedown = function(ev){ ev.stopPropagation(); };
+        x.onclick = function(ev){ ev.stopPropagation(); mpCur().splice(i,1); mpWrite(); };
+        d.appendChild(tag); d.appendChild(x); ov.appendChild(d);
+      });
+    }
+    var frames = mpFrames();
+    var total = frames.reduce(function(a,k){ return a + mpState.frames[k].length; }, 0);
+    var c = document.getElementById('mp_count');
+    if (c) c.textContent = boxes.length + ' 框 · 共 ' + frames.length + ' 張影格';
+    var chips = document.getElementById('mp_frames');
+    if (chips) {
+      chips.innerHTML = frames.length
+        ? frames.map(function(f){
+            return '<span class="fchip' + (f === mpState.rel ? ' on' : '') +
+                   '" onclick="mpJump(' + JSON.stringify(f).replace(/"/g,'&quot;') + ')">' +
+                   f + ' · ' + mpState.frames[f].length + '</span>';
+          }).join('')
+        : '';
+    }
+    var st = document.getElementById('mp_status');
+    if (st) {
+      st.innerHTML = total
+        ? '已在 <b>' + frames.length + '</b> 張影格匡選,共 <b>' + total + '</b> 個框。' +
+          '<b>換一張影格再匡同一個物體,追蹤會更準</b> —— 每張匡過的影格都會變成錨點,' +
+          '遮擋或視角變化時就不會飄走(框上的號碼就是物體編號,第 1 框對第 1 框)。'
+        : '在照片上<b>拖曳</b>,匡出要保留的物體。可以框多個(遮罩會聯集),' +
+          '也可以<b>換幾張影格各匡一次</b>來提高追蹤準確度。';
+    }
+    var sum = document.getElementById('matte_pick_slot');
+    if (sum) {
+      sum.innerHTML = total
+        ? '<span class="ok">✓ ' + frames.length + ' 張影格 · ' + total + ' 個框</span>' +
+          '<span>起始影格 ' + frames[0] + '</span>'
+        : '';
+    }
+  }
+  function mpInit(rel){
+    mpState.frames = mpRead();
+    mpState.rel = rel;
+    var ov = document.getElementById('mp_ov'); if (!ov) return;
+    ov.dataset.rel = rel;
+    var draft = null, sx = 0, sy = 0;
+    function pt(ev){
+      var r = ov.getBoundingClientRect();
+      return [ Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+               Math.min(1, Math.max(0, (ev.clientY - r.top ) / r.height)) ];
+    }
+    ov.onmousedown = function(ev){
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      var p = pt(ev); sx = p[0]; sy = p[1];
+      draft = document.createElement('div');
+      draft.className = 'mp-box draft';
+      ov.appendChild(draft);
+    };
+    ov.onmousemove = function(ev){
+      if (!draft) return;
+      var p = pt(ev);
+      draft.style.left  = (Math.min(sx,p[0])*100)+'%';
+      draft.style.top   = (Math.min(sy,p[1])*100)+'%';
+      draft.style.width = (Math.abs(p[0]-sx)*100)+'%';
+      draft.style.height= (Math.abs(p[1]-sy)*100)+'%';
+    };
+    // On window, not the overlay: a drag that ends outside the photo must still
+    // close the box instead of leaving a ghost rectangle stuck to the cursor.
+    // Every frame change re-runs mpInit on a fresh fragment, so the previous
+    // handler is removed first — otherwise they pile up, each holding a dead
+    // overlay whose getBoundingClientRect() is all zeros.
+    if (mpState.up) window.removeEventListener('mouseup', mpState.up);
+    mpState.up = function(ev){
+      if (!draft) return;
+      var p = pt(ev); draft.remove(); draft = null;
+      var x0 = Math.min(sx,p[0]), y0 = Math.min(sy,p[1]);
+      var x1 = Math.max(sx,p[0]), y1 = Math.max(sy,p[1]);
+      if (x1-x0 < 0.005 || y1-y0 < 0.005) { mpRender(); return; }   // stray click
+      if (!mpState.frames[mpState.rel]) mpState.frames[mpState.rel] = [];
+      mpState.frames[mpState.rel].push(
+        [+x0.toFixed(5), +y0.toFixed(5), +x1.toFixed(5), +y1.toFixed(5)]);
+      mpWrite();
+    };
+    window.addEventListener('mouseup', mpState.up);
+    mpRender();
+  }
+  // Jump to an annotated frame by driving the fragment's own frame <select>, so
+  // the navigation stays one htmx swap rather than a second code path.
+  function mpJump(rel){
+    var sel = document.querySelector('#main .mp-jump'); if (!sel) return;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].textContent.trim() === rel) {
+        sel.selectedIndex = i;
+        sel.dispatchEvent(new Event('change', {bubbles:true}));
+        return;
+      }
+    }
+    alert('這張影格不在下拉選單列出的範圍內,請用 ◀ ▶ 翻到 ' + rel);
+  }
+  function mpUndo(){ mpCur().pop(); mpWrite(); }
+  function mpClear(){ delete mpState.frames[mpState.rel]; mpWrite(); }
+  function mpClearAll(){ mpState.frames = {}; mpWrite(); }
+
+  // Opens the review page for whatever folder is in the form right now, rather
+  // than requiring a finished job in this session — the outputs live on disk and
+  // outlast the job record.
+  function mpReview(ev){
+    ev.preventDefault();
+    var v = (document.getElementById('matte_images')||{}).value || '';
+    if (!v.trim()) { alert('請先填 images 資料夾'); return; }
+    window.open('/matte_review?images=' + encodeURIComponent(v.trim()), '_blank');
+  }
+  function mpOpen(){
+    var btn = document.querySelector('.col:last-child > .tabs button');
+    showTab('run', btn);
+  }
+
+  // 去背 form: show only the fields the chosen prompt mode / engine actually uses.
+  function syncMatte(){
+    var m = (document.getElementById('matte_boxes_mode')||{}).value;
+    var e = (document.getElementById('matte_engine')||{}).value;
+    document.querySelectorAll('#form-matte .bgrp').forEach(function(el){
+      var want = el.dataset.b;
+      // Two kinds of group live under .bgrp: '<engine>-only' keys off the model
+      // select, everything else off the prompt mode.
+      el.style.display = want.endsWith('-only') ? (want === e + '-only' ? '' : 'none')
+                                                : (want === m ? '' : 'none');
+    });
+    var btn = document.getElementById('matte_pick_btn');
+    if (btn) btn.style.display = ['track','json','exemplar'].indexOf(m) >= 0 ? '' : 'none';
+    // 追蹤 runs SAM 2's video predictor whatever the model select says, so grey it
+    // out rather than letting the form imply a choice the pipeline will ignore.
+    var eng = document.getElementById('matte_engine');
+    if (eng) {
+      eng.disabled = (m === 'track');
+      eng.title = (m === 'track') ? '追蹤傳播固定使用 SAM 2.1 影片模式' : '';
+    }
+  }
+  syncMatte();
+
   function syncMapper(){
     var sel = document.getElementById('mapper-sel'); if (!sel) return;
     var m = sel.value;

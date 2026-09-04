@@ -18,6 +18,12 @@ from .gcs import (  # noqa: F401
     run_gcs_sync,
     run_gcs_upload,
 )
+from .matte import (  # noqa: F401
+    MATTE_DEFAULTS,
+    matte_ready,
+    resolve_matte_dataset,
+    run_matte,
+)
 from .moge3 import MOGE3_DEFAULTS, moge3_ready  # noqa: F401
 from .runner import Cancelled, Runner  # noqa: F401
 from .train import TRAIN_DEFAULTS, run_mesh, run_train  # noqa: F401

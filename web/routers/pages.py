@@ -7,11 +7,13 @@ from fastapi.responses import HTMLResponse
 from jobs import COLMAP_STAGES
 from pipeline import (
     DEPTH_DEFAULTS,
+    MATTE_DEFAULTS,
     MOGE3_DEFAULTS,
     TRAIN_DEFAULTS,
     available_backends,
     depth_ready,
     list_gpus,
+    matte_ready,
     moge3_ready,
 )
 from web.shared import (
@@ -35,5 +37,6 @@ async def index(request: Request):
                  gpus=list_gpus(), gcs_root=GCS_ROOT,
                  depth_defaults=DEPTH_DEFAULTS, depth_ready=depth_ready(),
                  moge3_defaults=MOGE3_DEFAULTS, moge3_ready=moge3_ready(),
+                 matte_defaults=MATTE_DEFAULTS, matte_ready=matte_ready(),
                  # the form is usable as long as EITHER engine can run
                  depth_any_ready=depth_ready() or moge3_ready())

@@ -90,6 +90,26 @@
     <div class="hint">在 LichtFeld-Studio 訓練時加 <code>--use-depth-loss</code> 即會自動讀取此資料夾（需與 images/ 同層）。</div>
     {% endif %}
 
+  {% elif job.kind == 'matte' %}
+    <div class="chips">
+      {% if job.meta.get('phase') %}<span class="chip accent">{{ job.meta.phase }}</span>{% endif %}
+      {% if job.meta.get('total') %}<span class="chip">{{ job.meta.get('cur', 0) }} / {{ job.meta.total }}</span>{% endif %}
+      {% if job.meta.get('written') is not none %}<span class="chip ok">已去背 {{ job.meta.get('written', 0) }}</span>{% endif %}
+      {% if job.meta.get('boxes') %}<span class="chip">共 {{ job.meta.boxes }} 個框</span>{% endif %}
+      {% if job.meta.get('skipped') %}<span class="chip" style="color:var(--mut)">略過 {{ job.meta.skipped }}</span>{% endif %}
+      {# 沒偵測到物體的張數：這是提示詞沒對上的第一個徵兆，比翻 PNG 早得多 #}
+      {% if job.meta.get('empty') %}<span class="chip" style="color:var(--err)">未偵測到 {{ job.meta.empty }}</span>{% endif %}
+    </div>
+    {% if job.status == 'done' %}
+    <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <a class="dl primary" target="_blank"
+         href="/matte_review?images={{ job.meta.get('images','') | urlencode }}">🖼 檢視去背結果</a>
+    </div>
+    <div class="hint pathline" style="margin-top:10px">✅ 輸出：<code>{{ job.meta.get('dataset_root','') }}/cutout</code>、<code>{{ job.meta.get('dataset_root','') }}/masks</code></div>
+    <div class="hint">COLMAP 的 <code>MASKS_DIR</code> 填 <code>cutout/</code>（遮罩階段讀 alpha 通道，必須是 RGBA）；
+      訓練器的 <code>--masks</code> 則吃 <code>masks/</code>。到 🖼 圖片 分頁瀏覽 <code>cutout/</code> 可以直接檢查去背結果。</div>
+    {% endif %}
+
   {% elif job.kind == 'blocksplit' %}
     <div class="chips">
       {% if job.meta.get('blocks') %}<span class="chip ok">{{ job.meta.blocks | length }} 塊</span>{% endif %}

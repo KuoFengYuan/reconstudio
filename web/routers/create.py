@@ -6,6 +6,7 @@ _jobview fragment (or _error.html on a ValueError).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from pathlib import Path
@@ -14,7 +15,14 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from jobs import COLMAP_STAGES, Job, manager, new_id
-from pipeline import build_cli, default_dest, gcs_multi_plan, get_backend, resolve_dataset
+from pipeline import (
+    build_cli,
+    default_dest,
+    gcs_multi_plan,
+    get_backend,
+    resolve_dataset,
+    resolve_matte_dataset,
+)
 from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
@@ -222,6 +230,71 @@ async def create_depth(request: Request):
                     f"{'· MoGe-3' if engine == 'moge3' else ''}) · {Path(images).name}",
               subtitle=f"{images}  →  {' + '.join(dests)}",
               params=params, meta={"images": images, "mode": mode})
+    manager.submit(job)
+    return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
+
+
+@router.post("/ui/matte", response_class=HTMLResponse)
+async def create_matte(request: Request):
+    """去背: SAM-prompted foreground extraction -> cutout/ (RGBA) + masks/ (0/255).
+
+    Validation stays thin on purpose — engine/box-source/output names are checked
+    by `run_matte` itself, so the CLI and the panel cannot drift apart on what is
+    legal. What this handler owns is the two things only the web layer knows: the
+    folder exists, and the drawn boxes came through as parsable JSON (an empty
+    hidden field means the user never opened the picker, which is worth catching
+    here rather than as a subprocess exit code two minutes later).
+    """
+    form = dict(await request.form())
+    images = (form.get("images") or "").strip().rstrip("/")
+    boxes = (form.get("boxes") or "track").strip()
+    boxes_json = (form.get("boxes_json") or "").strip()
+    try:
+        if not Path(images).is_dir():
+            raise ValueError(f"images 不是資料夾: {images!r}")
+        if boxes in ("track", "json", "exemplar"):
+            if not boxes_json:
+                raise ValueError("請先按「⬚ 匡選物體」,在照片上框出要保留的物體")
+            try:
+                drawn = json.loads(boxes_json)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"匡選資料不是合法的 JSON: {exc}") from exc
+            if not (drawn.get("boxes") if isinstance(drawn, dict) else drawn):
+                raise ValueError("匡選資料裡沒有任何框")
+        params = {
+            "images": images, "boxes": boxes, "boxes_json": boxes_json,
+            "matte_engine": (form.get("matte_engine") or "sam2").strip(),
+            "matte_model": (form.get("matte_model") or "").strip(),
+            "checkpoint": (form.get("checkpoint") or "").strip(),
+            "detector": (form.get("detector") or "").strip(),
+            "text": (form.get("text") or "").strip(),
+            "outputs": (form.get("outputs") or "cutout,masks").strip(),
+            "erode": (form.get("erode") or "").strip(),
+            "dilate": (form.get("dilate") or "").strip(),
+            "feather": (form.get("feather") or "").strip(),
+            "min_area": (form.get("min_area") or "").strip(),
+            "box_chunk": (form.get("box_chunk") or "").strip(),
+            "on_empty": (form.get("on_empty") or "").strip(),
+            "gpu": (form.get("gpu") or "").strip(),
+            "row_filter": bool(form.get("row_filter")),
+            "largest_only": bool(form.get("largest_only")),
+            "soft_masks": bool(form.get("soft_masks")),
+            "no_bleed": bool(form.get("no_bleed")),
+            "overwrite": bool(form.get("overwrite")),
+        }
+    except ValueError as exc:
+        return _page(request, "_error.html", message=str(exc))
+
+    dataset_root, _ = resolve_matte_dataset(Path(images))
+    dests = [str(dataset_root / f) for f in params["outputs"].split(",") if f.strip()]
+    job = Job(id=new_id(), kind="matte",
+              title=f"✂️ 去背({boxes}) · {Path(images).name}",
+              subtitle=f"{images}  →  {' + '.join(dests)}",
+              # NOT "boxes": _parse_matte counts the per-image box total into
+              # meta["boxes"], and this string would shadow it — the job chip read
+              # "共 track 個框".
+              params=params, meta={"images": images, "box_source": boxes,
+                                   "dataset_root": str(dataset_root)})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 

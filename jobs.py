@@ -28,6 +28,7 @@ from pipeline import (
     run_frames,
     run_gcs_sync,
     run_gcs_upload,
+    run_matte,
     run_mesh,
     run_train,
 )
@@ -78,6 +79,7 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
     "mesh": run_mesh,
     "gcs": _run_gcs,
     "depth": _run_depth_engine,
+    "matte": run_matte,
 }
 
 # --- COLMAP stage parsing --------------------------------------------------- #
@@ -330,6 +332,27 @@ def _parse_depth(job: Job, line: str) -> None:
         job.current_stage = "done"
 
 
+# --- matte (去背) parsing ---------------------------------------------------- #
+# tools/sam_matte.py deliberately prints the depth stage's marker vocabulary
+# ("Images: N under …", "[i/N] …", "Done. processed=…"), so the three regexes
+# above are reused verbatim rather than re-spelled. What matte adds on top is the
+# per-image "boxes=K" count and the "[warn] no boxes" fallback tally, which are
+# the two numbers that tell you a prompt is not matching before you open a PNG.
+_MA_BOXES = re.compile(r"\bboxes=(\d+)")
+_MA_EMPTY = re.compile(r"\[warn\] no boxes")
+
+
+def _parse_matte(job: Job, line: str) -> None:
+    _parse_depth(job, line)
+    if job.current_stage == "depth":
+        job.current_stage = "matte"
+    m = _MA_BOXES.search(line)
+    if m:
+        job.meta["boxes"] = job.meta.get("boxes", 0) + int(m.group(1))
+    if _MA_EMPTY.search(line):
+        job.meta["empty"] = job.meta.get("empty", 0) + 1
+
+
 # blocksplit: collect the per-block summary lines so the job view can offer a
 # block picker (檢視/帶入訓練) once the split is done.
 _BLOCKSPLIT_LINE = re.compile(r"^\[blocksplit\] (block_\d+_\d+): .*?→ (\d+) views")
@@ -352,6 +375,7 @@ PARSERS: dict[str, Callable[[Job, str], None]] = {
     "gcs": _parse_gcs,
     "blocksplit": _parse_blocksplit,
     "depth": _parse_depth,
+    "matte": _parse_matte,
 }
 
 

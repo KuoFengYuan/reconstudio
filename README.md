@@ -196,6 +196,29 @@ LichtFeld 的 backend(MR-NF)已內建在 `pipeline/backends.py`,只要
   裝好後面板「深度/法線生成」的**引擎**選單就會出現 MoGe-3。用法見
   [二、使用 — 🌊 深度](#-深度影像--深度圖法向量圖--訓練深度法向量監督)。
 
+- **✂️ 影像去背(選用)** — SAM 前景遮罩,需要 `sam` conda env:
+
+  ```bash
+  conda create -y -n sam python=3.11
+  # 新一代顯卡(sm_120,如 RTX 50 系)要 CUDA 12.8 的 wheel
+  conda run -n sam pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+  conda run -n sam pip install opencv-python-headless
+  conda run -n sam pip install "git+https://github.com/facebookresearch/sam2.git"
+  # SAM 3 / 文字提示(Grounding DINO):
+  conda run -n sam pip install -U transformers accelerate
+  # SAM 3 的權重要先在網站上申請,核准後登入一次:
+  conda run -n sam hf auth login
+  # 驗證:應印出 True
+  conda run -n sam python -c "import torch; print(torch.cuda.is_available())"
+  ```
+
+  - **env 名字要正好是 `sam`**(跟訓練 backend 同一套 `conda_env` 解析邏輯)。
+  - 跟 `moge3` 一樣要**獨立的 env**:SAM 會固定自己的 torch 版本,面板本體沒有 torch。
+  - 權重第一次執行時從 HuggingFace 自動下載。`facebook/sam2.1-hiera-large`(SAM 2.1)和
+    `IDEA-Research/grounding-dino-base` 都是公開的;**`facebook/sam3` 是 gated**,要先到
+    <https://huggingface.co/facebook/sam3> 申請並等核准。
+  - **需要 CUDA**;沒有可用 GPU 會直接報錯,不退回 CPU。
+
 ### 從舊機器搬過來可以省的
 
 已經有一台裝好的機器時,這兩樣**直接複製比重建快**:
@@ -266,6 +289,7 @@ worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航�
 | 功能 | 訓練 | 3DGS 訓練(可開深度監督) | COLMAP workspace → 3DGS 模型 |
 | 功能 | Mesh | 模型抽三角網格,可量實際尺寸 | 3DGS 模型 → `tsdf_post.ply`(+mm 版) |
 | 工具 | 🌊 深度 | 為照片產生深度/法向量圖(LichtFeld preprocess) | 影像夾 → `depth/`、`normals/`(同名同尺寸) |
+| 工具 | ✂️ 影像去背 | 匡選要保留的物體,整夾去背 | 影像夾 → `cutout/`(RGBA)、`masks/` |
 | 工具 | 🧱 分塊 | 大場景切成可獨立訓練的子塊 | COLMAP workspace → 每塊一夾 |
 | 檢視 | 👁 Mesh Viewer | 看任意 mesh 檔(不綁 job) | `.ply/.obj/.stl/.glb`,server 或本機檔 |
 | 檢視 | ✨ SuperSplat | 看任意點雲 / 3DGS(不綁 job) | `.ply/.splat/.ksplat/.spz/.sog` |
@@ -374,7 +398,79 @@ LichtFeld backend(MR-NF)參數區有 **16-bit 色彩訓練**(`--use-16bit`)勾�
 
 接著到[訓練](#訓練重建--3dgs-模型)勾「深度損失」/「法向量損失」即可。
 
-## 🧹 去背(選用)
+## ✂️ 影像去背(照片 → 前景遮罩 / RGBA)
+
+用 SAM 把**照片本身**去背:在一張照片上**匡選要保留的物體**,整個資料夾一起處理,輸出
+
+- `cutout/` — 去背後的 **RGBA** PNG(alpha 就是遮罩)
+- `masks/` — 單通道 0/255 遮罩
+
+**輸出永遠落在你選的那個資料夾裡面**:指到 COLMAP workspace 就放在 `images/` 旁邊,
+指到一般照片夾就放在該夾之內(不會像深度那樣往上一層寫 —— 照片夾的上層通常是「別的資料集」,
+兩次執行會共用同一個 `cutout/` 而互相覆蓋)。檔名維持同相對路徑,副檔名換成 `.png`。
+**原始照片不會被改動。**
+
+> 跟下面的「🧹 點雲去背」不是同一件事:那個是訓練**之後**在 SuperSplat 裡刪點雲;
+> 這個是訓練**之前**先把照片的背景遮掉,讓 COLMAP / 訓練只看前景物件。
+
+**用法**
+
+1. 工具列 **✂️ 影像去背** → 填 `images` → 按 **⬚ 匡選物體**(照片會開在右邊的「執行」面板)。
+2. 在照片上**拖曳**框出要保留的物體。一排並列的主體就一個一個框,
+   各自的遮罩會**聯集**成同一張 alpha,一次全部保留。
+3. 用 ◀ ▶ 換影格,**在別張上再匡一次同一個物體**(見下面「多影格錨點」)。
+4. 選提示方式 → **▶ 開始去背**。
+
+匡過的影格會列成一排可點的標籤,隨時知道自己在哪幾張上標過。框左上角的號碼就是**物體編號**,
+右上角 × 刪除單一框。
+
+| 提示方式 | 適用 | 說明 |
+|---|---|---|
+| **匡選 + 追蹤傳播**(預設) | 相機會動的序列 | 匡選的影格當錨點,SAM 2 影片模式沿序列前後傳播 |
+| **匡選固定框** | 固定機位 / 轉盤 | 同一組框套用到每一張,最省算力 |
+| **文字提示** | 內容一致但構圖會變 | SAM 3 直接吃文字;SAM 2/1 會先用 Grounding DINO 把名詞變成框 |
+| **範例提示**(SAM 3) | 同類物件很多 | 框一個當範例,模型在每張裡找出所有同類 |
+| **自動偵測** | 棚拍 / 單純背景 | 不用模型,Otsu + 連通元件 |
+| **整張當一個框** | 單一主體滿版 | 不需匡選 |
+
+**多影格錨點(提高追蹤準確度)**:追蹤是從錨點影格用記憶注意力往外傳播,只有一個錨點時,
+遇到遮擋或視角大幅變化就會飄。**每多匡一張就多一個錨點**,兩個錨點之間的影格會被兩側一起修正
+—— 建議在序列的**頭、中、尾**各匡一次。框上的號碼就是物體編號:A 影格的第 1 框和 C 影格的第 1 框
+會被當成同一個物體,所以畫的順序有意義。
+
+**混合尺寸與 EXIF 方向**:影片模式吃的是「影片」,SAM 2 會把整段序列統一成第一張的幾何,
+所以這裡**依影像尺寸分組,每種尺寸各跑一次追蹤**。直式與橫式混在一起時,
+直式那組要自己也匡一張,否則會依 `--on-empty` 處理並在 log 明確警告(不會拿橫式的遮罩硬塞)。
+另外 `cv2` 會套用 EXIF 旋轉、SAM 2 的讀圖不會,所以帶旋轉標籤的 JPEG 會先烤成正確方向再送進追蹤
+—— 少了這步,遮罩會**看起來很合理但整個轉了 90°**,而且不會報錯。
+
+**模型**:預設 **SAM 3**(`facebook/sam3`)。要注意兩件事:
+
+- `facebook/sam3` 在 HuggingFace 是**需要人工審核的 gated repo**。先到
+  <https://huggingface.co/facebook/sam3> 同意條款,核准後在這台機器登入一次
+  (`conda run -n sam hf auth login`,或設 `HF_TOKEN`)。還沒核准就選 **SAM 2.1**——
+  它沒有 gating,框提示的品質一樣好。
+- **匡選 + 追蹤傳播**這個模式一律走 SAM 2.1 的影片模式(選這個模式時模型選單會**變灰**):
+  SAM 3 的影片工作階段會把整段序列一次載進記憶體(每張都放大到 1024²),幾百張 4K 會爆;
+  SAM 2 的是從磁碟逐張讀。想真的用 SAM 3 就選「**範例提示**」—— 它每張獨立推論,
+  不需要影片工作階段,也就是 SAM 3 官方示範的那個模式。
+
+**看結果**:跑完在 job 面板按 **🖼 檢視去背結果**(或表單裡的同名連結)開一個獨立頁面 ——
+透明格 / 白 / 黑 / 綠底可切換(白底看暗邊、黑底看亮邊、綠底是經典去背檢查),
+點縮圖放大,放大時**空白鍵**在「去背後 / 原圖」之間切換。頁首會標出有幾張照片沒有對應的
+cutout —— 提示詞中途對不上時,這個數字比翻 PNG 早得多。
+
+**接到後面的流程**
+
+- COLMAP 的 `MASKS_DIR` 填 **`cutout/`** —— 遮罩階段跑 `image_undistorter` 之後讀的是
+  **alpha 通道**,所以必須是 RGBA,不是 `masks/`。
+- 訓練器的 `--masks` 吃 **`masks/`**。
+
+**邊緣**:預設 `erode 1` + `feather 2`。先內縮再羽化,是因為去背的黑邊多半不是遮罩畫錯,
+而是邊緣那圈半透明像素的 RGB 其實還是**背景色**;內縮讓漸層落在前景像素上,再加上把前景
+顏色往外擴散的修正,黑邊就不會出現。
+
+## 🧹 點雲去背(選用)
 
 訓練完按 **🧹 在 SuperSplat 去背景** → 內嵌編輯器載入訓練好的點雲:
 
@@ -504,6 +600,9 @@ pipeline/     領域層(torch-free,shell out 到外部工具)
 | `pipeline/colmap/` | `_run`(orchestrator:stages、sentinels)· `_layout`(版面偵測)· `_resize`(並行縮圖)· `_gps`(EXIF GPS 讀取 JPEG+TIFF、pose prior 注入) |
 | `pipeline/frames.py` / `train.py` | 抽幀去模糊 / 訓練 + mesh(+ChArUco mm 縮放) |
 | `pipeline/depth.py` / `moge3.py` | 深度/法向量的兩種引擎:LichtFeld `preprocess`(MoGe-2)/ PyTorch MoGe-3;`jobs._run_depth_engine` 依 `engine` 參數分派 |
+| `pipeline/matte.py` / `tools/sam_matte.py` | ✂️ 影像去背:面板側(torch-free,解析 `sam` env + 組 argv)/ 在 `sam` env 裡跑的 SAM 批次推論(bbox 批次提示、遮罩聯集、RGBA 輸出);多加一種 SAM 變體 = 多一個 runner class |
+| `pipeline/matte_encode.py` | 去背的純 numpy 數學(框整理、聯集、形態學/羽化、前景顏色外擴);同樣刻意不含 torch/cv2,`sam` env 與 CI 都能載入 |
+| `web/routers/matte.py` | 匡選用的影格瀏覽 fragment(框以**相對比例**存進表單隱藏欄位) |
 | `pipeline/moge3_encode.py` | 兩引擎共用的 PNG 編碼(LichtFeld `build_depth_png`/`build_normals_png` 的移植);刻意不含 torch/cv2,好讓 `tools/moge3_preprocess.py` 在 `moge3` env 裡與測試在 CI 裡都能載入 |
 | `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor()` 總報告 |
 | `pipeline/preflight.py` | 系統層檢查(ffmpeg + blurdetect / 磁碟可寫 / cudnn / gsutil / local.env 失效變數);每項回同一個 `{status, label, value, detail, hint}` 形狀,兩個 renderer 共用 |

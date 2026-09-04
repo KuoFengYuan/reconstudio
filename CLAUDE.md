@@ -34,7 +34,7 @@ health-checks. Keep new heavy dependencies behind a subprocess boundary or a laz
 **Layers**, outermost first:
 
 - `app.py` — app factory only: build FastAPI, mount static, start the job manager, include routers.
-- `web/routers/` — HTTP handlers returning htmx fragments (`pages`, `browse`, `create`, `jobs`, `viz`, `viewer`, `measure`, `doctor`).
+- `web/routers/` — HTTP handlers returning htmx fragments (`pages`, `browse`, `create`, `jobs`, `viz`, `viewer`, `measure`, `matte`, `doctor`).
 - `web/services/` — pure request-side logic: `forms.py` (form → validated params), `models.py` (job → filesystem paths). HTTP concerns like 404s stay in the routers.
 - `web/shared.py` — the Jinja handle, `_page()`, and the UPPERCASE form-prefill defaults that mirror the pipeline defaults.
 - `jobs.py` — `JobManager` (queue, workers, cancel/delete), the `RUN_FUNCS` kind→function dispatch, and the per-kind log parsers.
@@ -95,6 +95,52 @@ imported from that env.
 The depth stage is **non-destructive**: it only creates `depth/`/`normals/` next to
 `images/` and never touches the source images. That convention holds across the pipeline.
 
+**Background removal (`matte`) follows the depth stage's shape, with three
+deliberate differences.** `pipeline/matte.py` (torch-free) resolves the `sam`
+conda env and shells out to `tools/sam_matte.py`; the pure maths lives in
+`pipeline/matte_encode.py` (numpy only, loadable both from the foreign env and
+from CI, like `moge3_encode.py`) and is pinned by `tests/test_matte_encode.py`.
+The differences:
+
+1. **Outputs land inside the folder you picked** (`resolve_matte_dataset`), not
+   beside it. `depth.resolve_dataset` returns the PARENT for a loose photo
+   folder because LichtFeld scans for `depth/` next to `images/`; nothing
+   downstream requires that here, and the parent of a photo folder is usually a
+   folder of *other* datasets that would then share one `cutout/`.
+2. **Two output folders, and which one a consumer wants is not obvious.**
+   COLMAP's `MASKS_DIR` needs `cutout/` — `_stage_undistort` runs
+   `image_undistorter` and then `large_scene.make_mask_uint8`, which reads the
+   **alpha channel**, so 4-channel PNGs. Trainers' `--masks` needs the
+   single-channel `masks/`.
+3. **A new SAM variant is a new `MaskRunner` subclass** plus one line in
+   `build_runner()`. Everything version-specific — package name, checkpoint
+   format, prompt encoding, output layout — stays inside the subclass;
+   `masks_for_boxes()` takes an `(N, 4)` array as its only shape so that
+   "one `set_image`, one batched decode" cannot be written wrong.
+
+Three failure modes in this stage are silent — they produce a valid PNG that is
+simply wrong — so each has a guard and a test rather than a comment:
+
+- **Edge colour.** A feathered alpha leaves the *background's* RGB under the
+  semi-transparent band, which composites as the dark fringe people blame on the
+  segmentation. `compose_rgba` bleeds foreground colour outward first, and runs
+  the diffusion until the band is covered rather than for a fixed count (a fixed
+  count leaves the outermost, most visible rim un-bled).
+- **EXIF orientation.** `cv2.imread` applies it, PIL does not, and SAM 2's video
+  reader is PIL — so a rotated JPEG is tracked sideways and every mask comes back
+  turned 90° against the photo it is composited onto. `_image_size` reports the
+  cv2-visible size and `_stage_jpegs` bakes the rotation in rather than
+  symlinking.
+- **Mixed geometry.** SAM 2's video predictor takes a *video*: it resizes the
+  sequence to the first frame's shape. `run_track` therefore groups frames by
+  size and runs one session per group; a group with no box of its own is
+  reported, never inferred from another group's masks.
+
+`SKIP_DIR_NAMES` (this tool's outputs plus COLMAP's subtrees) is duplicated in
+`pipeline/matte.py` and `matte_encode.py` — the first cannot import numpy, the
+second cannot be imported from the `sam` env — and the two are pinned equal by a
+test.
+
 **`_stage_undistort` sanitizes EXIF before every `image_undistorter` call** (both the
 image pass and, when `MASKS_DIR` is set, the masks pass). Canon bodies write
 empty-string `Artist`/`Copyright` tags rather than omitting them; OIIO 2.4.17's
@@ -118,6 +164,13 @@ skip/sentinel/error paths.
 When a test asserts the *absence* of a flag, also add one that asserts its presence when
 enabled — an absence-only test passes even if the feature was never implemented.
 
+`tests/test_matte_template.py` is the one suite that reads `templates/`. The box
+picker is plain JS in `index.html`, where a stale copy of a helper is not a
+syntax error anywhere — it just wins hoisting and silently replaces the live one
+(which is how the picker once drew nothing while reporting "0 框"). It also pins
+the form's `<option>` values against the pipeline's accepted values, since those
+two lists live in different files.
+
 `pipeline/vendor/` and `tools/colmap_read_write_model.py` are vendored and excluded from
 lint.
 
@@ -133,3 +186,8 @@ lint.
   that density — it is the house style, not decoration.
 - New endpoint → add a handler in `web/routers/`. New training backend → edit
   `backends.json`, not code. New setting → add a field to `pipeline/config.py`.
+- New job kind → a `run_*` in `pipeline/`, exported from `pipeline/__init__.py`,
+  registered in `jobs.RUN_FUNCS` **and** `jobs.PARSERS`, a `POST /ui/<kind>` in
+  `web/routers/create.py`, a branch in `templates/_jobstatus.html`, and a form +
+  toolbar button in `templates/index.html` (whose `showForm` list must gain the
+  name). `matte` is the most recent worked example of all six.
