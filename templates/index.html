@@ -158,18 +158,52 @@
   .tabs.steps .tabrow + .tabrow { border-top:1px dashed var(--line); padding-top:4px; }
   .tabs.steps .lbl { flex:none; color:var(--mut); font-size:11px; padding:6px 7px 0 5px;
                      letter-spacing:2px; user-select:none; }
-  .tabs.steps .tabrow.tools button,
-  .tabs.steps .tabrow.viewer button { flex:0 1 auto; padding:6px 10px; }
-  /* 檢視 row has 4 buttons now (圖片/Mesh Viewer/量測/SuperSplat) — a plain flex-wrap
-     ragged-wraps them unevenly at typical sidebar widths, so lay this row out as an
-     explicit 2-column grid instead: always a tidy 2x2, buttons filling their cell. */
+  /* Every row's buttons size to their own text. The base rule's flex:1 shares the
+     row out evenly, which is fine on one line but makes a WRAPPED button stretch
+     to the full width on its own. */
+  .tabs.steps .tabrow button { flex:0 1 auto; padding:6px 10px; }
+  /* Rows that hold more buttons than fit on one line get an explicit grid rather
+     than flex-wrap: wrapping leaves a ragged tail (功能's sixth entry orphaned
+     alone on line two, 檢視 breaking 3+1), while a fixed column count always
+     lands as full, even rows. 功能 = 6 -> 3x2, 檢視 = 4 -> 2x2. */
+  .tabs.steps .tabrow.features .tabbtns { display:grid; grid-template-columns:repeat(3, 1fr); }
   .tabs.steps .tabrow.viewer .tabbtns { display:grid; grid-template-columns:repeat(2, 1fr); }
+  .tabs.steps .tabrow.features button,
   .tabs.steps .tabrow.viewer button { text-align:center; }
+  /* ---- 融合 (fusion): its own type scale ----------------------------------
+     This form has to TEACH a two-pass capture workflow, not just collect two
+     paths, so it opts out of the 11px .hint scale the rest of the sidebar uses
+     for terse one-liners — at 11px the explanation reads as noise to skip. */
+  #form-fusion .hint, .fu-panel .hint { font-size:12.5px; line-height:1.65; }
+  .fu-lead { font-size:13px; line-height:1.7; color:var(--fg); margin-bottom:10px; }
+  .fu-steps { margin:0 0 12px; padding-left:0; list-style:none; counter-reset:fu; }
+  .fu-steps li { position:relative; padding:0 0 7px 26px; font-size:12.5px;
+                 line-height:1.65; color:var(--fg); counter-increment:fu; }
+  .fu-steps li::before { content:counter(fu); position:absolute; left:0; top:1px;
+    width:18px; height:18px; border-radius:50%; background:var(--accent); color:#0a0c10;
+    font-size:11px; font-weight:700; text-align:center; line-height:18px; }
+  .fu-steps li.done::before { content:"✓"; background:var(--ok); }
+  .fu-field { margin-top:12px; }
+  .fu-field > label { display:block; font-size:12.5px; font-weight:600; margin-bottom:3px; }
+  /* What the pasted path resolved to, filled in by fuPreview() as you type: the
+     inputs are far too narrow for these paths, so the tail — which is the part
+     that says WHICH capture this is — would otherwise be invisible. */
+  .fu-derived { font-size:12px; margin-top:3px; min-height:16px; color:var(--mut); }
+  .fu-derived b { color:var(--ok); }
+  .fu-derived.bad { color:var(--err); }
+  .fu-why { margin-top:10px; border:1px solid var(--line); border-radius:8px;
+            padding:7px 9px; background:var(--bg); }
+  .fu-why summary { cursor:pointer; font-size:12.5px; font-weight:600; color:var(--accent); }
+  .fu-why .hint { margin-top:6px; }
+  .fu-tree { font:12px/1.6 ui-monospace,monospace; color:var(--mut); margin-top:6px;
+             white-space:pre; overflow-x:auto; }
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.6); display:none; align-items:center; justify-content:center; }
   .modal.open { display:flex; }
   .modal .box { background:var(--panel); border:1px solid var(--line2); border-radius:12px;
                 width:560px; max-height:70vh; overflow:auto; padding:15px; box-shadow:0 12px 40px rgba(0,0,0,.5); }
   .hint { color:var(--mut); font-size:11px; line-height:1.4; margin-top:2px; }
+  #matte_pick_spin.htmx-request { display:block !important; }
+  #matte_pick_btn.htmx-request { opacity:.6; pointer-events:none; }
   .empty { color:var(--mut); padding:30px; text-align:center; border:1px dashed var(--line2);
            border-radius:12px; background:var(--panel); }
 </style>
@@ -351,12 +385,13 @@
   <!-- ============================= left: forms ============================= -->
   <div class="col left">
     <div class="tabs steps">
-      <div class="tabrow">
+      <div class="tabrow features">
         <span class="lbl">功能</span>
         <div class="tabbtns">
           <button class="ghost active" id="t-gcs" onclick="showForm('gcs')">☁️ 資料</button>
           <button class="ghost" id="t-frames" onclick="showForm('frames')">抽幀</button>
           <button class="ghost" id="t-colmap" onclick="showForm('colmap')">COLMAP</button>
+          <button class="ghost" id="t-fusion" onclick="showForm('fusion')">融合</button>
           <button class="ghost" id="t-train" onclick="showForm('train')">訓練</button>
           <button class="ghost" id="t-mesh" onclick="showForm('mesh')">Mesh</button>
         </div>
@@ -691,6 +726,7 @@
           <div class="hint mhint" data-m="both">both = sequential + vocab(預設):連續性 + 外觀迴圈閉合,最穩。</div>
           <div class="hint mhint" data-m="spatial">spatial = 用 GPS 鄰近度限制比對候選,適合大場景空拍 / 掃街(需每張帶 EXIF GPS)。</div>
           <div class="hint mhint" data-m="custom">custom = hierarchical-3D-Gaussians 的自訂配對:連續 + 二次方步距 + loop closure + GPS 鄰近,產生明確配對表後用 matches_importer 匯入。適合「有序、超大量、多相機 rig」的大場景(比對數遠少於 exhaustive)。建議搭配 MAPPER=hierarchical。</div>
+          <div class="hint mhint" data-m="exhaustive">exhaustive = <b>每一對都比</b>,不做檢索篩選。配對數是 n(n−1)/2(1000 張 ≈ 50 萬對),所以只適合幾千張以內。<b>什麼時候非它不可</b>:一批照片裡有兩群、群內相似度遠高於跨群相似度時(例如同一件物件先正擺拍一輪、再倒擺拍底面),vocab / sequential 的檢索名額會全部給同群鄰居,那少數幾對「把兩半縫起來」的跨群配對根本不會被嘗試 —— 只有 exhaustive 保證試過。</div>
           <!-- 參數:只顯示所選 matcher 用得到的 -->
           <div class="mgrp" data-m="seq_overlap">
             <div class="prow">
@@ -999,9 +1035,35 @@
             </label>
             <div class="pctl"><input id="cm_masks_dir" name="MASKS_DIR" value="{{ colmap_defaults.MASKS_DIR }}" placeholder="留空 = 不用遮罩"></div>
           </div>
-          <div class="fhint" id="h_cm_masks_dir">要做「只重建前景物件、去掉背景」時才填。填放遮罩的資料夾,
-            會用<b>同一組相機參數</b>把遮罩一起去畸變(不然遮罩會對不上去畸變後的影像),輸出到
-            <code>&lt;out&gt;_*_mapper/masks</code>,訓練時再搭配 LichtFeld 的「遮罩模式」。一般整場景重建留空。</div>
+          <div class="fhint" id="h_cm_masks_dir">要做「只重建前景物件、去掉背景」時才填。填去背輸出的
+            <code>no_bg/masks/</code>(<b>單通道</b>那包;填 <code>no_bg/cutout/</code> 會自動改用旁邊的
+            <code>masks/</code>)。會用<b>同一組相機參數</b>把遮罩一起去畸變(不然遮罩會對不上去畸變後的影像),
+            輸出到 <code>&lt;out&gt;_*_mapper/masks</code>,訓練時再搭配 LichtFeld 的「遮罩模式」。一般整場景重建留空。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_mask_features"><span class="ptext">遮罩也用在抽特徵</span>
+              <span class="info" onclick="togHint(event,'h_cm_mask_features')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_mask_features" name="MASK_FEATURES" value="1" {{ 'checked' if colmap_defaults.MASK_FEATURES=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_mask_features">預設<b>關</b>。關的時候遮罩只用在去畸變那一步,
+            背景照樣抽特徵、照樣參與解算 —— 整場景重建就該這樣。<b>開</b>了之後只有遮罩內的主體會約束解算,
+            這是<b>單一物件</b>重建才要的:例如同一件東西先正擺拍一輪、再倒擺拍底面,
+            物件被搬動過,房間跟物件之間就不是剛體關係,背景特徵只會給出錯誤的約束。
+            開這個要同時填 MASKS_DIR。另外遮罩和影像必須是<b>同一個長邊</b>,
+            所以上面的「影像解析度」要設成「保持原樣」(或用同一個長邊重跑去背)—— 對不上會直接報錯。</div>
+          <div class="prow">
+            <label class="plabel" for="cm_cutout_images"><span class="ptext">輸出的照片也去背</span>
+              <span class="info" onclick="togHint(event,'h_cm_cutout_images')" title="說明">?</span>
+            </label>
+            <div class="pctl"><input type="checkbox" id="cm_cutout_images" name="CUTOUT_IMAGES" value="1" {{ 'checked' if colmap_defaults.CUTOUT_IMAGES=='1' }}></div>
+          </div>
+          <div class="fhint" id="h_cm_cutout_images">預設<b>關</b>。關的時候
+            <code>&lt;out&gt;_*_mapper/images/</code> 是<b>有背景</b>的去畸變原圖,遮罩另外放在旁邊的
+            <code>masks/</code> —— 吃遮罩的訓練器要的就是這樣。<b>開</b>了之後會拿那包遮罩
+            <b>就地把 images/ 的背景塗黑</b>,給只讀 <code>images/</code> 的訓練器/檢視/Mesh 用。
+            會覆蓋原圖 —— 要拿回有背景的版本就 FORCE=1 重跑去畸變。
+            (JPEG 邊緣會有一點壓縮殘影,背景不是數學上的純黑;吃遮罩的訓練器不受影響。)
+            要同時填 MASKS_DIR。</div>
         </div>
       </details>
 
@@ -1086,6 +1148,70 @@
       </div>
       {% if pr.hint %}<div class="fhint" id="h_{{ fid }}">{{ pr.hint }}</div>{% endif %}
     {% endmacro %}
+
+    <!-- ----- 融合 form: two matted passes of one subject -> one COLMAP input -----
+         Only stages the links, then prefills the COLMAP form above; it has no
+         COLMAP options of its own on purpose (see web/routers/fusion.py). -->
+    <form id="form-fusion" style="display:none" hx-post="/ui/fusion/prepare"
+          hx-target="#main" hx-swap="innerHTML">
+      <fieldset>
+        <legend>融合(兩輪拍攝 → 一個 COLMAP)</legend>
+        <div class="fu-lead">一件物件立著拍,<b>拍不到底面</b>;翻過來再拍一輪就補得到。
+          這裡把兩輪合成 <b>一個</b>完整模型。</div>
+
+        <ol class="fu-steps">
+          <li>兩輪各自跑一次 <b>✂️ 影像去背</b>,<b>解析度要選同一個長邊</b>(例如都 2560)。</li>
+          <li>下面各填一組去背產生的 <code>no_bg</code> 資料夾。</li>
+          <li>按 <b>整理並檢查</b> —— 會告訴你每組幾張照片、幾張遮罩、對不對得上。</li>
+          <li>按 <b>帶入 COLMAP 表單</b>,參數照你原本的用法調,再送出。</li>
+        </ol>
+
+        <details class="fu-why">
+          <summary>為什麼一定要先去背?</summary>
+          <div class="hint">因為物件<b>在兩輪之間被搬動過</b>。房間沒有動、物件動了,
+            所以房間跟物件之間不是剛體關係 —— 背景特徵會叫 COLMAP 去解一個不存在的幾何,
+            兩輪也就對不起來。把背景遮掉之後,整批照片只由物件本身的表面約束,
+            「正擺/ 倒擺」在數學上就不再是兩件事,而是同一個物件的 1000 多個視角。
+            這也是為什麼這裡收的是<b>去背結果</b>而不是照片資料夾。</div>
+        </details>
+
+        <div class="fu-field">
+          <label for="fu_a">第 1 組(例:正擺)的 <code>no_bg</code> 資料夾</label>
+          <div class="row">
+            <input name="input_a" id="fu_a" oninput="fuPreview('a')"
+                   placeholder="…/images_2560/no_bg" required>
+            <button type="button" class="ghost" onclick="openPicker('fu_a')">瀏覽</button>
+          </div>
+          <div class="fu-derived" id="fu_a_out"></div>
+        </div>
+
+        <div class="fu-field">
+          <label for="fu_b">第 2 組(例:倒擺)的 <code>no_bg</code> 資料夾</label>
+          <div class="row">
+            <input name="input_b" id="fu_b" oninput="fuPreview('b')"
+                   placeholder="…/images_2560/no_bg" required>
+            <button type="button" class="ghost" onclick="openPicker('fu_b')">瀏覽</button>
+          </div>
+          <div class="fu-derived" id="fu_b_out"></div>
+        </div>
+        <div class="hint">填 <code>no_bg</code> 就夠 —— 照片是它的上一層、遮罩是它底下的
+          <code>masks/</code>,都會自動推出來(填上一層或 <code>no_bg/masks</code> 也認)。</div>
+
+        <div class="fu-field">
+          <label for="fu_out">融合輸出資料夾 <span style="font-weight:400;color:var(--mut)">(可留空)</span></label>
+          <div class="row">
+            <input name="out_dir" id="fu_out" placeholder="留空 = 兩組的共同上層底下開一個 fusion/">
+            <button type="button" class="ghost" onclick="openPicker('fu_out')">瀏覽</button>
+          </div>
+          <div class="fu-tree">fusion/
+├─ images/&lt;每組&gt;   → 連到各組照片
+├─ masks/&lt;每組&gt;    → 連到各組 no_bg/masks
+└─ colmap/          ← COLMAP 結果寫在這</div>
+          <div class="hint">都是 symlink,不複製檔案,原始資料夾不會被動到。</div>
+        </div>
+      </fieldset>
+      <button type="submit">整理並檢查 →</button>
+    </form>
 
     <!-- ----- depth/normal form (LichtFeld-Studio `preprocess` -> depth/ + normals/) ----- -->
     <form id="form-depth" style="display:none" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
@@ -1187,9 +1313,11 @@
           <button type="button" class="ghost" onclick="openPicker('matte_images')">瀏覽</button>
           <button type="button" class="ghost" id="matte_pick_btn"
                   hx-get="/ui/matte_pick" hx-include="#matte_images"
-                  hx-target="#main" hx-swap="innerHTML"
+                  hx-target="#main" hx-swap="innerHTML" hx-indicator="#matte_pick_spin"
                   onclick="mpOpen()">⬚ 匡選物體</button>
         </div>
+        <div id="matte_pick_spin" class="hint" style="display:none">⏳ 載入中…
+          第一次開 HEIC 資料夾要先轉成 JPEG,大量照片可能要等一兩分鐘。</div>
         {# Only a summary lives in the form column — the picker itself opens in the
            執行 panel on the right, which is the only place a photo is big enough
            to place a box on. #}
@@ -1246,6 +1374,17 @@
           幾百張 4K 會吃光 RAM;SAM 2 的是從磁碟逐張讀。
           <b>想真的用 SAM 3 就選「範例提示」</b> —— 它每張獨立推論,不需要影片工作階段。</div>
 
+        <label>解析度(去背前先縮小)</label>
+        <select name="resize" id="matte_resize" {{ '' if matte_ready else 'disabled' }}>
+          <option value="keep" {{ 'selected' if matte_defaults.resize == 'keep' }}>保持原樣(用原始解析度去背)</option>
+          <option value="1920" {{ 'selected' if matte_defaults.resize == '1920' }}>等比縮小 — 長邊 ≤ 1920(FullHD)</option>
+          <option value="2560" {{ 'selected' if matte_defaults.resize == '2560' }}>等比縮小 — 長邊 ≤ 2560(近似 2K)</option>
+          <option value="4096" {{ 'selected' if matte_defaults.resize == '4096' }}>等比縮小 — 長邊 ≤ 4096(近似 4K)</option>
+        </select>
+        <div class="hint">縮小後的複本存在 <code>images_&lt;長邊&gt;/</code>(跟 COLMAP 的縮圖選項同一套命名),
+          去背結果也在那個資料夾底下的 <code>no_bg/</code> —— 之後要接 COLMAP/訓練,瀏覽時選這個子資料夾即可。
+          不同解析度各自存一份,不會互相覆蓋;原始照片不受影響。</div>
+
         <label>輸出</label>
         <select name="outputs" {{ '' if matte_ready else 'disabled' }}>
           <option value="cutout,masks">cutout/(RGBA)+ masks/(0/255)</option>
@@ -1253,8 +1392,8 @@
           <option value="masks">只要 masks/(單通道遮罩)</option>
         </select>
         <div class="hint">兩包都寫在 <code>no_bg/</code> 底下,不會散在照片旁邊。COLMAP 的
-          <code>MASKS_DIR</code> 要填 <code>no_bg/cutout/</code> —— 遮罩階段讀的是 <b>alpha 通道</b>,
-          所以必須是 RGBA;訓練器的 <code>--masks</code> 則吃 <code>no_bg/masks/</code>。</div>
+          <code>MASKS_DIR</code> 和訓練器的 <code>--masks</code> 都吃 <code>no_bg/masks/</code>
+          (單通道那包);<code>cutout/</code> 是給人看和給別的工具用的。</div>
 
         <label>GPU</label>
         <select name="gpu" {{ '' if matte_ready else 'disabled' }}>
@@ -1711,7 +1850,7 @@
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
   function showForm(which){
-    ['frames','colmap','blocksplit','depth','matte','train','mesh','gcs','gallery','viewer','measure','supersplat'].forEach(function(k){
+    ['frames','colmap','fusion','blocksplit','depth','matte','train','mesh','gcs','gallery','viewer','measure','supersplat'].forEach(function(k){
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
@@ -2361,6 +2500,49 @@
     var l = document.getElementById('layout');
     if (l) l.value = 'auto';     // auto-detect handles the nested <group>/frames_<video>/ layout
     window.scrollTo(0, 0);
+  }
+  // 融合: echo back what a pasted path resolved to. The inputs are a fraction of
+  // these paths' length, so the tail — the part that says WHICH capture this is —
+  // is exactly what you cannot see while checking you picked the right two. Mirrors
+  // pipeline/fusion.resolve_pass; the server re-derives it and stays authoritative.
+  function fuPreview(which){
+    var el = document.getElementById('fu_' + which);
+    var out = document.getElementById('fu_' + which + '_out');
+    if (!el || !out) return;
+    var parts = el.value.trim().replace(/\/+$/, '').split('/').filter(Boolean);
+    if (!parts.length) { out.textContent = ''; out.classList.remove('bad'); return; }
+    var i = parts.lastIndexOf('no_bg');
+    if (i < 0) {                                  // maybe they picked the folder above
+      i = parts.length;
+      out.classList.add('bad');
+      out.innerHTML = '這個路徑裡沒有 <code>no_bg</code> —— 確認這一組已經跑過去背';
+      return;
+    }
+    out.classList.remove('bad');
+    // the capture's name: the dataset folder, skipping an images_<n>/images level
+    var imgs = parts[i - 1] || '';
+    var name = (/^images/.test(imgs) ? parts[i - 2] : imgs) || '?';
+    out.innerHTML = '這組會叫做 <b>' + name + '</b>(照片在 <code>' + (imgs || '?') +
+                    '/</code>,遮罩在 <code>no_bg/masks/</code>)';
+  }
+  // 融合 -> the ordinary COLMAP form. Only the four settings a fused capture cannot
+  // be run without are forced (see _fusion_ready.html for why each one); everything
+  // else stays at whatever the user's COLMAP form already says, because the point of
+  // the 融合 tab is to stage the folders, not to become a second COLMAP form.
+  function fillFusionColmap(imagesRoot, masksRoot, workspace, singleCamera){
+    fillColmap(imagesRoot, workspace);          // switches tab + sets root/workspace/layout
+    var set = function(id, v){ var e = document.getElementById(id); if (e) e.value = v; };
+    set('cm_masks_dir', masksRoot);
+    set('cm_resize', 'keep');                   // masks were made at THIS size
+    set('cm_camera_mode', singleCamera ? 'single' : 'per_folder');
+    var m = document.getElementById('matcher-sel');
+    if (m) { m.value = 'vocab'; syncMatcher(); }   // exhaustive is the fallback, not the default
+    var mf = document.getElementById('cm_mask_features');
+    if (mf) mf.checked = true;                  // the background must not reach the solve
+    var ci = document.getElementById('cm_cutout_images');
+    if (ci) ci.checked = true;                  // a single object: images/ should be cut out too
+    var rig = document.getElementById('cm_rig_enable');
+    if (rig) rig.checked = false;               // two sequential passes share no exposure
   }
   function loadJob(id){
     showTab('run', document.querySelector('.col:last-child > .tabs button'));

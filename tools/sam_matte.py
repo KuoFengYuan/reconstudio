@@ -35,6 +35,7 @@ import json
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -414,6 +415,48 @@ class Sam2Runner(MaskRunner):
                                          box=box, multimask_output=False)
         return _as_nhw(masks, self._hw)
 
+    def masks_for_image_batch(self, rgbs, boxes_per_image):
+        """One encoder pass for N *photos* — `masks_for_boxes` batches boxes
+        within one photo, this batches the photos themselves.
+
+        `set_image_batch` + `predict_batch` is the only across-images path SAM 2
+        offers, and it is worth having because the encoder is ~95 % of the cost
+        and a single 1024² frame does not fill this GPU. Mixed sizes are fine:
+        the predictor keeps each entry's own original (h, w) and un-normalises
+        each box list against it, which is why the boxes stay in each photo's
+        own pixel frame here.
+
+        MEASURED, because "plausible but silently misplaced" is the failure this
+        file fears most (RTX PRO 6000, sam2.1-hiera-large, bf16 autocast, real
+        3475×4633 frames + resized portrait/landscape copies):
+
+        * Geometry is right. Batches of 2-3 — including ones deliberately mixing
+          portrait, landscape and a second resolution — come back **bit-identical**
+          to the one-at-a-time path, so nothing is being transformed against the
+          wrong entry's shape. The one-at-a-time path is itself reproducible
+          run-to-run (diff = 0), so that comparison means something.
+        * From 4 photos up, masks differ **at the boundary only**: worst IoU
+          ~0.97, and of the ~15-31 k differing pixels per 16 MP frame, only
+          125-234 sit more than 3 px from the mask edge. After the pipeline's own
+          `--erode 1 --feather 2`, mean |Δalpha| is ~0.001-0.002. That is batched
+          matmul reduction order in bf16 flipping pixels whose logit sits on the
+          0.0 threshold — inherent to batched GPU inference, an order of magnitude
+          smaller than the feather it then passes through, and neither version is
+          "the correct one". `--image-batch 1` restores bit-reproducibility.
+
+        Returns one (N_boxes, h, w) bool array per input photo, in order.
+        """
+        import torch
+        with torch.inference_mode(), torch.autocast(self.device.type, dtype=self.dtype):
+            self.p.set_image_batch(list(rgbs))
+            masks, _, _ = self.p.predict_batch(
+                point_coords_batch=None, point_labels_batch=None,
+                box_batch=list(boxes_per_image), multimask_output=False)
+        # strict: one mask set per photo, or the pairing below would silently
+        # attach a photo's masks to a different photo's geometry.
+        return [_as_nhw(m, rgb.shape[:2])
+                for m, rgb in zip(masks, rgbs, strict=True)]
+
 
 class Sam1Runner(MaskRunner):
     """Original segment-anything. Batched boxes go through `predict_torch`.
@@ -563,6 +606,21 @@ def build_runner(engine: str, model: str, checkpoint: str, device, dtype,
 # --------------------------------------------------------------------------- #
 # per-image inference, with the OOM ladder
 # --------------------------------------------------------------------------- #
+def refine_boxes(args, boxes, scores, w: int, h: int):
+    """The filter chain every box source feeds through, in the one order that is
+    correct: clip to the frame, drop specks, de-duplicate overlaps, then (opt-in)
+    keep only the row. Shared by the one-at-a-time loop and the batched one so
+    the two cannot drift into producing different boxes for the same photo."""
+    boxes = _enc.clip_boxes(boxes, w, h)
+    boxes = _enc.filter_small(boxes, args.min_area, w, h)
+    if len(boxes) > 1:
+        boxes = _enc.suppress_overlaps(
+            boxes, scores if scores is not None and len(scores) == len(boxes) else None)
+    if args.row_filter:
+        boxes = _enc.select_row_boxes(boxes)
+    return boxes
+
+
 def masks_in_chunks(runner: MaskRunner, boxes, chunk: int, hw):
     """Decode the boxes in groups, halving the group on CUDA OOM.
 
@@ -621,6 +679,116 @@ def finish_image(rgb, mask, args, dataset_root: Path, image: Path, images_dir: P
 def outputs_present(args, dataset_root: Path, image: Path, images_dir: Path) -> bool:
     return all(output_path_for(dataset_root, folder, image, images_dir).is_file()
                for folder in args.outputs)
+
+
+def default_write_workers() -> int:
+    """A polite CPU-count cap, like pipeline.config.resolved_resize_workers.
+
+    Capped well below the core count on purpose: the numpy half of the write is
+    single-threaded (so threads help), but cv2's decode/encode is ALREADY
+    internally multi-threaded, and one pool thread per core would have the two
+    fighting each other for the same cores plus the memory bandwidth. Eight
+    covers most of the win; --write-workers raises it for very large photos.
+    """
+    import os
+    return max(1, min(os.cpu_count() or 8, 8))
+
+
+class WriteFanout:
+    """`finish_image` across a thread pool — where a run actually spends its time.
+
+    Measured on a 3475×4633 iPhone frame: SAM's own work is a few hundred ms,
+    while writing that frame out is ~5.3 s — 4.3 s of it inside `compose_rgba`'s
+    colour bleed, which is single-threaded numpy. Multiply by a few hundred
+    frames and the GPU is idle for the better part of an hour. Every photo's
+    write is independent (one frame in, its own two PNGs out) and both halves
+    release the GIL (cv2 decode/encode, numpy elementwise), so threads scale it
+    nearly linearly.
+
+    Two things this owns deliberately:
+
+    * **The image read.** Workers re-read the frame from disk rather than having
+      the caller hand over the decoded array. A decode is ~0.1 s against ~5 s of
+      compositing, and keeping pixels out of the queue is what bounds memory to
+      `workers` frames instead of "however far the GPU has run ahead" — the
+      producer is 10-20x faster than the writers, so an unbounded queue would
+      grow until it filled RAM.
+    * **Every `[i/N]` line.** The counter is *completion order*, not the photo's
+      index in the folder: jobs.py sets the panel's progress from whatever
+      `[i/N]` it last saw, so N threads reporting their own indices would make
+      the bar jump around. The filename on the line is what identifies a photo.
+    """
+
+    def __init__(self, args, dataset_root: Path, images_dir: Path, total: int,
+                 workers: int) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        self.args = args
+        self.dataset_root = dataset_root
+        self.images_dir = images_dir
+        self.total = total
+        self.workers = max(1, int(workers))
+        self.written = 0
+        self.skipped = 0
+        self._done = 0
+        self._error: BaseException | None = None
+        self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=self.workers,
+                                        thread_name_prefix="matte-write")
+        self._futures: list = []
+
+    # -- reporting ---------------------------------------------------------- #
+    def _emit(self, name: str, detail: str) -> None:
+        with self._lock:
+            self._done += 1
+            n = self._done
+        print(f"[{n}/{self.total}] {name}  {detail}".rstrip(), flush=True)
+
+    def note(self, image: Path, detail: str, *, skipped: bool = False) -> None:
+        """Account for a photo no write was needed for (already done, unreadable)."""
+        if skipped:
+            with self._lock:
+                self.skipped += 1
+        self._emit(image.name, detail)
+
+    # -- work --------------------------------------------------------------- #
+    def submit(self, image: Path, mask, detail: str = "") -> None:
+        self._futures.append(self._pool.submit(self._run_one, image, mask, detail))
+
+    def _run_one(self, image: Path, mask, detail: str) -> None:
+        try:
+            rgb = read_rgb(image)
+            if rgb is None:
+                self.note(image, "skip unreadable", skipped=True)
+                return
+            note = ""
+            if mask is None or not mask.any():
+                mask, note = handle_empty(self.args, rgb, None)
+                if mask is None:
+                    self.note(image, note, skipped=True)
+                    return
+            finish_image(rgb, mask, self.args, self.dataset_root, image, self.images_dir)
+            with self._lock:
+                self.written += 1
+            cover = f"cover={100.0 * float(mask.mean()):.1f}%"
+            self._emit(image.name, " ".join(x for x in (detail, cover, note) if x))
+        except BaseException as exc:                          # noqa: BLE001 — re-raised in close()
+            with self._lock:
+                if self._error is None:
+                    self._error = exc
+            raise
+
+    def close(self) -> tuple[int, int]:
+        """Drain the pool and hand back (written, skipped). Re-raises the first
+        worker failure: a half-written folder that reported success is exactly
+        the silent-partial-output failure this tool warns about elsewhere."""
+        try:
+            for f in self._futures:
+                f.result()
+        finally:
+            self._pool.shutdown(wait=True)
+        if self._error is not None:
+            raise self._error
+        return self.written, self.skipped
 
 
 # --------------------------------------------------------------------------- #
@@ -765,34 +933,236 @@ def run_track(args, dataset_root: Path, images_dir: Path, images: list[Path],
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    written = skipped = 0
+    # The tracking above is strictly sequential (memory attention conditions each
+    # frame on the last), but writing the frames out is not — and it is the
+    # slower half by an order of magnitude, so it goes wide. See WriteFanout.
+    fanout = WriteFanout(args, dataset_root, images_dir, len(images),
+                         args.write_workers or default_write_workers())
+    print(f"writing with {fanout.workers} worker(s)", flush=True)
     for i, image in enumerate(images):
         if not args.overwrite and outputs_present(args, dataset_root, image, images_dir):
-            skipped += 1
-            print(f"[{i + 1}/{len(images)}] {image.name}  skip (exists)", flush=True)
+            fanout.note(image, "skip (exists)", skipped=True)
             continue
-        rgb = read_rgb(image)
-        if rgb is None:
-            print(f"[{i + 1}/{len(images)}] skip unreadable {image.name}", flush=True)
-            continue
-        mask = per_frame.get(i)
-        if mask is None or not mask.any():
-            mask = handle_empty(args, rgb, None, i + 1, len(images), image.name)
-            if mask is None:
-                skipped += 1
-                continue
-        finish_image(rgb, mask, args, dataset_root, image, images_dir)
-        written += 1
-        print(f"[{i + 1}/{len(images)}] {image.name}  boxes={n_boxes} "
-              f"cover={100.0 * float(mask.mean()):.1f}%", flush=True)
+        fanout.submit(image, per_frame.get(i), f"boxes={n_boxes}")
+    written, skipped = fanout.close()
     if unseeded:
         print(f"warning: {len(unseeded)} 張因為所屬尺寸沒有匡選框而未追蹤", flush=True)
     print(f"Done. processed={written} skipped={skipped}", flush=True)
     return 0
 
 
-def handle_empty(args, rgb, runner, i: int, total: int, name: str):
+BATCHABLE_BOX_SOURCES = ("json", "full", "auto")
+
+
+def batchable(args, runner: MaskRunner, spec: dict) -> bool:
+    """Whether this run can encode several photos per forward pass.
+
+    Three things have to hold. The engine must actually have an across-images
+    API (`Sam2Runner.masks_for_image_batch`; SAM 1 has none and SAM 3 fuses the
+    prompt into the forward pass, so there is nothing to reuse). The boxes must
+    be derivable without the GPU — true for json/full/auto, false for `text`
+    (a detector or the model itself produces them) and `exemplar` (SAM 3 only).
+    And there must be no click prompts: that is the single-frame repair path,
+    where there is nothing to batch.
+    """
+    return (args.image_batch > 1
+            and args.boxes in BATCHABLE_BOX_SOURCES
+            and hasattr(runner, "masks_for_image_batch")
+            and not (spec or {}).get("points"))
+
+
+def run_batched(args, runner: MaskRunner, images: list, images_dir: Path,
+                spec: dict, used_boxes: dict) -> tuple[int, int]:
+    """The json/full/auto loop, `--image-batch` photos per encoder pass.
+
+    Same semantics as the one-at-a-time loop below — same box filters, same
+    empty handling, same outputs — only the encoder is fed in groups. Worth it
+    because the image encoder is ~95 % of SAM's cost and one 1024² frame does
+    not fill a modern card; it is NOT the dominant cost of a run overall, which
+    is the write phase WriteFanout deals with.
+
+    A photo with no boxes leaves the batch: `--on-empty image` re-prompts
+    through the runner, which needs that one frame staged on its own.
+    """
+    import numpy as np
+    import torch
+
+    total = len(images)
+    fanout = WriteFanout(args, args.dataset_root, images_dir, total,
+                         args.write_workers or default_write_workers())
+    print(f"batching {args.image_batch} image(s) per encoder pass, "
+          f"writing with {fanout.workers} worker(s)", flush=True)
+
+    def emit(image: Path, rgb, boxes, mask) -> None:
+        note = ""
+        if not mask.any():
+            runner.set_image(rgb)
+            mask, note = handle_empty(args, rgb, runner)
+            if mask is None:
+                fanout.note(image, note, skipped=True)
+                return
+        if args.largest_only:
+            mask = _enc.largest_component(mask)
+        used_boxes[image.relative_to(images_dir).as_posix()] = (
+            np.asarray(boxes).round(1).tolist())
+        fanout.submit(image, mask, " ".join(x for x in (f"boxes={len(boxes)}", note) if x))
+
+    def flush(pending: list) -> None:
+        """Encode+decode `pending` as one batch, halving on CUDA OOM."""
+        size = len(pending)
+        while pending:
+            group, rest = pending[:size], pending[size:]
+            try:
+                masks_list = runner.masks_for_image_batch([rgb for _, rgb, _ in group],
+                                                          [b for _, _, b in group])
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                if size == 1:
+                    raise
+                size = max(1, size // 2)
+                print(f"    [vram] OOM -> retrying with image batch {size}", flush=True)
+                continue
+            for (image, rgb, boxes), masks in zip(group, masks_list, strict=True):
+                emit(image, rgb, boxes, _enc.merge_masks(masks, rgb.shape[:2]))
+            pending = rest
+
+    pending: list = []
+    for image in images:
+        if not args.overwrite and outputs_present(args, args.dataset_root, image, images_dir):
+            fanout.note(image, "skip (exists)", skipped=True)
+            continue
+        rgb = read_rgb(image)
+        if rgb is None:
+            fanout.note(image, "skip unreadable", skipped=True)
+            continue
+        h, w = rgb.shape[:2]
+        rel = image.relative_to(images_dir).as_posix()
+        if args.boxes == "json":
+            boxes = boxes_for_image(spec, rel, w, h)
+        elif args.boxes == "full":
+            boxes = _enc.as_boxes([[0, 0, w - 1, h - 1]])
+        else:                                       # auto
+            boxes = auto_row_boxes(rgb, max(args.min_area, 1e-4))
+        boxes = refine_boxes(args, boxes, None, w, h)
+        if len(boxes) == 0:
+            runner.set_image(rgb)
+            mask, note = handle_empty(args, rgb, runner)
+            if mask is None:
+                fanout.note(image, note, skipped=True)
+            else:
+                fanout.submit(image, mask, f"boxes=0 {note}")
+            continue
+        pending.append((image, rgb, boxes))
+        if len(pending) >= args.image_batch:
+            flush(pending)
+            pending = []
+    if pending:
+        flush(pending)
+    return fanout.close()
+
+
+def run_one_at_a_time(args, runner: MaskRunner, detector, images: list,
+                      images_dir: Path, spec: dict, exemplar,
+                      used_boxes: dict) -> tuple[int, int]:
+    """The general loop: one encoder pass per photo.
+
+    Handles everything `run_batched` cannot — `text` (the boxes come from a
+    detector, or from the model's own fused forward pass), `exemplar`, click
+    prompts (repair), and the engines with no across-images API. The writes
+    still fan out to threads; only the inference is serial here.
+    """
+    import numpy as np
+
+    total = len(images)
+    fanout = WriteFanout(args, args.dataset_root, images_dir, total,
+                         args.write_workers or default_write_workers())
+    print(f"writing with {fanout.workers} worker(s)", flush=True)
+    for image in images:
+        rel = image.relative_to(images_dir).as_posix()
+        if not args.overwrite and outputs_present(args, args.dataset_root, image, images_dir):
+            fanout.note(image, "skip (exists)", skipped=True)
+            continue
+        rgb = read_rgb(image)
+        if rgb is None:
+            fanout.note(image, "skip unreadable", skipped=True)
+            continue
+        h, w = rgb.shape[:2]
+        started = time.perf_counter()
+
+        masks = None
+        scores = None
+        points, labels = points_for_image(spec, rel, w, h)
+        if args.boxes == "json":
+            boxes = boxes_for_image(spec, rel, w, h)
+        elif args.boxes == "full":
+            boxes = _enc.as_boxes([[0, 0, w - 1, h - 1]])
+        elif args.boxes == "auto":
+            boxes = auto_row_boxes(rgb, max(args.min_area, 1e-4))
+        elif args.boxes == "exemplar":
+            boxes = denorm(exemplar, spec, w, h)
+        elif detector is not None:
+            boxes, scores = detector(rgb, args.text)
+        else:                                   # text, on a text-native engine
+            masks, boxes, scores = runner.masks_for_text(rgb, args.text)
+
+        boxes = refine_boxes(args, boxes, scores, w, h)
+
+        # `staged` tracks whether the encoder has already seen this frame. It
+        # matters twice: --on-empty image re-prompts through the runner and would
+        # read a stale (or unset) image without it, and re-running set_image on a
+        # frame that already has one would pay the encoder cost — the expensive
+        # part — a second time.
+        staged = False
+        note = ""
+        if points is not None and len(points):
+            # Repair: one object, box + clicks in a single prompt.
+            runner.set_image(rgb)
+            staged = True
+            masks = runner.masks_for_prompt(boxes, points, labels)
+            mask = _enc.merge_masks(masks, (h, w))
+        elif masks is None:
+            runner.set_image(rgb)
+            staged = True
+            if len(boxes) == 0:
+                mask, note = handle_empty(args, rgb, runner)
+                if mask is None:
+                    fanout.note(image, note, skipped=True)
+                    continue
+            else:
+                masks = masks_in_chunks(runner, boxes, args.box_chunk, (h, w))
+                mask = _enc.merge_masks(masks, (h, w))
+        else:
+            mask = _enc.merge_masks(masks, (h, w))
+        if not mask.any():
+            if not staged:
+                runner.set_image(rgb)
+            mask, note = handle_empty(args, rgb, runner)
+            if mask is None:
+                fanout.note(image, note, skipped=True)
+                continue
+        if args.largest_only:
+            mask = _enc.largest_component(mask)
+
+        used_boxes[rel] = np.asarray(boxes).round(1).tolist()
+        pts = f"points={len(points)}" if points is not None and len(points) else ""
+        detail = " ".join(x for x in (
+            f"boxes={len(boxes)}", pts, note,
+            f"inference {(time.perf_counter() - started) * 1000:.0f} ms") if x)
+        fanout.submit(image, mask, detail)
+    return fanout.close()
+
+
+def handle_empty(args, rgb, runner):
     """Nothing was detected. Decide what that means, loudly.
+
+    Returns `(mask, note)`: the mask to write (None = skip this photo), and the
+    warning text the caller must put on that photo's progress line.
+
+    It does NOT print. There is exactly one thing in this file allowed to emit a
+    `[i/N] …` line — `WriteFanout` — because jobs.py drives the panel's progress
+    bar off that prefix and a second, unsynchronised printer would make the bar
+    jump backwards once the writes run on threads. `[warn] no boxes` still ends
+    up in the line verbatim, which is what _parse_matte counts.
 
     Silence here is how a folder ends up half-masked: the run "succeeds" and the
     missing files only surface later as a COLMAP mask-pass error, or as a trainer
@@ -802,16 +1172,16 @@ def handle_empty(args, rgb, runner, i: int, total: int, name: str):
     equal to the image count, which the COLMAP mask pass requires.
     """
     import numpy as np
-    print(f"[{i}/{total}] {name}  [warn] no boxes -> {args.on_empty}", flush=True)
+    note = f"[warn] no boxes -> {args.on_empty}"
     if args.on_empty == "skip":
-        return None
+        return None, note
     if args.on_empty == "opaque":
-        return np.ones(rgb.shape[:2], dtype=bool)
+        return np.ones(rgb.shape[:2], dtype=bool), note
     if args.on_empty == "image" and runner is not None:      # whole frame as one box
         h, w = rgb.shape[:2]
         boxes = _enc.as_boxes([[0, 0, w - 1, h - 1]])
-        return _enc.merge_masks(runner.masks_for_boxes(boxes), (h, w))
-    return np.ones(rgb.shape[:2], dtype=bool)
+        return _enc.merge_masks(runner.masks_for_boxes(boxes), (h, w)), note
+    return np.ones(rgb.shape[:2], dtype=bool), note
 
 
 # --------------------------------------------------------------------------- #
@@ -851,6 +1221,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--largest-only", action="store_true",
                     help="keep only the biggest blob (single-subject shots)")
     ap.add_argument("--box-chunk", type=int, default=32, help="boxes per decoder call")
+    ap.add_argument("--image-batch", type=int, default=8,
+                    help="photos per ENCODER pass (json/full/auto on sam2 only; "
+                         "1 disables batching). Halves itself on CUDA OOM.")
+    ap.add_argument("--write-workers", type=int, default=0,
+                    help="threads writing the PNGs out (0 = a CPU-count cap). This is "
+                         "the slow half of a run at full resolution, not the GPU.")
     ap.add_argument("--on-empty", choices=("opaque", "skip", "image"), default="opaque")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--dump-boxes", type=Path, default=None,
@@ -866,7 +1242,6 @@ def main() -> int:
         print(f"error: unknown --outputs entry: {bad}", file=sys.stderr)
         return 2
 
-    import numpy as np
     import torch
 
     images_dir = args.dataset_root / args.images if args.images else args.dataset_root
@@ -929,86 +1304,12 @@ def main() -> int:
 
     exemplar = _enc.as_boxes(spec.get("boxes") or []) if spec else _enc.as_boxes([])
     used_boxes: dict[str, list] = {}
-    written = skipped = 0
-    total = len(images)
-    for i, image in enumerate(images, 1):
-        rel = image.relative_to(images_dir).as_posix()
-        if not args.overwrite and outputs_present(args, args.dataset_root, image, images_dir):
-            skipped += 1
-            continue
-        rgb = read_rgb(image)
-        if rgb is None:
-            print(f"[{i}/{total}] skip unreadable {image.name}", flush=True)
-            continue
-        h, w = rgb.shape[:2]
-        started = time.perf_counter()
 
-        masks = None
-        scores = None
-        points, labels = points_for_image(spec, rel, w, h)
-        if args.boxes == "json":
-            boxes = boxes_for_image(spec, rel, w, h)
-        elif args.boxes == "full":
-            boxes = _enc.as_boxes([[0, 0, w - 1, h - 1]])
-        elif args.boxes == "auto":
-            boxes = auto_row_boxes(rgb, max(args.min_area, 1e-4))
-        elif args.boxes == "exemplar":
-            boxes = denorm(exemplar, spec, w, h)
-        elif detector is not None:
-            boxes, scores = detector(rgb, args.text)
-        else:                                   # text, on a text-native engine
-            masks, boxes, scores = runner.masks_for_text(rgb, args.text)
-
-        boxes = _enc.clip_boxes(boxes, w, h)
-        boxes = _enc.filter_small(boxes, args.min_area, w, h)
-        if len(boxes) > 1:
-            boxes = _enc.suppress_overlaps(boxes, scores if scores is not None and
-                                           len(scores) == len(boxes) else None)
-        if args.row_filter:
-            boxes = _enc.select_row_boxes(boxes)
-
-        # `staged` tracks whether the encoder has already seen this frame. It
-        # matters twice: --on-empty image re-prompts through the runner and would
-        # read a stale (or unset) image without it, and re-running set_image on a
-        # frame that already has one would pay the encoder cost — the expensive
-        # part — a second time.
-        staged = False
-        if points is not None and len(points):
-            # Repair: one object, box + clicks in a single prompt.
-            runner.set_image(rgb)
-            staged = True
-            masks = runner.masks_for_prompt(boxes, points, labels)
-            mask = _enc.merge_masks(masks, (h, w))
-        elif masks is None:
-            runner.set_image(rgb)
-            staged = True
-            if len(boxes) == 0:
-                mask = handle_empty(args, rgb, runner, i, total, image.name)
-                if mask is None:
-                    skipped += 1
-                    continue
-            else:
-                masks = masks_in_chunks(runner, boxes, args.box_chunk, (h, w))
-                mask = _enc.merge_masks(masks, (h, w))
-        else:
-            mask = _enc.merge_masks(masks, (h, w))
-        if not mask.any():
-            if not staged:
-                runner.set_image(rgb)
-            mask = handle_empty(args, rgb, runner, i, total, image.name)
-            if mask is None:
-                skipped += 1
-                continue
-        if args.largest_only:
-            mask = _enc.largest_component(mask)
-
-        finish_image(rgb, mask, args, args.dataset_root, image, images_dir)
-        used_boxes[rel] = np.asarray(boxes).round(1).tolist()
-        written += 1
-        pts = f" points={len(points)}" if points is not None and len(points) else ""
-        print(f"[{i}/{total}] {image.name}  boxes={len(boxes)}{pts} "
-              f"cover={100.0 * float(mask.mean()):.1f}%  "
-              f"inference {(time.perf_counter() - started) * 1000:.0f} ms", flush=True)
+    if batchable(args, runner, spec):
+        written, skipped = run_batched(args, runner, images, images_dir, spec, used_boxes)
+    else:
+        written, skipped = run_one_at_a_time(args, runner, detector, images, images_dir,
+                                             spec, exemplar, used_boxes)
 
     if args.dump_boxes:
         args.dump_boxes.parent.mkdir(parents=True, exist_ok=True)

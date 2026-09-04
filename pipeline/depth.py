@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .backends import BUILTIN_BACKENDS, binary_exec
+from .heic import convert_tree
 from .runner import PipelineError, Runner
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
@@ -94,6 +95,9 @@ def run_depth(p: dict, r: Runner) -> None:
     if not src.is_dir():
         raise FileNotFoundError(f"images 不是資料夾: {src}")
     dataset_root, images_folder = resolve_dataset(src)
+    n_heic = convert_tree(dataset_root / images_folder if images_folder else dataset_root)
+    if n_heic:
+        r.log(f"HEIC/HEIF -> JPEG: 轉了 {n_heic} 張")
 
     mode = (p.get("mode") or "both").strip()
     if mode not in ("depth", "normal", "both"):

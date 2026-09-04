@@ -23,7 +23,9 @@ from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
+from jobs import manager
 from pipeline.config import settings
+from pipeline.heic import convert_tree
 from pipeline.matte import OUTPUT_ROOT, SKIP_DIR_NAMES, resolve_matte_dataset
 from web.routers.viewer import _safe_image_dir, _safe_image_file
 from web.shared import IMAGE_EXTS_ALL, _page
@@ -77,6 +79,10 @@ async def matte_pick(request: Request, images: str = "", i: int = 0):
     # so the picker shows the same frames the run will actually process.
     root, folder = resolve_matte_dataset(Path(images).expanduser())
     d = _safe_image_dir(str(root / folder if folder else root))
+    try:
+        await asyncio.to_thread(convert_tree, d)
+    except RuntimeError as exc:
+        return _page(request, "_error.html", message=str(exc))
     rels = await asyncio.to_thread(_walk, d)
     if not rels:
         return _page(request, "_error.html", message=f"這個資料夾裡沒有照片: {d}")
@@ -218,25 +224,40 @@ def _newest_cutouts(cutout_dir: Path, limit: int) -> tuple[list[dict], int]:
 
 
 @router.get("/ui/matte_live", response_class=HTMLResponse)
-async def matte_live(request: Request, images: str = "", n: int = 8):
-    """htmx fragment polled by a running 去背 job: the newest cut-outs so far.
+async def matte_live(request: Request, images: str = "", n: int = 8, job_id: str = ""):
+    """Self-polling htmx fragment: the newest cut-outs a running 去背 job has
+    written so far.
 
     Deliberately a poll rather than a push. The job's own SSE stream carries log
     lines, and these images are produced by a *subprocess* writing to disk — there
-    is no event to forward, so a 3 s re-read of the directory is both simpler and
-    exactly as fresh.
+    is no event to forward, so a periodic re-read of the directory is both
+    simpler and exactly as fresh.
+
+    Swaps its own outerHTML (like `#jobstatus`) rather than living *inside* it:
+    `#jobstatus` above replaces its whole outerHTML every 2s, and an element
+    nested in there with `hx-trigger="load, every 4s"` gets its "load" fired on
+    every one of those replacements — collapsing the thumbnail refresh to 2s and
+    tearing the `<img>`s down and rebuilding them that often, which is what made
+    the strip visibly flicker/jitter during a long run. Being its own island
+    means it only reloads on its own schedule, and decides whether to keep
+    polling from the *job's* status (via `job_id`) rather than piggy-backing on
+    the parent's re-render.
     """
     images = (images or "").strip().rstrip("/")
     if not images:
         raise HTTPException(400, "images is required")
+    job = manager.get(job_id) if job_id else None
+    running = bool(job and job.status in ("queued", "running"))
     root, _ = resolve_matte_dataset(Path(images).expanduser())
     cutout_dir = _cutout_dir(root)
     if cutout_dir is None:
-        return HTMLResponse('<div class="hint">還沒有輸出…</div>')
-    items, total = await asyncio.to_thread(
-        _newest_cutouts, cutout_dir, max(1, min(n, _LIVE_MAX)))
+        items, total = [], 0
+    else:
+        items, total = await asyncio.to_thread(
+            _newest_cutouts, cutout_dir, max(1, min(n, _LIVE_MAX)))
     return _page(request, "_matte_live.html", images=images, items=items,
-                 total=total, cut_root=str(cutout_dir))
+                 total=total, cut_root=str(cutout_dir) if cutout_dir else "",
+                 job_id=job_id, running=running)
 
 
 # --------------------------------------------------------------------------- #

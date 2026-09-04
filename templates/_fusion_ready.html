@@ -1,0 +1,78 @@
+{# 融合 staging done. The reconstruction itself is handed to the COLMAP form —
+   this fragment only reports what was staged and prefills that form, so there
+   is exactly one place in the app that knows how to run COLMAP.
+
+   Layout is action-first: what was found, then the one button, and only then
+   the reasoning — folded away. The first version put four paragraphs of
+   justification between the summary and the button, which buried the one thing
+   there is to do here. #}
+<div class="rs-panel fu-panel">
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+    <strong style="font-size:15px">融合已整理好 · {{ passes|length }} 組 · 共 {{ total }} 張</strong>
+    <code class="hint">fusion</code>
+  </div>
+  <div class="hint" style="margin-bottom:12px">{{ out_dir }}</div>
+
+  <div class="chips" style="gap:6px">
+    {% for p in passes %}
+    <span class="chip {{ 'ok' if not p.unmatched }}" style="font-size:12.5px">
+      {{ p.name }} · 照片 {{ p.n_images }} · 遮罩 {{ p.n_masks }}
+      {%- if p.sizes %} · {{ p.sizes[0][0] }}×{{ p.sizes[0][1] }}{% endif %}
+    </span>
+    {% endfor %}
+  </div>
+
+  {% if warnings %}
+  {% for w in warnings %}
+  <div class="hint" style="color:var(--err);margin-top:8px">⚠ {{ w }}</div>
+  {% endfor %}
+  {% else %}
+  <div class="hint" style="color:var(--ok);margin-top:8px">✓ 每張照片都有對得上的遮罩,
+    各組尺寸也一致 —— 可以往下走了。</div>
+  {% endif %}
+
+  <div style="margin:16px 0 6px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <button onclick="fillFusionColmap('{{ images_root }}','{{ masks_root }}','{{ workspace }}',{{ 'true' if single_camera else 'false' }})"
+            style="font-size:14px;padding:9px 16px">帶入 COLMAP 表單 →</button>
+    <span class="hint">按下去會跳到平常那張 COLMAP 表單,路徑跟必要開關都填好了,
+      其餘參數照你原本的用法調,再按送出。</span>
+  </div>
+
+  <details class="fu-why" style="margin-top:14px">
+    <summary>會一起帶入哪些設定,為什麼</summary>
+    <div class="hint">
+      <div style="margin-top:6px">· <b>遮罩也用在抽特徵</b> —— 物件在兩輪之間被搬動過,
+        房間跟物件不是剛體關係,背景特徵只會給出錯誤的約束。這是融合能成立的關鍵。</div>
+      <div>· <b>輸出的照片也去背</b> —— 去畸變後拿遮罩把 <code>images/</code> 的背景塗黑,
+        並在旁邊留一份對齊好的 <code>masks/</code>。單一物件重建下游只想看到物件。</div>
+      <div>· <b>影像解析度 = 保持原樣</b> —— 遮罩是在現在這個尺寸上做的,COLMAP 再縮一次就對不上
+        (會直接報錯,不會默默算錯)。</div>
+      <div>· <b>MATCHER = vocab</b> —— 快,先試這個。要留意同一組內的相似度比跨組高一個數量級,
+        檢索名額可能被同組鄰居吃掉,那少數幾對「把兩半縫起來」的配對就不會被嘗試;真的裂成兩塊時,
+        先把 <code>NUM_MATCHES</code> 調大(預設 50),不夠再換 <b>exhaustive</b>
+        (每一對都比、保證試過,但 1000 張 ≈ 50 萬對)。</div>
+      <div>· <b>CAMERA_MODE = {{ 'single' if single_camera else 'per_folder' }}</b> ——
+        {{ '各組尺寸一致,同一顆鏡頭就該共用一組內參。' if single_camera else '各組尺寸不同,所以每組各自一組內參。' }}</div>
+      <div>· <b>rig 關閉</b> —— rig 的前提是「同一次曝光被所有相機覆蓋」,兩輪先後拍的必然不成立。</div>
+    </div>
+  </details>
+
+  <details class="fu-why" style="margin-top:8px">
+    <summary>跑完怎麼看有沒有真的融合成功</summary>
+    <div class="hint">
+      <div style="margin-top:6px">看 log 裡的 <code>sparse/0 coverage:</code> 那一行 ——
+        每組都大部分註冊,才是真的合成一個模型;某一組趨近 0 就是沒縫起來
+        (它上面的 <code>mapper produced N models</code> 會一起說明裂成幾塊)。</div>
+      <div>再到 <b>🧊 3D 結果</b> 看一眼:應該是一個完整物件、底面補起來了,
+        而且表面紋飾沒有錯位重疊 —— 有雙重紋飾的話是兩輪用錯的旋轉對上了。</div>
+      <div>真的沒縫起來,最有效的補救是<b>補拍</b>:把物件側倒到中間角度繞一圈拍 15~30 張當橋樑,
+        比任何事後對齊都可靠。</div>
+    </div>
+  </details>
+
+  <div class="hint" style="margin-top:12px">已建立的連結(symlink,原始資料夾不動):
+    <div class="fu-tree">{{ images_root }}/&lt;每組&gt;
+{{ masks_root }}/&lt;每組&gt;
+{{ workspace }}   ← COLMAP 結果</div>
+  </div>
+</div>

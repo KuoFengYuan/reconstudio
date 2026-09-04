@@ -170,6 +170,44 @@ def test_blank_gpu_leaves_the_env_alone(dataset, fake_env):
     assert _run(dataset, {"gpu": ""}).env == {}
 
 
+# --- resize ------------------------------------------------------------------ #
+def test_resize_keep_runs_at_the_original_dataset_root(dataset, fake_env, monkeypatch):
+    called = []
+    monkeypatch.setattr("pipeline.matte.resize_to_fullhd",
+                        lambda *a, **k: called.append((a, k)) or "should not be used")
+    r = _run(dataset, {"resize": "keep"})
+    assert called == []
+    assert str(dataset) in r.argv
+
+
+def test_resize_switches_the_run_to_the_resized_copy(dataset, fake_env, monkeypatch):
+    """A resize choice must move the WHOLE run (dataset_root, --images, and the
+    boxes-json path) to images_<cap>/, not just be logged — that folder is what
+    tools/sam_matte.py's output_path_for() bases every no_bg/ write on, and it's
+    also what web/routers/create.py's resize_target() promises the job card."""
+    calls = []
+
+    def fake_resize(img_root, lines, ws, force, r, **kw):
+        calls.append({"img_root": img_root, "ws": ws, "max_size": kw.get("max_size")})
+        out = ws / f"images_{kw.get('max_size')}"
+        out.mkdir(parents=True, exist_ok=True)
+        return str(out)
+
+    monkeypatch.setattr("pipeline.matte.resize_to_fullhd", fake_resize)
+    r = _run(dataset, {"resize": "1920"})
+
+    assert calls == [{"img_root": str(dataset / "images"), "ws": dataset, "max_size": "1920"}]
+    resized_root = str(dataset / "images_1920")
+    assert resized_root in r.argv
+    assert r.argv[r.argv.index("--images") + 1] == ""          # resized copy IS the root
+    assert (dataset / "images_1920" / "matte_boxes.json").is_file()
+
+
+def test_unknown_resize_raises(dataset, fake_env):
+    with pytest.raises(ValueError, match="resize"):
+        _run(dataset, {"resize": "1080"})
+
+
 # --- dataset root ----------------------------------------------------------- #
 def test_workspace_layout_keeps_outputs_beside_images(tmp_path):
     (tmp_path / "images").mkdir()

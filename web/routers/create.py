@@ -23,7 +23,7 @@ from pipeline import (
     resolve_dataset,
     resolve_matte_dataset,
 )
-from pipeline.matte import OUTPUT_ROOT
+from pipeline.matte import OUTPUT_ROOT, resize_target
 from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
@@ -269,6 +269,7 @@ async def create_matte(request: Request):
             "checkpoint": (form.get("checkpoint") or "").strip(),
             "detector": (form.get("detector") or "").strip(),
             "text": (form.get("text") or "").strip(),
+            "resize": (form.get("resize") or "keep").strip(),
             "outputs": (form.get("outputs") or "cutout,masks").strip(),
             "erode": (form.get("erode") or "").strip(),
             "dilate": (form.get("dilate") or "").strip(),
@@ -287,7 +288,14 @@ async def create_matte(request: Request):
         return _page(request, "_error.html", message=str(exc))
 
     dataset_root, _ = resolve_matte_dataset(Path(images))
-    dests = [str(dataset_root / OUTPUT_ROOT / f)
+    # The job actually writes under resize_target(...), not dataset_root, once a
+    # resize is chosen (see pipeline.matte.resize_target) — computed here, up
+    # front, because job.meta is never rewritten once the job starts (_parse_matte
+    # only accumulates the box/empty counts), so this is the one chance to point
+    # the job card, the live cut-out strip, and the "檢視去背結果" link at the
+    # resolution the run will actually produce.
+    effective_root = resize_target(dataset_root, params["resize"])
+    dests = [str(effective_root / OUTPUT_ROOT / f)
              for f in params["outputs"].split(",") if f.strip()]
     job = Job(id=new_id(), kind="matte",
               title=f"✂️ 去背({boxes}) · {Path(images).name}",
@@ -295,8 +303,8 @@ async def create_matte(request: Request):
               # NOT "boxes": _parse_matte counts the per-image box total into
               # meta["boxes"], and this string would shadow it — the job chip read
               # "共 track 個框".
-              params=params, meta={"images": images, "box_source": boxes,
-                                   "dataset_root": str(dataset_root)})
+              params=params, meta={"images": str(effective_root), "box_source": boxes,
+                                   "dataset_root": str(effective_root)})
     manager.submit(job)
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 

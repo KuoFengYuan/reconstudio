@@ -386,10 +386,30 @@ def replace_images_by_masks(images_file, out_file) -> None:
     write_images_binary(out, str(out_file))
 
 
+def _mask_plane(img):
+    """The channel carrying the mask, for every shape the undistorter can emit.
+
+    Inria's make_mask_uint8.py reads `img[..., -1]` and assumes RGBA, because it
+    was fed the cut-outs. That assumption cannot hold on an OIIO-based COLMAP:
+    `Bitmap::Read` *always* drops alpha (4→3 channels, 2→1; sensor/bitmap.cc:426),
+    so `image_undistorter` never writes a 4-channel file — a single-channel mask
+    comes back single-channel, and an RGBA cut-out comes back as plain RGB with
+    the alpha gone. Requiring 4 channels therefore rejected every file and wrote
+    nothing at all, silently: the run still said "done" with an empty masks/.
+    Hence: prefer alpha when it survived, otherwise read the mask itself.
+    """
+    if img.ndim == 2:                                  # 1-channel in, 1-channel out
+        return img
+    if img.shape[2] in (2, 4):                         # grey+A / RGBA (alpha kept)
+        return img[..., -1]
+    return img.max(axis=2)                             # a mask replicated to RGB
+
+
 def make_mask_uint8(in_dir, out_dir, workers: int | None = None) -> int:
-    """Turn undistorted RGBA mask images under in_dir into clean uint8 0/255 masks
-    under out_dir (alpha>250 → 255, then a 3×3 erosion), mirroring the relative
-    tree. Port of make_mask_uint8.py (cv2 lazy import; stdlib threads, not joblib).
+    """Turn undistorted mask images under in_dir into clean uint8 0/255 masks
+    under out_dir (>250 → 255, then a 3×3 erosion), mirroring the relative
+    tree. Port of make_mask_uint8.py (cv2 lazy import; stdlib threads, not joblib),
+    generalised over the channel layouts described in `_mask_plane`.
     Returns the number of masks written."""
     try:
         import cv2
@@ -405,11 +425,11 @@ def make_mask_uint8(in_dir, out_dir, workers: int | None = None) -> int:
 
     def one(rel: str) -> bool:
         img = cv2.imread(str(in_root / rel), cv2.IMREAD_UNCHANGED)
-        if img is None or img.ndim < 3 or img.shape[2] < 4:
+        if img is None:
             return False
         dst = Path(out_dir) / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        mask = (img[..., -1] > 250).astype(np.uint8) * 255
+        mask = (_mask_plane(img) > 250).astype(np.uint8) * 255
         eroded = (cv2.erode(mask, np.ones([3, 3], np.uint8)) > 250).astype(np.uint8) * 255
         cv2.imwrite(str(dst), eroded)
         return True
@@ -419,3 +439,54 @@ def make_mask_uint8(in_dir, out_dir, workers: int | None = None) -> int:
         for ok in ex.map(one, rels):
             n += int(ok)
     return n
+
+
+def apply_masks_to_images(images_dir, masks_dir, workers: int | None = None) -> tuple[int, int]:
+    """Black out the background of the undistorted images, in place.
+
+    Runs *after* make_mask_uint8, so both sides went through the same cameras and
+    line up pixel for pixel. `images/<pass>/IMG_1.jpg` pairs with
+    `masks/<pass>/IMG_1.png` — image_undistorter keeps the relative path and
+    `replace_images_by_masks` only swapped the extension.
+
+    In place, and deliberately so: `images/` is what the viewer, the trainers and
+    the mesh tools all read, so a second folder would need every one of them to
+    learn about it. Nothing is lost that FORCE=1 cannot rebuild from the sources.
+    The masking itself is idempotent (blacking out already-black pixels), but a
+    JPEG re-encode is not — so the caller's sentinel is what keeps a redo from
+    costing the foreground another generation, not just wall time.
+
+    Returns (rewritten, missing_mask).
+    """
+    try:
+        import cv2
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "mask processing needs OpenCV (pip install opencv-python), "
+            "or turn off CUTOUT_IMAGES"
+        ) from exc
+
+    img_root, mask_root = Path(images_dir), Path(masks_dir)
+    rels = [p.relative_to(img_root) for p in img_root.rglob("*")
+            if p.is_file() and p.suffix.lower() in IMAGE_EXTS]
+
+    def one(rel: Path) -> bool:
+        mask_path = mask_root / rel.with_suffix(".png")
+        if not mask_path.is_file():
+            return False
+        img = cv2.imread(str(img_root / rel), cv2.IMREAD_COLOR)
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if img is None or mask is None or img.shape[:2] != mask.shape[:2]:
+            return False
+        img[mask < 128] = 0
+        # Same name, so the same encoder: the model's image names are baked into
+        # images.bin and every consumer resolves them by name.
+        params = ([cv2.IMWRITE_JPEG_QUALITY, 95]
+                  if rel.suffix.lower() in (".jpg", ".jpeg") else [])
+        return bool(cv2.imwrite(str(img_root / rel), img, params))
+
+    n = 0
+    with futures.ThreadPoolExecutor(max_workers=workers or (os.cpu_count() or 8)) as ex:
+        for ok in ex.map(one, rels):
+            n += int(ok)
+    return n, len(rels) - n

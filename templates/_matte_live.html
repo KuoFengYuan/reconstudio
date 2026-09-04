@@ -1,6 +1,12 @@
-{# Live strip inside a running 去背 job. Polled (see matte_live): the images come
-   from a subprocess writing files, so there is no event to push. #}
-<div class="mlive">
+{# Live strip inside a running 去背 job. Self-polling (see matte_live): the images
+   come from a subprocess writing files, so there is no event to push. Swaps its
+   own outerHTML and re-decides `running` server-side each time (job_id), so it
+   stops on its own once the job ends instead of depending on a parent element
+   to stop refreshing it — see the docstring on the matte_live route for why. #}
+<div class="mlive" id="matte_live"
+     hx-get="/ui/matte_live?images={{ images|urlencode }}&n=8&job_id={{ job_id|urlencode }}"
+     hx-trigger="{% if running %}every 4s [!document.hidden]{% endif %}"
+     hx-swap="outerHTML">
   <div class="mlive-head">
     <span class="chip ok">已輸出 {{ total }} 張</span>
     <span class="hint" style="margin:0">最新的在最前面 · 點縮圖可放大檢查</span>
