@@ -256,6 +256,17 @@ def test_matcher_both_runs_sequential_then_vocab_without_loop_flags(patched, img
     assert "vocab_tree_matcher" in r.subcommands()
 
 
+def test_matcher_exhaustive_runs_exhaustive_matcher_only(patched, imgroot, vocab, tmp_path):
+    # The point of exposing it: retrieval-based matchers spend every per-image
+    # candidate slot on same-group neighbours, so the few cross-group pairs that
+    # stitch two passes over one subject are never even attempted.
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, matcher="exhaustive"), r)
+    assert "exhaustive_matcher" in r.subcommands()
+    assert "vocab_tree_matcher" not in r.subcommands()
+    assert "sequential_matcher" not in r.subcommands()
+
+
 def test_matcher_sequential_adds_loop_detection(patched, imgroot, vocab, tmp_path):
     r = FakeRunner()
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, matcher="sequential"), r)
@@ -1023,3 +1034,200 @@ def test_changing_the_camera_model_reextracts(patched, imgroot, vocab, tmp_path)
     _run.run_colmap(_params(imgroot, ws, vocab, camera_model="SIMPLE_RADIAL"), r)
     assert "feature_extractor" in r.subcommands()
     assert any("camera_model" in m for m in r.logs)
+
+
+# --------------------------------------------------------------------------- #
+# masks: undistort-only by default, opt-in for feature extraction
+# --------------------------------------------------------------------------- #
+def _matted(root: Path, names: list[str], size=(64, 48)) -> Path:
+    """A photo folder plus the matte stage's `no_bg/{cutout,masks}` beside it.
+
+    Real PNGs/JPEGs, because the point of most of these tests is the geometry
+    check, which reads the file headers.
+    """
+    Image = pytest.importorskip("PIL.Image", reason="the mask geometry check reads headers")
+    root.mkdir(parents=True, exist_ok=True)
+    for sub in ("no_bg/cutout", "no_bg/masks"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+    for n in names:
+        Image.new("RGB", size, (90, 60, 40)).save(root / f"{n}.jpg", quality=80)
+        Image.new("RGBA", size, (90, 60, 40, 255)).save(root / "no_bg" / "cutout" / f"{n}.png")
+        Image.new("L", size, 255).save(root / "no_bg" / "masks" / f"{n}.png")
+    return root
+
+
+def test_masks_do_not_reach_feature_extraction_by_default(patched, vocab, tmp_path):
+    root = _matted(tmp_path / "images", ["a", "b"])
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab, stages=["extract"],
+                            masks_dir=str(root / "no_bg" / "cutout")), r)
+    # MASKS_DIR alone is the undistort path only: a scene reconstruction still
+    # wants background features. Extraction must be untouched.
+    assert "--ImageReader.mask_path" not in r.argv_for("feature_extractor")
+
+
+def test_mask_features_masks_extraction_and_prefers_the_masks_sibling(patched, vocab, tmp_path):
+    root = _matted(tmp_path / "images", ["a", "b"])
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab, stages=["extract"],
+                            mask_features=True,
+                            masks_dir=str(root / "no_bg" / "cutout")), r)
+    argv = r.argv_for("feature_extractor")
+    got = argv[argv.index("--ImageReader.mask_path") + 1]
+    # NOT the cutout dir: extraction reads the mask as greyscale, so an RGBA
+    # cut-out's dark subject pixels would read as background and be dropped.
+    assert got == str(root / "no_bg" / "masks")
+
+
+def test_mask_features_takes_a_plain_mask_folder_as_is(patched, vocab, tmp_path):
+    root = _matted(tmp_path / "images", ["a"])
+    plain = root / "no_bg" / "masks"
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab, stages=["extract"],
+                            mask_features=True, masks_dir=str(plain)), r)
+    argv = r.argv_for("feature_extractor")
+    assert argv[argv.index("--ImageReader.mask_path") + 1] == str(plain)
+
+
+def test_mask_features_without_masks_dir_is_an_error(patched, imgroot, vocab, tmp_path):
+    with pytest.raises(ValueError, match="MASKS_DIR"):
+        _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, stages=["extract"],
+                                mask_features=True), FakeRunner())
+
+
+def test_mask_and_image_size_mismatch_fails_before_the_mapper(patched, vocab, tmp_path):
+    """The pre-existing silent trap: the resize rebases img_root but never
+    masks_dir, so matting at one longest side and reconstructing at another only
+    surfaced as image_undistorter dying on a CHECK, long after the mapper."""
+    Image = pytest.importorskip("PIL.Image")
+    root = _matted(tmp_path / "images", ["a"], size=(64, 48))
+    Image.new("L", (32, 24), 255).save(root / "no_bg" / "masks" / "a.png")   # wrong size
+    r = FakeRunner()
+    with pytest.raises(ValueError, match="尺寸不符"):
+        _run.run_colmap(_params(root, tmp_path / "ws", vocab, mask_features=True,
+                                masks_dir=str(root / "no_bg" / "masks")), r)
+    # before extraction, not at undistort time (which is where it used to surface)
+    assert "feature_extractor" not in r.subcommands()
+
+
+@pytest.fixture
+def maskstubs(monkeypatch):
+    """Stub out the numpy/cv2 half of the mask export so the stage's control flow
+    is testable: FakeRunner writes empty .bin files, which the real
+    `replace_images_by_masks` cannot parse. Records what each step was handed."""
+    from pipeline import large_scene
+    seen: dict[str, list] = {"uint8": [], "cutout": []}
+    counts = {"uint8": 2}
+
+    def fake_uint8(src, dst, workers=None):
+        seen["uint8"].append((str(src), str(dst)))
+        return counts["uint8"]
+
+    def fake_cutout(images, masks, workers=None):
+        seen["cutout"].append((str(images), str(masks)))
+        return 2, 0
+
+    monkeypatch.setattr(large_scene, "replace_images_by_masks",
+                        lambda src, dst: Path(dst).write_bytes(b""))
+    monkeypatch.setattr(large_scene, "make_mask_uint8", fake_uint8)
+    monkeypatch.setattr(large_scene, "apply_masks_to_images", fake_cutout)
+    seen["counts"] = counts          # type: ignore[assignment]
+    return seen
+
+
+def _undistort_calls(r: FakeRunner) -> list[list[str]]:
+    return [c for c in r.calls
+            if len(c) > 1 and c[0] == _run.COLMAP_BIN and c[1] == "image_undistorter"]
+
+
+def test_undistort_reads_the_masks_sibling_not_the_cutout(patched, vocab, maskstubs, tmp_path):
+    """The h3dgs original undistorted `cutout/` and read its alpha back. This
+    COLMAP's Bitmap::Read drops alpha unconditionally, so alpha never survives
+    the round trip — the single-channel `masks/` is the only input that works."""
+    root = _matted(tmp_path / "images", ["a", "b"])
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab,
+                            masks_dir=str(root / "no_bg" / "cutout")), r)
+    images_pass, masks_pass = _undistort_calls(r)
+    assert FakeRunner._arg_after(images_pass, "--image_path") == str(root)
+    assert FakeRunner._arg_after(masks_pass, "--image_path") == str(root / "no_bg" / "masks")
+
+
+def test_an_empty_mask_export_fails_the_run(patched, vocab, maskstubs, tmp_path):
+    """It used to write zero masks and still report success — the whole reason
+    a fused run came out with no masks at all."""
+    root = _matted(tmp_path / "images", ["a"])
+    maskstubs["counts"]["uint8"] = 0
+    with pytest.raises(RuntimeError, match="一張都沒寫出來"):
+        _run.run_colmap(_params(root, tmp_path / "ws", vocab,
+                                masks_dir=str(root / "no_bg" / "masks")), FakeRunner())
+
+
+def test_cutout_images_is_off_by_default(patched, vocab, maskstubs, tmp_path):
+    root = _matted(tmp_path / "images", ["a"])
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab,
+                            masks_dir=str(root / "no_bg" / "masks")), FakeRunner())
+    # MASKS_DIR alone exports masks beside the images; a mask-aware trainer wants
+    # the images untouched.
+    assert maskstubs["uint8"] and not maskstubs["cutout"]
+
+
+def test_cutout_images_bakes_the_exported_masks_into_the_images(patched, vocab, maskstubs,
+                                                                tmp_path):
+    root = _matted(tmp_path / "images", ["a"])
+    ws = tmp_path / "ws"
+    r = FakeRunner()
+    _run.run_colmap(_params(root, ws, vocab, cutout_images=True,
+                            masks_dir=str(root / "no_bg" / "masks")), r)
+    dense = ws / "training_dataset_global_mapper"
+    # the *undistorted* pair, not the sources: both went through the same cameras
+    assert maskstubs["cutout"] == [(str(dense / "images"), str(dense / "masks"))]
+    assert (ws / ".cutout.done").is_file()
+
+
+def test_cutout_images_does_not_redo_itself_without_force(patched, vocab, maskstubs, tmp_path):
+    root = _matted(tmp_path / "images", ["a"])
+    ws = tmp_path / "ws"
+    args = dict(cutout_images=True, masks_dir=str(root / "no_bg" / "masks"))
+    _run.run_colmap(_params(root, ws, vocab, **args), FakeRunner())
+    maskstubs["cutout"].clear()
+    _run.run_colmap(_params(root, ws, vocab, **args), FakeRunner())
+    assert maskstubs["cutout"] == []
+
+
+def test_mask_features_invalidates_a_database_built_without_it(patched, vocab, tmp_path):
+    root = _matted(tmp_path / "images", ["a", "b"])
+    ws = tmp_path / "ws"
+    args = dict(stages=["extract"], masks_dir=str(root / "no_bg" / "masks"))
+    _run.run_colmap(_params(root, ws, vocab, **args), FakeRunner())
+    r = FakeRunner()
+    _run.run_colmap(_params(root, ws, vocab, mask_features=True, **args), r)
+    # Masked and unmasked keypoints describe a different scene, so reusing the
+    # database would silently keep the background features.
+    assert "feature_extractor" in r.subcommands()
+    assert any("re-extracting" in m for m in r.logs)
+
+
+def test_coverage_report_breaks_registration_down_per_folder(patched, vocab, tmp_path,
+                                                             monkeypatch):
+    """Two folders is how a two-pass capture of one subject is fed in, and the
+    totals alone cannot say whether the passes fused: '4 of 5 registered' reads
+    the same whether both passes are in sparse/0 or one was dropped whole."""
+    root = tmp_path / "images"
+    _make_images(root / "up", 3)
+    _make_images(root / "down", 2)
+    # sparse/0 holding only the 'up' pass — a failed fusion.
+    registered = {i: SimpleNamespace(name=f"up/img_{i:03d}.jpg") for i in range(3)}
+    monkeypatch.setattr("pipeline.vendor.read_write_model.read_images_binary",
+                        lambda path: registered)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws", vocab), r)
+    line = next(b for b in r.banners if b.startswith("sparse/0 coverage:"))
+    assert "up 3/3" in line and "down 0/2" in line
+    assert any("沒有進到 sparse/0" in m for m in r.logs)
+
+
+def test_coverage_report_is_silent_for_a_single_folder(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
+    assert not [b for b in r.banners if b.startswith("sparse/0 coverage:")]

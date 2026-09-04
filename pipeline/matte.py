@@ -21,6 +21,8 @@ import subprocess
 from pathlib import Path
 
 from .backends import BASE, env_python
+from .colmap._resize import resize_to_fullhd
+from .heic import convert_tree
 from .runner import PipelineError, Runner
 
 # Its own env: every SAM package pins its own torch, and the panel's env has no
@@ -40,14 +42,24 @@ SKIP_DIR_NAMES = frozenset({
     OUTPUT_ROOT, "cutout", "masks", "depth", "normals",
     "colmap", "sparse", "dense", "stereo", "distorted",
 })
+# Not imported from matte_encode.py: that module pulls in numpy for the sam env's
+# benefit, and this file has to stay eagerly-importable without it (see the
+# panel's pure-Python runtime invariant in CLAUDE.md / jobs._run_blocksplit).
+# Same set, duplicated on purpose — like pipeline/depth.py's own _IMAGE_EXTS.
+_SCAN_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 # Where the prompt boxes come from. Ordered as the form presents them.
 BOX_SOURCES = ("json", "track", "text", "exemplar", "auto", "full")
+# Longest-side caps a source photo folder can be resized to before matting —
+# same values (and the same ws/images_<cap> destination convention) as the
+# COLMAP resize option, so a dataset resized for one lines up with the other.
+RESIZE_OPTIONS = ("1920", "2560", "4096", "keep")
 
 MATTE_DEFAULTS = {
-    "matte_engine": "sam3",
+    "matte_engine": "sam2",
     "matte_model": "",          # blank = the script's per-engine default
     "boxes": "track",
     "text": "",
+    "resize": "keep",           # "keep" = matte at native resolution (today's behavior)
     "outputs": "cutout,masks",
     "erode": "1",
     "dilate": "0",
@@ -56,6 +68,24 @@ MATTE_DEFAULTS = {
     "box_chunk": "",
     "on_empty": "opaque",
 }
+
+
+def resize_target(dataset_root: Path, resize: str) -> Path:
+    """Where matting actually runs for a given `resize` choice.
+
+    "keep" (or blank) -> dataset_root unchanged. Otherwise -> a same-named
+    sibling of COLMAP's own resize output (`images_<cap>`), so switching
+    resolution is "pick a different folder", never overwriting another
+    resolution's cut-outs — `output_path_for` in tools/sam_matte.py always
+    writes to `dataset_root/no_bg/...`, so making the resized copy ITS OWN
+    dataset_root is what keeps every resolution's no_bg/ separate. Shared by
+    `run_matte` and `create_matte` so a job's displayed output path never
+    drifts from where the run actually writes.
+    """
+    resize = (resize or "keep").strip()
+    if resize == "keep" or not resize:
+        return dataset_root
+    return dataset_root / f"images_{resize}"
 
 
 def resolve_matte_dataset(src: Path) -> tuple[Path, str]:
@@ -165,6 +195,24 @@ def run_matte(p: dict, r: Runner) -> None:
     if not src.is_dir():
         raise FileNotFoundError(f"images 不是資料夾: {src}")
     dataset_root, images_folder = resolve_matte_dataset(src)
+    images_dir = dataset_root / images_folder if images_folder else dataset_root
+    n_heic = convert_tree(images_dir)
+    if n_heic:
+        r.log(f"HEIC/HEIF -> JPEG: 轉了 {n_heic} 張")
+
+    resize = (p.get("resize") or "keep").strip()
+    if resize not in RESIZE_OPTIONS:
+        raise ValueError(f"resize 必須是 {'/'.join(RESIZE_OPTIONS)},收到: {resize!r}")
+    if resize != "keep":
+        lines = sorted(
+            str(f.relative_to(images_dir).as_posix())
+            for f in images_dir.rglob("*")
+            if f.is_file() and f.suffix.lower() in _SCAN_IMAGE_EXTS
+            and SKIP_DIR_NAMES.isdisjoint(f.relative_to(images_dir).parts[:-1]))
+        new_root = resize_to_fullhd(str(images_dir), lines, dataset_root,
+                                     bool(p.get("overwrite")), r, max_size=resize)
+        dataset_root, images_folder = Path(new_root), ""
+        r.log(f"resize -> 長邊≤{resize}px: {new_root}")
 
     engine = (p.get("matte_engine") or "sam2").strip()
     if engine not in ENGINES:

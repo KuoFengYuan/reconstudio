@@ -23,6 +23,10 @@ dependencies = [
 # tests/test_moge3_encode.py, which fails silently — by feeding the training losses wrong
 # numbers — rather than raising, so it is the last thing that should go unchecked.
 dev = ["pytest>=8", "ruff>=0.5", "mypy>=1.8", "numpy>=1.24"]
+# Also opt-in, also kept out of [project.dependencies] above: only a folder
+# with actual HEIC/HEIF source photos (iPhones' default) ever imports this
+# (pipeline/heic.py), and it pulls in Pillow + a compiled libheif binding.
+heic = ["pillow-heif>=0.13"]
 
 [tool.setuptools]
 py-modules = ["app", "jobs"]

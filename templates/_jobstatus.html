@@ -100,14 +100,10 @@
       {# 沒偵測到物體的張數：這是提示詞沒對上的第一個徵兆，比翻 PNG 早得多 #}
       {% if job.meta.get('empty') %}<span class="chip" style="color:var(--err)">未偵測到 {{ job.meta.empty }}</span>{% endif %}
     </div>
-    {% if job.status in ('running', 'done') and job.meta.get('images') %}
-    {# Live contact strip. Polls while running (the cut-outs are written by a
-       subprocess, so there is no event to push) and stops once the job ends. #}
-    <div id="matte_live"
-         hx-get="/ui/matte_live?images={{ job.meta.get('images','') | urlencode }}&n=8"
-         hx-trigger="load{% if job.status == 'running' %}, every 4s [!document.hidden]{% endif %}"
-         hx-swap="innerHTML"></div>
-    {% endif %}
+    {# The live cut-out strip (#matte_live) mounts in _jobview.html, not here:
+       this whole node gets its outerHTML replaced every 2s, and an element
+       nested inside it would have its own "load" trigger refire on every one
+       of those replacements — see the matte_live route's docstring. #}
     {% if job.status == 'done' %}
     <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <a class="dl primary" target="_blank"

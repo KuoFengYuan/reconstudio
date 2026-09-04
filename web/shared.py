@@ -86,7 +86,7 @@ COLMAP_DEFAULTS = {
     # --- hierarchical-3d-gaussians large-scene method (MATCHER=custom, MAPPER=hierarchical) ---
     "CM_N_SEQ": "0", "CM_N_QUAD": "10", "CM_N_LOOP": "5", "CM_N_GPS": "25",
     "CM_LOOP_MATCHES": "", "FOCAL_FACTOR": "", "SIFT_MAX_IMAGE_SIZE": "auto",
-    "MAX_IMAGE_SIZE": "", "MASKS_DIR": "",
+    "MAX_IMAGE_SIZE": "", "MASKS_DIR": "", "MASK_FEATURES": "0", "CUTOUT_IMAGES": "0",
     "SIMPLIFY": "0", "SIMPLIFY_MULT_MIN_DIST": "10",
     "REORIENT": "0", "REORIENT_TARGET_MED_DIST": "20", "REORIENT_UPSCALE": "0",
     "HM_LEAF_MAX_NUM_IMAGES": "", "HM_IMAGE_OVERLAP": "", "HM_NUM_WORKERS": "",
@@ -94,7 +94,7 @@ COLMAP_DEFAULTS = {
 FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOLD": ""}
 ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
-    "MATCHER": ["sequential", "vocab", "both", "spatial", "custom"],
+    "MATCHER": ["sequential", "vocab", "both", "spatial", "custom", "exhaustive"],
     "RIG_MODE": ["auto", "folder", "regex", "gps"],
     "MAPPER": ["global", "incremental", "pose_prior", "hierarchical"],
     "BA_BACKEND": ["ceres", "caspar"],

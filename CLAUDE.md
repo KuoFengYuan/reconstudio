@@ -109,11 +109,38 @@ The differences:
    folder is usually a folder of *other* datasets that would then share one
    `cutout/`. The `no_bg/` level exists so a plain photo directory does not get
    two loose output folders dropped in beside the originals.
-2. **Two output folders, and which one a consumer wants is not obvious.**
-   COLMAP's `MASKS_DIR` needs `cutout/` — `_stage_undistort` runs
-   `image_undistorter` and then `large_scene.make_mask_uint8`, which reads the
-   **alpha channel**, so 4-channel PNGs. Trainers' `--masks` needs the
-   single-channel `masks/`.
+   The `resize` option moves the whole run: `matte.resize_target` sends it to
+   `images_<cap>/` (COLMAP's resize naming, and literally its
+   `resize_to_fullhd`), and since `output_path_for` always writes to
+   `dataset_root/no_bg/…`, making that copy its own dataset_root is what keeps
+   each resolution's cut-outs separate instead of overwriting each other.
+   `create_matte` must call `resize_target` too — `job.meta` is written once at
+   submit and never rewritten, so the live strip and result links would
+   otherwise point at the un-resized folder.
+2. **Two output folders, and every COLMAP/trainer consumer wants `masks/`.**
+   `cutout/` is for looking at and for tools outside this pipeline.
+   `_run.mask_source_dir` is the one place that knows this — a `cutout/` path
+   resolves to its `masks/` sibling — and both mask consumers go through it:
+   * `MASK_FEATURES` (`--ImageReader.mask_path`) makes SIFT skip the background
+     entirely, and the extractor reads its mask as **greyscale**, so an RGBA
+     cut-out would mask out every dark part of the subject.
+   * `_stage_undistort`'s 5b pushes the masks through the same cameras as the
+     images and cleans them with `large_scene.make_mask_uint8`. Inria's original
+     reads `img[..., -1]` because it was fed the cut-outs, but this COLMAP's
+     `Bitmap::Read` **drops alpha unconditionally** (4→3 channels, 2→1,
+     `sensor/bitmap.cc`), so alpha never survives the undistort. `_mask_plane`
+     therefore reads whichever plane actually carries the mask; a zero-mask
+     export now fails the run instead of finishing with an empty `masks/`.
+
+   `MASK_FEATURES` changes what gets *reconstructed*, not just what gets
+   written — right for a single object shot in two orientations (the room is not
+   rigid with respect to a subject that was picked up and flipped), wrong for a
+   scene. `CUTOUT_IMAGES` then bakes the exported masks into `<dataset>/images/`
+   in place (`large_scene.apply_masks_to_images`), for the trainers/viewer/mesh
+   tools that only read `images/`; it is idempotent, so a redo cannot compound.
+   `_mask_geometry_check` fails the run up front when masks and images are
+   at different longest sides, which used to surface only as `image_undistorter`
+   dying on a CHECK after the mapper had already run.
 3. **A new SAM variant is a new `MaskRunner` subclass** plus one line in
    `build_runner()`. Everything version-specific — package name, checkpoint
    format, prompt encoding, output layout — stays inside the subclass;
@@ -142,6 +169,21 @@ simply wrong — so each has a guard and a test rather than a comment:
 are duplicated in `pipeline/matte.py` and `matte_encode.py` — the first cannot
 import numpy, the second cannot be imported from the `sam` env — and the pairs
 are pinned equal by a test.
+
+**The GPU is not this stage's bottleneck — writing is.** On a 16 MP frame SAM
+costs a few hundred ms and `finish_image` costs ~5.3 s, 4.3 s of it in
+`compose_rgba`'s single-threaded colour bleed. So `WriteFanout` runs
+`finish_image` on a thread pool (measured 4.7× at 8 workers; capped below the
+core count because cv2's own decode/encode is already multi-threaded), workers
+re-read each frame from disk rather than queueing decoded pixels (bounds memory
+to `workers` frames — the producer runs 10-20× ahead), and **`WriteFanout` is
+the only thing allowed to print a `[i/N]` line**: `jobs._parse_depth` sets the
+panel's progress from the last one it saw, so a second printer or a raw loop
+index would make the bar jump backwards. That is why `handle_empty` returns its
+warning text instead of printing it. Inference batching across *photos*
+(`--image-batch`, sam2 + json/full/auto only, `batchable()`) is a smaller,
+separate win; its measured bf16 edge-noise caveat is in
+`Sam2Runner.masks_for_image_batch`.
 
 **Reviewing and repairing is part of the stage, not a separate tool.** A running
 job polls `/ui/matte_live` for the newest cut-outs (a poll, not SSE: the images

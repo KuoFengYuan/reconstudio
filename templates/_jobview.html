@@ -11,6 +11,21 @@
        hx-trigger="load, every 2s"
        hx-swap="outerHTML"></div>
 
+  {% if job.kind == 'matte' and job.meta.get('images') %}
+  <!-- Live cut-out strip: its own island (see the matte_live route's docstring
+       for why it must not live inside #jobstatus), so it schedules its own
+       refresh instead of retriggering off that node's 2s replacement.
+       Mounted for ANY status, deliberately: create_matte renders this fragment
+       the instant the job is submitted, when it is still `queued`, and nothing
+       re-renders _jobview.html afterwards — gating on 'running' here meant the
+       strip only ever appeared if you re-opened the job from 歷史紀錄. The
+       route decides whether to keep polling (queued/running) or settle after
+       one load (done/failed), so an always-mounted island is correct. -->
+  <div id="matte_live"
+       hx-get="/ui/matte_live?images={{ job.meta.get('images','')|urlencode }}&n=8&job_id={{ job.id }}"
+       hx-trigger="load" hx-swap="outerHTML"></div>
+  {% endif %}
+
   <!-- log stream is started by startLogStream() in index.html on htmx:afterSwap
        (htmx doesn't reliably execute inline <script> in swapped fragments). -->
   <!-- 硯 (inkstone) — a warm-charcoal slab so the live log stays legible against washi -->

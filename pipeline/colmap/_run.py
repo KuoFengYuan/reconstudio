@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from ..config import settings
+from ..heic import convert_tree
 from ..runner import PipelineError, Runner
 from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
@@ -141,6 +142,18 @@ COLMAP_DEFAULTS = {
     "max_image_size": "",
     # optional foreground masks: undistort them through the same cameras as the images.
     "masks_dir": "",
+    # ...and, opt-in, ALSO hide the background from SIFT (--ImageReader.mask_path).
+    # Off by default because it changes what gets reconstructed, not just what gets
+    # written: with it on, only the masked subject constrains the solve. That is
+    # exactly what an object shot in two orientations (upright, then flipped for the
+    # underside) needs — the room is not rigid with respect to a subject that got
+    # picked up and put down — and exactly what a scene reconstruction must not do.
+    "mask_features": False,
+    # ...and, opt-in, bake the masks into the undistorted images (background -> black),
+    # so `<dataset>/images/` is background-free too. Off by default: it rewrites the
+    # images every downstream tool reads, and a mask-aware trainer does not need it —
+    # it is for the trainers/viewers/mesh tools that only ever look at images/.
+    "cutout_images": False,
     # --- region subset: re-run the whole pipeline over an area picked in the viewer ---
     # `region` is the "minx,miny,maxx,maxy" rectangle the ⬚ 選訓練範圍 tool produces,
     # measured on `region_model`'s own horizontal axes. When both are set the image list
@@ -212,6 +225,8 @@ class _Ctx:
     sift_max_image_size: str
     max_image_size: str
     masks_dir: str
+    mask_features: bool
+    cutout_images: bool
     region: str
     region_model: str
     region_buffer: float
@@ -293,9 +308,9 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         r.log(f"WARNING: Caspar only supports SIMPLE_RADIAL / PINHOLE cameras, but "
               f"CAMERA_MODEL={d['camera_model']} — Caspar will skip every image "
               f"(no BA happens). Use SIMPLE_RADIAL or PINHOLE.")
-    if matcher not in ("sequential", "vocab", "both", "spatial", "custom"):
-        raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', 'spatial', or "
-                         f"'custom' (got: {matcher})")
+    if matcher not in ("sequential", "vocab", "both", "spatial", "custom", "exhaustive"):
+        raise ValueError(f"MATCHER must be 'sequential', 'vocab', 'both', 'spatial', "
+                         f"'custom', or 'exhaustive' (got: {matcher})")
 
     # EO CSV (optional): validate path + CRS up front — a wrong projection would put every
     # prior kilometres away, and we'd rather fail before extraction than after.
@@ -357,6 +372,9 @@ def _setup(p: dict, r: Runner) -> _Ctx:
 
     if not Path(img_root).is_dir():
         raise FileNotFoundError(f"image_root not found: {img_root}")
+    n_heic = convert_tree(Path(img_root))
+    if n_heic:
+        r.log(f"HEIC/HEIF -> JPEG: 轉了 {n_heic} 張")
     folders, nested, layout_name = resolve_layout(
         img_root, folders, str(p.get("layout") or "auto"), bool(d["nested_layout"]),
         workspace=p.get("workspace"))
@@ -402,6 +420,8 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         sift_max_image_size=str(d["sift_max_image_size"]).strip(),
         max_image_size=str(d["max_image_size"]).strip(),
         masks_dir=str(d["masks_dir"]).strip(),
+        mask_features=bool(d["mask_features"]),
+        cutout_images=bool(d["cutout_images"]),
         region=region, region_model=region_model,
         region_buffer=region_buffer, region_vis_thresh=region_vis_thresh,
         simplify=bool(d["simplify"]), reorient=bool(d["reorient"]),
@@ -597,6 +617,76 @@ def _maybe_resize_fullhd(c: _Ctx) -> None:
 # keypoints no longer describe the images the later stages will read: the image
 # path (a resize rebases it), the SIFT size the coordinates were detected at, and
 # the camera model/mode baked into the cameras table.
+def mask_source_dir(masks_dir: str) -> Path:
+    """The mask folder every consumer should actually read, given MASKS_DIR.
+
+    One folder for all of them, and it is the single-channel `masks/` — not the
+    `cutout/` the h3dgs scripts were written around:
+
+      * the feature extractor reads its mask as **greyscale**
+        (`mask->Read(path, as_rgb=false)`, image_reader.cc) and drops features
+        wherever it is black, so an RGBA cut-out would be read as luminance and
+        every dark part of the subject would count as background;
+      * the undistort pass used to want `cutout/` for its alpha, but this
+        COLMAP's `Bitmap::Read` discards alpha unconditionally
+        (sensor/bitmap.cc:426), so alpha never reaches `make_mask_uint8` — which
+        is why that pass silently wrote zero masks. It now reads whatever plane
+        carries the mask, so single-channel input is the one that works for both.
+
+    So: MASKS_DIR pointing at a `cutout/` resolves to its `masks/` sibling; any
+    other folder is taken as-is (a hand-built 0/255 folder is legitimate).
+    """
+    d = Path(masks_dir)
+    if d.name == "cutout":
+        sibling = d.parent / "masks"
+        if sibling.is_dir():
+            return sibling
+    return d
+
+
+def _mask_geometry_check(c: _Ctx) -> None:
+    """Fail now if the masks do not match the images this run will read.
+
+    The resize rebases `img_root` but never `masks_dir`, so matting at one
+    longest side and reconstructing at another lines up nowhere — and the
+    existing symptom is `image_undistorter` dying much later on a hard
+    CHECK (distorted_camera.width != bitmap.Width()), long after the mapper
+    has run. One header read up front turns that into a sentence.
+    """
+    if not c.lines:
+        return
+    root = mask_source_dir(c.masks_dir)
+    rel = c.lines[0]
+    img = Path(c.img_root) / rel
+    mask = root / Path(rel).with_suffix(".png")
+    if not mask.is_file():
+        mask = root / (rel + ".png")            # COLMAP's documented naming
+    if not mask.is_file():
+        raise FileNotFoundError(
+            f"找不到 {rel} 對應的遮罩(找過 {root / Path(rel).with_suffix('.png')} "
+            f"與 {root / (rel + '.png')})。MASKS_DIR 的子路徑要跟 image list 一致。")
+    img_size, mask_size = _image_size(img), _image_size(mask)
+    if img_size and mask_size and img_size != mask_size:
+        raise ValueError(
+            f"遮罩與影像尺寸不符:{rel} 是 {img_size[0]}×{img_size[1]},"
+            f"但 {mask.name} 是 {mask_size[0]}×{mask_size[1]}。\n"
+            f"  影像: {img}\n  遮罩: {mask}\n"
+            "去背與 COLMAP 必須在同一個長邊上跑。把「影像解析度」設成「保持原樣」"
+            "(影像本身已經是縮好的),或用同一個長邊重跑一次去背。")
+
+
+def _image_size(path: Path) -> tuple[int, int] | None:
+    """(w, h) from the file header, or None if it cannot be read. PIL is a test-
+    only dependency of the panel, so a missing import must not fail the run —
+    it just means this check cannot be made."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return im.size
+    except Exception:                            # noqa: BLE001 — best-effort probe
+        return None
+
+
 def _extract_fingerprint(c: _Ctx) -> dict[str, str]:
     return {
         "image_path": str(c.img_root),
@@ -605,6 +695,9 @@ def _extract_fingerprint(c: _Ctx) -> dict[str, str]:
         "camera_mode": c.camera_mode,
         "layout": c.layout_name,
         "max_features": str(c.d["max_features"]),
+        # Masked and unmasked keypoints describe the same images but a different
+        # scene, so a database built one way must not be reused the other way.
+        "mask_features": str(mask_source_dir(c.masks_dir)) if c.mask_features else "off",
     }
 
 
@@ -660,11 +753,23 @@ def _stage_extract(c: _Ctx) -> None:
             if sift_px:
                 c.r.log(f"FeatureExtraction.max_image_size={sift_px} "
                         "(COLMAP default -1 behaves like 3200)")
+            # Masked extraction: no features on the background at all, so only the
+            # subject constrains the solve. See COLMAP_DEFAULTS["mask_features"].
+            masks = []
+            if c.mask_features:
+                if not c.masks_dir:
+                    raise ValueError("MASK_FEATURES 需要同時填 MASKS_DIR(遮罩資料夾)")
+                mdir = mask_source_dir(c.masks_dir)
+                if not mdir.is_dir():
+                    raise FileNotFoundError(f"遮罩資料夾不存在: {mdir}")
+                masks = ["--ImageReader.mask_path", str(mdir)]
+                c.r.log(f"ImageReader.mask_path={mdir} "
+                        "(背景不抽特徵;遮罩全黑的區域整張被忽略)")
             c.r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(c.db),
                      "--image_path", c.img_root, "--image_list_path", str(c.lst), *cam,
                      "--ImageReader.camera_model", str(c.d["camera_model"]),
                      "--SiftExtraction.max_num_features", str(c.d["max_features"]),
-                     *sift_size])
+                     *sift_size, *masks])
             (c.ws / ".extract.json").write_text(
                 json.dumps(_extract_fingerprint(c), indent=2), encoding="utf-8")
         else:
@@ -998,6 +1103,20 @@ def _stage_match(c: _Ctx) -> None:
                          "--FeatureMatching.guided_matching", str(c.d["guided_matching"]),
                          "--VocabTreeMatching.vocab_tree_path", str(c.vocab_tree),
                          "--VocabTreeMatching.num_images", str(c.d["num_matches"])])
+            if c.matcher == "exhaustive":
+                # Every pair, no retrieval step. The point is the pairs retrieval
+                # would never propose: when a capture contains two groups whose
+                # internal similarity dwarfs their similarity to each other — an
+                # object shot upright and then flipped — vocab/sequential spend the
+                # whole per-image budget on same-group neighbours and the handful of
+                # cross-group pairs that actually stitch the two halves are never
+                # attempted. Cost is quadratic (n images -> n(n-1)/2 pairs), so this
+                # is for a few thousand images at most.
+                n = len(c.lines)
+                c.r.banner(f"exhaustive_matcher ({n} images -> {n * (n - 1) // 2} pairs)")
+                c.r.run([COLMAP_BIN, "exhaustive_matcher", "--database_path", str(c.db),
+                         "--FeatureMatching.guided_matching",
+                         str(c.d["guided_matching"])])
             if c.matcher == "spatial":
                 c.r.banner(f"spatial_matcher (GPS priors; max_neighbors="
                            f"{c.d['spatial_max_neighbors']}, max_distance="
@@ -1250,6 +1369,52 @@ def _stage_models_report(c: _Ctx) -> None:
                 "tick GM_SINGLE_MODEL to go back to reconstructing only the largest.")
 
 
+def _stage_coverage_report(c: _Ctx) -> None:
+    """4a'''. Per-folder registration rate in sparse/0.
+
+    Only for a multi-folder run, where it answers the one question the totals
+    cannot: did the groups end up in the SAME model? A capture split into
+    folders because it is two passes over one subject — upright, then flipped
+    for the underside — succeeds or fails exactly here, and "1013 images
+    registered" looks identical whether both passes fused or one of them was
+    dropped wholesale into a component nobody reads. `up 578/584, down 451/460`
+    says fused; `up 578/584, down 3/460` says it did not.
+
+    Cheap enough because it only runs with several folders, and reads the model
+    the simplify stage is about to read anyway.
+    """
+    if len(c.folders) < 2:
+        return                       # single folder: the totals already say it all
+    model = c.ws / "sparse" / "0"
+    if not (model / "images.bin").is_file():
+        return
+    from ..vendor.read_write_model import read_images_binary
+    try:
+        registered = read_images_binary(str(model / "images.bin"))
+    except Exception as exc:         # noqa: BLE001 — a report must not fail the run
+        c.r.log(f"[warn] coverage report skipped ({exc})")
+        return
+
+    def folder_of(name: str) -> str:
+        return name.split("/")[0] if "/" in name else ""
+
+    listed: dict[str, int] = {}
+    for rel in c.lines:
+        listed[folder_of(rel)] = listed.get(folder_of(rel), 0) + 1
+    got: dict[str, int] = {}
+    for im in registered.values():
+        f = folder_of(str(im.name).replace("\\", "/"))
+        got[f] = got.get(f, 0) + 1
+
+    parts = [f"{f or '<root>'} {got.get(f, 0)}/{n}" for f, n in listed.items()]
+    c.r.banner("sparse/0 coverage: " + ", ".join(parts))
+    weak = [f or "<root>" for f, n in listed.items() if n and got.get(f, 0) / n < 0.5]
+    if weak:
+        c.r.log(f"  [warn] {', '.join(weak)} 有一半以上的影像沒有進到 sparse/0 —— "
+                "這幾組跟其他組之間沒有足夠的共視。跨組的連結不夠強時,mapper 會把它們"
+                "留在別的 component(見上面的 models 報告)。")
+
+
 def _stage_intrinsics_report(c: _Ctx) -> None:
     """4a'. Compare what the bundle converged to against the certificate.
 
@@ -1417,8 +1582,9 @@ def _stage_undistort(c: _Ctx) -> None:
         # cameras as the images (a model copy with .png image names), then clean them
         # to uint8 0/255 under dense_dir/masks. Only when MASKS_DIR is set.
         if c.masks_dir:
-            if not Path(c.masks_dir).is_dir():
-                raise FileNotFoundError(f"masks_dir not found: {c.masks_dir}")
+            msrc = mask_source_dir(c.masks_dir)
+            if not msrc.is_dir():
+                raise FileNotFoundError(f"masks_dir not found: {msrc}")
             mask_done = c.ws / ".masks.done"
             if c.need(mask_done):
                 from .. import large_scene
@@ -1431,18 +1597,39 @@ def _stage_undistort(c: _Ctx) -> None:
                                                     mask_model / "images.bin")
                 tmp_masks = c.ws / "tmp_masks"
                 shutil.rmtree(tmp_masks, ignore_errors=True)
-                _sanitize_exif(c, c.masks_dir, "masks")
+                _sanitize_exif(c, str(msrc), "masks")
                 c.r.banner(f"image_undistorter (masks) -> {c.dense_dir / 'masks'}")
-                c.r.run([COLMAP_BIN, "image_undistorter", "--image_path", c.masks_dir,
+                c.r.run([COLMAP_BIN, "image_undistorter", "--image_path", str(msrc),
                          "--input_path", str(mask_model), "--output_path", str(tmp_masks),
                          "--output_type", "COLMAP", *uextra])
                 n = large_scene.make_mask_uint8(str(tmp_masks / "images"),
                                                 str(c.dense_dir / "masks"))
                 c.r.log(f"  wrote {n} uint8 masks -> {c.dense_dir / 'masks'}")
+                if not n:
+                    raise RuntimeError(
+                        f"遮罩去畸變後一張都沒寫出來({tmp_masks / 'images'} 讀不到遮罩)。"
+                        f"檢查 MASKS_DIR={msrc} 裡是不是真的遮罩 PNG。")
                 shutil.rmtree(tmp_masks, ignore_errors=True)
                 mask_done.touch()
             else:
                 c.r.log("skip masks (sentinel exists; set FORCE=1 to redo)")
+
+            # 5c. and, opt-in, bake those masks into the images themselves, so the
+            # training dataset's images/ have no background either. Separate from 5b
+            # because the mask export alone is what a mask-aware trainer wants; this
+            # is for everything downstream that only reads images/.
+            if c.cutout_images:
+                cutout_done = c.ws / ".cutout.done"
+                if c.need(cutout_done):
+                    from .. import large_scene
+                    c.r.banner(f"cutout images (背景塗黑) -> {c.dense_dir / 'images'}")
+                    n, missing = large_scene.apply_masks_to_images(
+                        str(c.dense_dir / "images"), str(c.dense_dir / "masks"))
+                    c.r.log(f"  rewrote {n} images"
+                            + (f", {missing} left as-is (no mask)" if missing else ""))
+                    cutout_done.touch()
+                else:
+                    c.r.log("skip cutout images (sentinel exists; set FORCE=1 to redo)")
 
 
 def _stage_reorient(c: _Ctx) -> None:
@@ -1494,6 +1681,8 @@ def run_colmap(p: dict, r: Runner) -> None:
     _check_gps_coverage(c)      # c.gps_present / c.gps_opts (may abort)
     c.orig_root = c.img_root    # capture pre-resize originals (intact EXIF) for gps_inject
     _maybe_resize_fullhd(c)     # FullHD downscale (rebases img_root)
+    if c.masks_dir:             # after the resize: it rebases img_root, not masks_dir
+        _mask_geometry_check(c)
     _stage_extract(c)           # 1. feature_extractor
     _stage_apply_intrinsics(c)  # 1b'. vendor calibration -> cameras table
     _stage_rig_configure(c)     # 1c. rig_configurator -> rigs/frames in the DB
@@ -1503,6 +1692,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_rig_calibrate(c)     # 3b. derive sensor_from_rig for non-global mappers
     _stage_mapper(c)            # 4. mapper -> sparse/0
     _stage_models_report(c)     # 4a''. report extra sparse/N components, if any
+    _stage_coverage_report(c)   # 4a'''. per-folder registration rate in sparse/0
     _stage_intrinsics_report(c) # 4a'. calibrated vs solved intrinsics
     _stage_simplify(c)          # 4a. simplify_images (optional)
     _stage_align(c)             # 4b. model_aligner (optional GPS)
