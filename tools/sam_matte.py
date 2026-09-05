@@ -222,12 +222,24 @@ def points_for_image(spec: dict, rel: str, width: int, height: int):
     wrong. A click labelled 1 says "this pixel is subject" and 0 says "this pixel
     is not", which is new information and usually fixes a bad mask in one or two
     clicks. Stored as [x, y, label] triples alongside the box.
+
+    Honours `apply=all` off a top-level `points`, the same way `boxes_for_image`
+    does off a top-level `boxes`. Without that symmetry a point correction could
+    only ever describe the one frame it was clicked on, so a whole folder that
+    SAM got wrong the same way on every frame — a part/whole ambiguity, say, where
+    a differently-glazed neck reads as its own object — had to be repaired one
+    frame at a time. Points are positional, so a folder-wide prompt is only
+    meaningful when the subject stays put in the frame; that is the caller's call
+    to make, not this function's.
     """
     import numpy as np
-    entry = (spec.get("per_image") or {}).get(rel)
-    if not isinstance(entry, dict) or not entry.get("points"):
+    per = spec.get("per_image") or {}
+    entry = per.get(rel)
+    raw = entry.get("points") if isinstance(entry, dict) else None
+    if not raw and rel not in per and spec.get("apply") == "all":
+        raw = spec.get("points")
+    if not raw:
         return None, None
-    raw = entry["points"]
     coords = np.asarray([[float(p[0]), float(p[1])] for p in raw], dtype=np.float32)
     labels = np.asarray([int(p[2]) for p in raw], dtype=np.int32)
     if spec.get("norm") and len(coords):
@@ -962,13 +974,30 @@ def batchable(args, runner: MaskRunner, spec: dict) -> bool:
     prompt into the forward pass, so there is nothing to reuse). The boxes must
     be derivable without the GPU — true for json/full/auto, false for `text`
     (a detector or the model itself produces them) and `exemplar` (SAM 3 only).
-    And there must be no click prompts: that is the single-frame repair path,
-    where there is nothing to batch.
+    And there must be no click prompts anywhere in the spec: the batched path
+    prompts with boxes only, so a photo that was supposed to be corrected by
+    clicks would go down it with its clicks ignored.
+
+    `has_points` has to look inside `per_image` too, not just at the top level.
+    Checking only the top level is what made every point-only repair a silent
+    no-op: the repair spec puts the clicks in `per_image[rel]["points"]` and
+    leaves `boxes` empty, so the run was judged batchable, took the box-only
+    path, found no boxes, and skipped the image — reporting `processed=0` while
+    the job still finished "done".
     """
     return (args.image_batch > 1
             and args.boxes in BATCHABLE_BOX_SOURCES
             and hasattr(runner, "masks_for_image_batch")
-            and not (spec or {}).get("points"))
+            and not has_points(spec))
+
+
+def has_points(spec: dict | None) -> bool:
+    """Whether a prompt spec carries click prompts at all — top level or per image."""
+    spec = spec or {}
+    if spec.get("points"):
+        return True
+    return any(isinstance(v, dict) and v.get("points")
+               for v in (spec.get("per_image") or {}).values())
 
 
 def run_batched(args, runner: MaskRunner, images: list, images_dir: Path,

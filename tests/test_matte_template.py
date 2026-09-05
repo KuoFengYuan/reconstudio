@@ -87,3 +87,58 @@ def test_the_engine_options_take_their_default_from_the_pipeline(index_html):
         line = next(ln for ln in block.splitlines() if f'value="{engine}"' in ln)
         assert "matte_defaults.matte_engine" in line, engine
     assert MATTE_DEFAULTS["matte_engine"] in ENGINES
+
+
+# --------------------------------------------------------------------------- #
+# The step gate. A first run fails the same way every time — 開始去背 pressed
+# with no box drawn — and the server's (correct) error arrives only after a
+# submit that swaps #main, taking the user away from everything they filled in.
+# --------------------------------------------------------------------------- #
+CREATE = BASE / "web" / "routers" / "create.py"
+
+
+def _gate_modes(index_html: str) -> set[str]:
+    m = re.search(r"var needs = \[([^\]]+)\]\.indexOf\(mode\.value\)", index_html)
+    assert m, "matteGate no longer decides which modes need a box"
+    return set(re.findall(r"'([a-z]+)'", m.group(1)))
+
+
+def test_the_gate_and_the_server_agree_on_which_modes_need_a_box(index_html):
+    """Two lists in two files. Drift one way lets the form submit into a server
+    error; drift the other way blocks a mode that never needed a box."""
+    served = re.search(r'if boxes in \(([^)]+)\):', CREATE.read_text())
+    assert served, "create_matte no longer gates on the prompt mode"
+    assert _gate_modes(index_html) == set(re.findall(r'"([a-z]+)"', served.group(1)))
+
+
+@pytest.mark.parametrize("caller", ["syncMatte", "mpRender"])
+def test_the_gate_reruns_whenever_its_inputs_change(index_html, caller):
+    """Called from too few places and the button just stays wrong — still
+    disabled after you draw a box, or still enabled after you clear one."""
+    body = index_html.split(f"function {caller}(")[1].split("\n  }")[0]
+    assert "matteGate()" in body, f"{caller} does not refresh the gate"
+
+
+def test_the_path_field_refreshes_the_gate(index_html):
+    assert re.search(r'id="matte_images"[^>]*oninput="matteGate\(\)"', index_html, re.S)
+
+
+def test_picking_a_folder_notifies_the_field(index_html):
+    """`el.value = path` fires no event, so without this the gate would still be
+    asking for a folder that is already filled in."""
+    body = index_html.split("function pickDir(")[1].split("\n  }")[0]
+    assert "new Event('input'" in body
+
+
+def test_boxes_remember_which_folder_they_were_drawn_in(index_html):
+    """They are keyed by filename inside one folder; re-pointing the form would
+    otherwise send SAM a prompt naming files that are not there."""
+    assert "h.dataset.dir" in index_html
+    body = index_html.split("function matteGate(")[1].split("\n  }")[0]
+    assert "h.dataset.dir !== dir" in body
+
+
+def test_the_form_leads_with_the_steps_not_the_reference(index_html):
+    form = index_html.split('id="form-matte"')[1]
+    steps, first_label = form.index('class="steps"'), form.index("<label>")
+    assert steps < first_label, "the numbered steps must come before the fields"

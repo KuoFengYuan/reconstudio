@@ -46,6 +46,23 @@
   .kbd { border:1px solid var(--line); border-radius:4px; padding:0 5px; font-size:12px; }
   #msg { margin-top:10px; font-size:14px; }
   #msg.err { color:var(--err); } #msg.ok { color:var(--accent); }
+  /* Filmstrip. Horizontally scrollable rather than fitted: a capture sequence is
+     hundreds of frames, and the point is to see which ones share the mistake. */
+  #strip { margin-top:12px; max-width:1100px; }
+  .striphead { display:flex; gap:8px; align-items:center; margin-bottom:6px;
+               color:var(--mut); font-size:13px; }
+  .striphead button { padding:2px 8px; font-size:12px; }
+  #stripsel { color:var(--fg); }
+  .stripbody { display:flex; gap:2px; overflow-x:auto; padding:4px;
+               border:1px solid var(--line); border-radius:8px; background:#12100d;
+               user-select:none; }
+  .sf { position:relative; flex:0 0 auto; width:72px; height:54px; border-radius:4px;
+        overflow:hidden; outline:2px solid transparent; cursor:pointer; opacity:.4; }
+  .sf img { width:100%; height:100%; object-fit:cover; display:block; pointer-events:none; }
+  .sf.sel { opacity:1; outline-color:var(--accent); }
+  /* The frame being edited stays identifiable even when it is not in the span. */
+  .sf.here { outline-color:#4aa3ff; opacity:1; }
+  .sf.here.sel { outline-color:var(--accent); }
 </style>
 </head>
 <body>
@@ -60,6 +77,16 @@
   <button onclick="rpUndo()">↶ 復原</button>
   <button onclick="rpClear()">✕ 清除</button>
   <button id="toggle" onclick="rpToggle()">👁 隱藏目前遮罩</button>
+  {# Scope, because the same mistake is usually not one frame's. A turntable
+     sequence gets the SAME part/whole ambiguity on every frame, and repairing
+     666 of them one at a time is not a workflow. Points are positional, so the
+     wider scopes are only correct while the subject stays put in frame — hence
+     a choice rather than a default. #}
+  <select id="scope" onchange="rpScope()" title="這組提示要套用到幾張">
+    <option value="one">只這一張</option>
+    <option value="range">自訂範圍(在下方影格條拖拉)</option>
+    <option value="all">整個資料夾</option>
+  </select>
   <button class="go" id="apply" onclick="rpApply()">✔ 重新去背這一張</button>
 </div>
 
@@ -71,9 +98,29 @@
   </div>
   <div class="hint">
     在<b>錯的地方點一下</b>就好:少切到的部分用 <b>＋ 保留</b>,多切到的背景用 <b>－ 去除</b>。
-    通常一兩點就夠 —— 單純再畫一次框沒有用,因為當初就是那個框產生了這個結果,
-    點提示才帶進新資訊。<span class="kbd">Shift</span>+點 = 去除,
-    <span class="kbd">Alt</span>+拖曳 = 重畫框,點在標記上可刪除它。
+    <span class="kbd">Shift</span>+點 = 去除,<span class="kbd">Alt</span>+拖曳 = 重畫框,
+    點在標記上可刪除它。
+    <br>整塊區域被漏掉的時候(釉面瓶頸、金屬底座這種跟主體外觀差很多的部件),
+    <b>先用 ⬚ 重畫框畫一個涵蓋整個主體的框,再補一兩點</b> —— 框給的是「範圍」,
+    點給的是「這裡也算主體」,兩個一起才穩。實測同一張:只點 53 點 → 面積 0.30 但邊緣很雜;
+    <b>一個框 + 6 點 → 0.31 且乾淨</b>。點很多下不會比較準。
+  </div>
+  {# The filmstrip: drag across it to pick exactly the frames that share this
+     mistake. A fixed ±N either needs several passes or overshoots into frames
+     that were already fine, and only you can see which is which. #}
+  <div id="strip" style="display:none">
+    <div class="striphead">
+      <span id="stripsel">拖拉選範圍</span>
+      <button onclick="rpStripAll()">全選</button>
+      <button onclick="rpStripJust()">只留這一張</button>
+    </div>
+    <div class="stripbody" id="stripbody"></div>
+  </div>
+  <div class="hint" id="scopewarn" style="display:none">
+    ⚠ 一次套用多張時,<b>座標是按比例套過去的</b>(不是追著物件跑)—— 主體在畫面裡
+    大致同一個位置才有意義,轉盤序列通常成立。點在<b>整個主體都有的部位</b>上
+    (瓶身中央這種)會比點在邊緣可靠。整組系統性錯掉的話,先改用
+    <b>框選 + 追蹤傳播</b>重跑會比逐段修更省事。
   </div>
   <div id="msg"></div>
 </div>
@@ -177,13 +224,99 @@
     document.getElementById('toggle').textContent = on ? '👁 顯示目前遮罩' : '👁 隱藏目前遮罩';
   }
 
+  // --- filmstrip: pick the exact span that shares this mistake --------------- #
+  var strip = { frames:[], root:'', at:-1, lo:-1, hi:-1, drag:false, loaded:false };
+
+  function rpScope(){
+    var v = document.getElementById('scope').value;
+    document.getElementById('scopewarn').style.display = (v === 'one') ? 'none' : '';
+    document.getElementById('strip').style.display = (v === 'range') ? '' : 'none';
+    if (v === 'range' && !strip.loaded) rpStripLoad();
+    rpApplyLabel();
+  }
+  function rpCount(){
+    var v = document.getElementById('scope').value;
+    if (v === 'one') return 1;
+    if (v === 'all') return -1;                      // -1 = the whole folder
+    return (strip.lo < 0) ? 1 : (strip.hi - strip.lo + 1);
+  }
+  function rpApplyLabel(){
+    var n = rpCount();
+    document.getElementById('apply').textContent =
+      n < 0 ? '✔ 重新去背整個資料夾'
+            : n === 1 ? '✔ 重新去背這一張' : '✔ 重新去背這 ' + n + ' 張';
+  }
+  async function rpStripLoad(){
+    strip.loaded = true;
+    var body = document.getElementById('stripbody');
+    body.textContent = '載入影格…';
+    try {
+      var r = await fetch('/api/matte/frames?images=' + encodeURIComponent(IMAGES) +
+                          '&rel=' + encodeURIComponent(REL));
+      var j = await r.json();
+      strip.frames = j.frames || []; strip.root = j.root || ''; strip.at = j.at;
+    } catch (e) { body.textContent = '讀不到影格清單:' + e; return; }
+    strip.lo = strip.hi = (strip.at >= 0 ? strip.at : 0);
+    // loading=lazy matters: a capture sequence is hundreds of frames and each
+    // thumbnail is a separate ffmpeg downscale on the server.
+    body.innerHTML = strip.frames.map(function(rel, i){
+      return '<div class="sf' + (i === strip.at ? ' here' : '') + '" data-i="' + i + '">' +
+             '<img loading="lazy" src="/api/matte/imagefile?path=' +
+               encodeURIComponent(strip.root + '/' + rel) + '&w=144" alt="">' +
+             '</div>';
+    }).join('');
+    rpStripPaint();
+    var here = body.querySelector('.sf.here');
+    if (here) here.scrollIntoView({block:'nearest', inline:'center'});
+  }
+  function rpStripPaint(){
+    document.querySelectorAll('#stripbody .sf').forEach(function(el){
+      var i = +el.dataset.i;
+      el.classList.toggle('sel', i >= strip.lo && i <= strip.hi);
+    });
+    var sel = document.getElementById('stripsel');
+    if (strip.lo < 0) { sel.textContent = '拖拉選範圍'; }
+    else {
+      var n = strip.hi - strip.lo + 1;
+      sel.textContent = n + ' 張:' + strip.frames[strip.lo].split('/').pop() +
+                        (n > 1 ? ' … ' + strip.frames[strip.hi].split('/').pop() : '');
+    }
+    rpApplyLabel();
+  }
+  function rpStripAll(){ strip.lo = 0; strip.hi = strip.frames.length - 1; rpStripPaint(); }
+  function rpStripJust(){ strip.lo = strip.hi = Math.max(0, strip.at); rpStripPaint(); }
+
+  // Drag = "from here to there". mousedown anchors, mouseover extends while held,
+  // and the anchor can be either end so dragging left works the same as right.
+  (function(){
+    var body = document.getElementById('stripbody'), anchor = -1;
+    function idx(e){ var c = e.target.closest('.sf'); return c ? +c.dataset.i : -1; }
+    body.addEventListener('mousedown', function(e){
+      var i = idx(e); if (i < 0) return;
+      e.preventDefault();
+      anchor = i; strip.drag = true; strip.lo = strip.hi = i; rpStripPaint();
+    });
+    body.addEventListener('mouseover', function(e){
+      if (!strip.drag) return;
+      var i = idx(e); if (i < 0) return;
+      strip.lo = Math.min(anchor, i); strip.hi = Math.max(anchor, i); rpStripPaint();
+    });
+    // on window, not the strip: releasing outside it must still end the drag
+    window.addEventListener('mouseup', function(){ strip.drag = false; });
+  })();
+
   function rpApply(){
     var msg = document.getElementById('msg');
     msg.className = ''; msg.textContent = '送出中…';
+    var scope = document.getElementById('scope').value;
     var body = new URLSearchParams({
-      images: IMAGES, rel: REL,
+      images: IMAGES, rel: REL, scope: scope,
       prompt: JSON.stringify({ box: st.box, points: st.points })
     });
+    if (scope === 'range' && strip.lo >= 0) {
+      body.set('from', strip.frames[strip.lo]);
+      body.set('to', strip.frames[strip.hi]);
+    }
     fetch('/ui/matte_repair', {method:'POST', body: body})
       .then(function(r){ return r.json(); })
       .then(function(j){
@@ -201,7 +334,19 @@
     fetch('/api/jobs/' + job).then(function(r){ return r.json(); }).then(function(j){
       var msg = document.getElementById('msg');
       if (j.status === 'done') {
-        msg.className='ok'; msg.textContent = '完成,重新載入結果…';
+        // "done" is not the same as "re-cut something". A run that skipped every
+        // frame finishes done with written=0, and saying 完成 there is how a
+        // no-op repair looked like a reload bug for as long as it existed.
+        var wrote = (j.meta || {}).written;
+        if (wrote === 0) {
+          msg.className='err';
+          msg.textContent = '這一批沒有任何影格被重新處理(written=0)—— 提示可能沒送到,' +
+                            '或整批都被跳過。打開下面的工作紀錄看 [warn] 那一行。';
+          return;
+        }
+        msg.className='ok';
+        msg.textContent = (wrote > 1 ? '完成,重新去背了 ' + wrote + ' 張,' : '完成,') +
+                          '重新載入結果…';
         var c = document.getElementById('cut');
         if (c) c.src = c.src.split('&t=')[0] + '&t=' + Date.now();
         else location.reload();
