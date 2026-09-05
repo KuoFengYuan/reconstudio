@@ -18,6 +18,41 @@
 | 要調效能 / 接雲端 / 用 GPS 航拍 | [三、進階](#三進階) |
 | 要改 code | [四、開發者](#四開發者) |
 
+## 每天怎麼啟動
+
+裝好之後日常就這一行 —— 在**這台機器上**(ssh / VS Code 終端機都可以):
+
+```bash
+cd ~/repo/reconstudio && ./run.sh
+```
+
+它會自己讀 `local.env`、解 conda 環境、順手把 SuperSplat 更到最新版(背景跑,不擋啟動),
+然後印出**真正連得到的網址**:
+
+```
+Recon Studio  (env=rec, ffmpeg=ffmpeg, colmap=/home/will/repo/colmap/build/…)
+  本機          http://127.0.0.1:8078
+  區網(nginx)   https://recon.venraas.tw/   ← 給同事的就是這個(要帳密)
+```
+
+- **自己用** → `http://127.0.0.1:8078`(VS Code 會自動幫你轉發這個 port)
+- **給同事** → `https://recon.venraas.tw/` + 帳密。這條走 nginx,nginx 是系統服務、
+  開機就在,所以你只要負責把面板本身跑起來。
+
+視窗關掉面板就會停。要讓它一直活著(同事隨時連得到、重開機也自動起來),裝那個選用的
+user service —— 見 [讓同事連得到(區網)](#讓同事連得到區網)。
+
+**停止**:前景跑的按 `Ctrl+C`;裝成服務的用 `systemctl --user stop reconstudio`。
+
+**改完程式碼**:改 `templates/` 只要重新整理頁面;改 `.py` 要重啟面板(`Ctrl+C` 再
+`./run.sh`,或 `systemctl --user restart reconstudio`)。
+
+**連不上的時候**先跑這個,它會直接告訴你是綁錯位址、代理指錯 port、還是 nginx 沒起來:
+
+```bash
+./run.sh --doctor
+```
+
 ---
 
 # 一、安裝(第一次部署)
@@ -269,7 +304,157 @@ worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航�
 ./run.sh        # → 開瀏覽器 http://127.0.0.1:8077
 ```
 
-遠端機器用 `ssh -L 8077:127.0.0.1:8077 user@host`,或 `HOST=0.0.0.0 ./run.sh`。
+日常啟動的簡版在最前面的 [每天怎麼啟動](#每天怎麼啟動)。這裡是細節。
+
+啟動時會把**真正連得到的網址**印出來(本機、以及區網代理裝好之後的那一個),並且在
+port 已經被別的行程佔住時直接拒絕啟動 —— 不然活下來的是舊的那個面板,跑的是舊的程式碼,
+而這跟「我的改動沒生效」長得一模一樣。
+
+`HOST` / `PORT` **只從 `local.env` 讀**,不繼承環境變數:conda 的編譯器啟用會 export
+`HOST=x86_64-conda-linux-gnu`,很多工具會 export `PORT`,繼承到就會綁不起來、或安靜地開
+在沒人知道的 port 上。要一次性覆蓋用 `RECON_STUDIO_HOST` / `RECON_STUDIO_PORT`。
+
+自己遠端用:`ssh -L 8077:127.0.0.1:8077 user@host`。
+
+### 讓同事連得到(區網)
+
+**不要**改成 `HOST=0.0.0.0`:面板沒有任何登入機制,又能瀏覽 `RECON_STUDIO_BROWSE_ROOT`
+底下的檔案、還會開子行程。改用 nginx 反向代理,面板本身維持綁 `127.0.0.1`:
+
+```bash
+sudo scripts/deploy-nginx-lan.sh                       # 會問一組帳密
+sudo scripts/deploy-nginx-lan.sh --domain recon.example.tw   # 換網址
+sudo scripts/deploy-nginx-lan.sh --https-port 8443 --alt-port 8444   # 換 port
+sudo scripts/deploy-nginx-lan.sh --cert mkcert       # 強制用哪張憑證(預設 auto)
+```
+
+裝完會有**兩個入口**:
+
+| | 給誰 | |
+|---|---|---|
+| `https://recon.venraas.tw/` | 給同事的 | 不用記 port |
+| `https://<區網IP>:8443/` | 備援 | DNS 出問題時照樣進得去 |
+
+正式入口跟這台機器上其他站台**共用 443**(nginx 用 SNI / Host 分流)。所以 443 上這個
+vhost 的 `server_name` **只掛自己的網址** —— 裸 IP 和 `localhost` 是別的站台的名字,兩個
+server block 搶同一個 server_name 不會報錯,nginx 會自己選一個贏家,輸的那個就這樣不見了。
+IP 那組名字因此放在備援 port 上。安裝腳本會先掃過所有啟用中的站台,發現網址已經被別人
+佔走就直接拒絕安裝;`nginx -t` 沒過也會把 symlink 收回去、不 reload,不會把整台機器的站台
+一起帶走。
+
+網址名稱是 `RECON_STUDIO_LAN_DOMAIN`(`local.env`,預設 `recon.venraas.tw`),也可以用
+`--domain` 一次性覆蓋。**用專案自己的名字,不要借別的服務的** —— `claude.venraas.tw` 是
+同一台機器上的 LLM 聊天站,連過去會看到它的登入框(realm 是 `Sirocco`),帳密當然打不進去。
+分不清楚連到哪個站的時候問 nginx 就好:
+
+```bash
+curl -sk -o /dev/null -D- https://recon.venraas.tw/ | grep -i www-authenticate
+# 要看到 realm="Recon Studio";看到別的名字就是連錯站了
+```
+
+它會偵測本機區網 IP、**直接從 `local.env` 讀 `PORT`**、用 mkcert 簽一張同時涵蓋網址和 IP
+的憑證、設定 basic auth,然後 `nginx -t` + reload。給同事的是一個固定網址 —— 不會因為你
+關掉 VS Code 或斷線就失效,這正是 VS Code / `ssh -L` 轉發做不到的地方(那種轉發是每個人
+各自一份,而且網址不能轉給別人)。要綠鎖頭就順便把 `mkcert -CAROOT` 底下的 `rootCA.pem`
+給他們裝。
+
+**DNS**:`recon.venraas.tw` 需要一筆 A 記錄指到本機區網 IP。名稱還沒生效之前備援那條
+就能用,腳本也會把該下的 `gcloud dns record-sets create` 印出來。在公開 DNS 上放
+`192.168.*` 是刻意的,跟 `claude.venraas.tw` 同一招:到處都解析得到,但只有區網內路由
+得到,等於不用開防火牆就天然對外隱形。
+
+順帶一提,有些路由器/上游 DNS 會做 **DNS rebinding 保護**,把「公開網域回私有 IP」的答案
+擋掉並回 NXDOMAIN。這時直接問公用 DNS(`dig recon.venraas.tw @1.1.1.1`)會有答案、問區網
+DNS 卻沒有 —— 要嘛在該 resolver 上把這個網域加白名單,要嘛就用備援那條網址。
+
+憑證只涵蓋簽發時給的那些名字 —— **換過 `RECON_STUDIO_LAN_DOMAIN` 就要重跑一次腳本**,
+不然新名字會出現名稱不符的警告。
+
+### 網址列的紅色「不安全」
+
+這是**預期的**,而且跟連線有沒有加密無關。分清楚兩件事:
+
+```bash
+echo | openssl s_client -connect <區網IP>:443 -servername recon.venraas.tw 2>/dev/null \
+  | openssl x509 -noout -issuer -ext subjectAltName
+```
+
+- `subjectAltName` 裡有 `DNS:recon.venraas.tw` → **名字是對的**。沒有的話是設定問題
+  (多半是換過網址沒重跑腳本),重跑 `sudo scripts/deploy-nginx-lan.sh` 就好。
+- `issuer=O=mkcert development CA` → **這才是紅燈的原因**。TLS 有生效、流量有加密,
+  只是簽這張憑證的 CA 只存在於這台機器,別人的瀏覽器沒有理由相信它。
+
+要變綠鎖頭,兩條路:
+
+**A. 每台要連的機器裝一次 mkcert 的根憑證**(不動任何雲端設定)
+
+```bash
+mkcert -CAROOT          # 印出 rootCA.pem 在哪
+```
+
+把那個 `rootCA.pem` 傳給對方,匯入「受信任的根憑證授權單位」。注意 Chrome/Edge 吃**作業
+系統**的憑證庫、Firefox **有自己一套**、手機又是另一套,所以每台裝置、有時每個瀏覽器都要
+做一次。人少時最省事。
+
+**B. 換成 Let's Encrypt 的真憑證**(零客戶端設定,任何人打開就是綠的)—— **本機已採用**
+
+```bash
+sudo scripts/issue-letsencrypt-cert.sh --email you@example.org \
+     --gcloud-cli --project <GCP 專案> --zone <managed zone>
+# 先彩排不想動到用量上限:加 --staging
+```
+
+可行的關鍵是 **DNS-01 驗證不需要外面連得到這台機器** —— 它只要求你能在該網域寫一筆 TXT
+記錄,Let's Encrypt 從頭到尾不會來連你。所以「公開網域 + 私有 IP」完全沒問題。
+
+腳本做的事:確認網域在**公開 DNS** 上真的看得到(DNS-01 是 Let's Encrypt 自己的 resolver
+在驗,只有區網知道的名字會跑到一半才爆)→ 找出**真正在服務**的 managed zone → 簽發,並把
+`--deploy-hook "systemctl reload nginx"` 寫進續簽設定(**少了這個,自動續簽會寫出新憑證但
+nginx 永遠不重載,面板就一直送過期的那張**)→ 最後自動重跑 `deploy-nginx-lan.sh --cert
+letsencrypt` 把 nginx 指過去。之後 `certbot renew` 每天跑兩次、到期前 30 天自動換,不用管。
+
+**兩種驗證身分的方式**:
+
+- `--gcloud-cli`(預設,沒有金鑰時)—— certbot 的 manual hook
+  (`scripts/acme-gcloud-hook.sh`)直接用**你自己的 `gcloud` 身分**寫 TXT 記錄。
+  `roles/editor` 就夠了,不用建 service account、不用改任何 IAM。
+  代價:自動續簽依賴你個人的 OAuth token;被撤銷時續簽會失敗,Let's Encrypt 會寄信到
+  簽發時登記的信箱。
+- `--sa` —— 傳統的 service-account 金鑰 + `certbot-dns-google`。續簽最穩,但要有人用
+  **Owner** 權限把該帳號綁到 zone 上。`roles/editor` **設不了 IAM policy**,專案層級和
+  zone 層級都不行(兩個都試過,都是 `PERMISSION_DENIED`),所以這條路一定要找 Owner。
+
+**zone 要找對**:腳本不只比對名字,還會要求那個 zone 的 nameServers **真的出現在母網域的
+委派名單裡**。`venraas.tw` 活的那個是 `venraasitri` 專案的 `venraas-tw-zone`
+(NS `ns-cloud-c*`);`itri-w1-3d-project` 底下那兩個同名 zone 的 NS 是 `ns-cloud-b*` /
+`ns-cloud-e*`,是舊的、沒在服務 —— 寫進去的 TXT 沒有任何 resolver 看得到,驗證只會莫名其妙
+失敗。腳本會把跳過的原因印出來。
+
+代價先知道再決定:憑證會進公開的 Certificate Transparency log,等於公開
+「`recon.venraas.tw` 這個名字存在」。它解到 `192.168.90.146`、外面路由不到,但名字本身
+藏不住。
+
+換完之後 `https://recon.venraas.tw/` 是綠鎖頭、誰都不用裝 `rootCA.pem`;
+`https://<區網IP>:8443/` 那條**仍然是 mkcert**,因為公信 CA 不會簽裸 IP。兩個 vhost 各自
+帶各自的憑證,這也是 `ssl_certificate` 沒有放進共用 snippet 的原因。驗收:
+
+```bash
+openssl s_client -connect recon.venraas.tw:443 -servername recon.venraas.tw </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer          # 要看到 issuer=...Let's Encrypt...
+certbot renew --dry-run                  # 彩排續簽,含 nginx 重載
+```
+
+(Chrome 若出現「你已選擇關閉這個網站的安全性警告」,那是你之前按過「繼續前往」留下的
+per-site 設定,點旁邊的「開啟警告」就會還原。)
+
+改了 `PORT` 之後**重跑一次這個腳本**;忘了的話 `./run.sh` 的啟動訊息和 `/doctor` 的
+「區網代理 (nginx)」都會直接說代理指到哪個 port、面板綁的是哪個 —— 「port 明明有掛
+卻連不到」幾乎都是這一條。
+
+面板本身要**一直開著**代理才有東西可以轉。要讓它撐過登出/重開機,裝那個選用的 user
+service:`infra/systemd/reconstudio.service`(檔頭有指令)。
+
+移除:`sudo scripts/deploy-nginx-lan.sh --uninstall`。
 
 ---
 
@@ -654,7 +839,9 @@ LichtFeld 則直接下載乾淨點雲。
 | `FFMPEG_HWACCEL` | `cuda` | 設 `none` 強制 CPU 解碼 |
 | `COLMAP_PANEL_MAX_JOBS` | `4` | 同時跑幾個 job |
 | `COLMAP_PANEL_RESIZE_WORKERS` | CPU 數(≤32) | 縮圖並行 ffmpeg 數 |
-| `HOST` / `PORT` | `127.0.0.1` / `8077` | 綁定位址 |
+| `HOST` / `PORT` | `127.0.0.1` / `8077` | 綁定位址(**只從 `local.env` 讀**) |
+| `RECON_STUDIO_HOST` / `_PORT` | 同上 | 要從環境變數一次性覆蓋時用這組 —— conda 會 export `HOST=x86_64-conda-linux-gnu`,裸的名字不能信 |
+| `RECON_STUDIO_LAN_DOMAIN` | `recon.venraas.tw` | 區網代理對外的網址名稱 |
 | `SUPERSPLAT_AUTOUPDATE` | `1` | 設 `0` 關掉 SuperSplat 啟動自動更新 |
 | `SUPERSPLAT_VER` | latest | 釘住 SuperSplat 版本(`vX.Y.Z`) |
 

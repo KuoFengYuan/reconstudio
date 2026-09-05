@@ -1,0 +1,38 @@
+# Recon Studio as a user service — OPTIONAL.
+#
+# The nginx URL is only as reliable as the thing behind it: a panel started by
+# hand in a terminal dies with that terminal, and a colleague then gets a 502 on
+# a link that worked yesterday. This keeps it up across logout and reboot.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp infra/systemd/reconstudio.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now reconstudio
+#   sudo loginctl enable-linger $USER      # survive logout / start at boot
+#
+#   systemctl --user status reconstudio    # is it up
+#   journalctl --user -u reconstudio -f    # run.sh's own banner + uvicorn log
+#   systemctl --user restart reconstudio   # after editing .py
+#
+# Not enabled by anything in this repo — installing it is a deliberate act, and
+# `./run.sh` by hand keeps working exactly as before (it will refuse to start on
+# a port the service already holds rather than half-starting beside it).
+
+[Unit]
+Description=Recon Studio panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# run.sh reads local.env itself, resolves conda, and execs uvicorn — so the unit
+# stays a thin wrapper and cannot drift away from how you start it by hand.
+WorkingDirectory=%h/repo/reconstudio
+ExecStart=%h/repo/reconstudio/run.sh
+Restart=on-failure
+RestartSec=5
+# COLMAP / trainers are spawned as children and can be long and memory-hungry;
+# don't let systemd's default OOM policy take the whole panel down with one job.
+OOMPolicy=continue
+
+[Install]
+WantedBy=default.target
