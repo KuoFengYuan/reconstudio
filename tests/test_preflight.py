@@ -275,3 +275,158 @@ def test_ready_backend_rows_are_all_ok(tmp_path):
     checks = _backend_checks({"conda_env": "gs2m"}, tmp_path / "python", tmp_path, True,
                              {"torch": "2.11.0", "cuda": True, "import_fail": {}})
     assert [c["status"] for c in checks] == ["ok"] * 4
+
+
+# --------------------------------------------------------------------------- #
+# Reachability — "the port is up but nobody can connect"
+#
+# All three failures here look identical from inside the panel (it is listening,
+# it answers on loopback), which is why they are checks and not comments.
+# --------------------------------------------------------------------------- #
+_SITE = """
+map $http_upgrade $rs_connection_upgrade { default upgrade; '' close; }
+server {
+    listen 192.168.90.146:8443 ssl http2;
+    server_name recon.example.tw 192.168.90.146 localhost;
+    location / { proxy_pass http://127.0.0.1:%s; }
+}
+"""
+
+
+@pytest.fixture
+def site(monkeypatch, tmp_path):
+    """Write an enabled-site file and point preflight at it. Call with no port to
+    stand for "no proxy installed"."""
+    conf = tmp_path / "reconstudio.conf"
+    monkeypatch.setattr(preflight, "_NGINX_SITE", conf)
+    monkeypatch.setattr(preflight, "probe", lambda argv, timeout=None: "active\n")
+
+    def write(panel_port: str | None):
+        if panel_port is not None:
+            conf.write_text(_SITE % panel_port)
+        return conf
+    return write
+
+
+def test_a_bare_HOST_from_conda_is_not_read_as_a_bind_address(monkeypatch, fake_repo):
+    """conda's compiler activation exports HOST=x86_64-conda-linux-gnu. Reading
+    the bare name reported a build triplet as the panel's address — and, before
+    run.sh stopped inheriting it, tried to bind it."""
+    monkeypatch.setenv("HOST", "x86_64-conda-linux-gnu")
+    monkeypatch.delenv("RECON_STUDIO_HOST", raising=False)
+    assert preflight._shell_var("HOST", "127.0.0.1") == "127.0.0.1"
+
+
+def test_run_sh_s_resolved_value_wins(monkeypatch, fake_repo):
+    (fake_repo / "local.env").write_text("PORT=8077\n")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "9099")
+    assert preflight._shell_var("PORT", "8077") == "9099"
+
+
+def test_local_env_is_the_fallback_for_a_hand_rolled_uvicorn(monkeypatch, fake_repo):
+    monkeypatch.delenv("RECON_STUDIO_PORT", raising=False)
+    (fake_repo / "local.env").write_text("PORT=8078\n")
+    assert preflight._shell_var("PORT", "8077") == "8078"
+
+
+def test_loopback_only_is_ok_and_says_so(monkeypatch, fake_repo, site):
+    site(None)
+    monkeypatch.setenv("RECON_STUDIO_HOST", "127.0.0.1")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "8077")
+    chk = preflight.bind_check()
+    assert chk["status"] == "ok" and chk["value"] == "127.0.0.1:8077"
+
+
+def test_binding_the_world_is_a_warning_because_the_panel_has_no_login(
+        monkeypatch, fake_repo, site):
+    site(None)
+    monkeypatch.setenv("RECON_STUDIO_HOST", "0.0.0.0")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "8077")
+    chk = preflight.bind_check()
+    assert chk["status"] == "warn"
+    assert "deploy-nginx-lan.sh" in chk["hint"]
+
+
+def test_no_proxy_installed_is_skip_with_the_way_to_get_one(monkeypatch, fake_repo, site):
+    site(None)
+    chk = preflight.lan_proxy_check()
+    assert chk["status"] == "skip" and "deploy-nginx-lan.sh" in chk["hint"]
+
+
+def test_a_matching_proxy_reports_the_url_to_hand_out(monkeypatch, fake_repo, site):
+    site("8078")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "8078")
+    chk = preflight.lan_proxy_check()
+    assert chk["status"] == "ok"
+    assert chk["value"] == "https://recon.example.tw:8443/"
+
+
+def test_a_proxy_pointing_at_the_old_port_is_an_error(monkeypatch, fake_repo, site):
+    """Change PORT in local.env, forget the proxy: every bookmark 502s while `ss`
+    still shows the panel listening. This is the whole reason the check exists."""
+    site("8077")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "8078")
+    chk = preflight.lan_proxy_check()
+    assert chk["status"] == "err"
+    assert "8077" in chk["detail"] and "8078" in chk["detail"]
+
+
+def test_a_stopped_nginx_is_an_error_even_though_the_site_is_installed(
+        monkeypatch, fake_repo, site):
+    site("8078")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "8078")
+    monkeypatch.setattr(preflight, "probe", lambda argv, timeout=None: "inactive\n")
+    chk = preflight.lan_proxy_check()
+    assert chk["status"] == "err" and "systemctl start nginx" in chk["hint"]
+
+
+def test_network_checks_have_the_standard_shape(fake_repo, site):
+    site("8077")
+    for chk in preflight.network_checks():
+        assert set(chk) == _KEYS and chk["status"] in STATUSES
+
+
+def test_the_reachability_checks_reach_the_report(monkeypatch):
+    monkeypatch.setattr(preflight, "probe", lambda argv, timeout=None: "")
+    keys = {c["key"] for c in system_report(deep=False)}
+    assert {"bind", "lan_proxy"} <= keys
+
+
+_SPLIT_SITE = """
+server {
+    listen 192.168.90.146:443 ssl http2;
+    server_name recon.example.tw;
+    include %s;
+}
+server {
+    listen 192.168.90.146:8443 ssl http2;
+    server_name 192.168.90.146 localhost;
+    include %s;
+}
+"""
+_SPLIT_COMMON = "location / { proxy_pass http://127.0.0.1:%s; }\n"
+
+
+def test_the_proxy_port_is_found_through_the_included_snippet(monkeypatch, tmp_path, fake_repo):
+    """Both vhosts share one proxy_pass, so it lives in the include. Reading only
+    the site file would report permanent drift on a perfectly good install."""
+    common = tmp_path / "reconstudio-common.conf"
+    common.write_text(_SPLIT_COMMON % "8078")
+    conf = tmp_path / "reconstudio.conf"
+    conf.write_text(_SPLIT_SITE % (common, common))
+    monkeypatch.setattr(preflight, "_NGINX_SITE", conf)
+    monkeypatch.setattr(preflight, "probe", lambda argv, timeout=None: "active\n")
+    monkeypatch.setenv("RECON_STUDIO_PORT", "8078")
+
+    chk = preflight.lan_proxy_check()
+    assert chk["status"] == "ok"
+    # 443 is implied by https://; the reported URL is the one people type.
+    assert chk["value"] == "https://recon.example.tw/"
+
+
+def test_a_broken_include_does_not_crash_the_report(monkeypatch, tmp_path, fake_repo):
+    conf = tmp_path / "reconstudio.conf"
+    conf.write_text(_SPLIT_SITE % ("/nonexistent/a.conf", "/nonexistent/a.conf"))
+    monkeypatch.setattr(preflight, "_NGINX_SITE", conf)
+    monkeypatch.setattr(preflight, "probe", lambda argv, timeout=None: "active\n")
+    assert preflight.lan_proxy_check()["status"] == "err"     # unknown port = drift

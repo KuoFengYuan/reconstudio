@@ -365,7 +365,110 @@ def env_var_check() -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Reachability. "The port is up but nobody can connect" is almost never a port
+# that isn't up — it is one of these three, none of which the panel itself can
+# see from the inside, so they belong on /doctor next to the disks and binaries.
+_NGINX_SITE = Path("/etc/nginx/sites-enabled/reconstudio.conf")
+_PROXY_RE = re.compile(r"proxy_pass\s+http://127\.0\.0\.1:(\d+)")
+_LISTEN_RE = re.compile(r"^\s*listen\s+([\d.]+):(\d+)\s+ssl", re.M)
+_NAME_RE = re.compile(r"^\s*server_name\s+([^;\s]+)", re.M)
+_INCLUDE_RE = re.compile(r"^\s*include\s+(/[^;\s]+);", re.M)
+
+
+def _shell_var(name: str, default: str) -> str:
+    """A run.sh-only knob (HOST/PORT live in the shell, not in `Settings`).
+
+    Read from `RECON_STUDIO_<NAME>`, which run.sh exports once it has resolved
+    the value, and NOT from a bare `HOST`/`PORT`: conda's compiler activation
+    exports `HOST=x86_64-conda-linux-gnu` and this check would then cheerfully
+    report a build triplet as the panel's bind address. local.env is the fallback
+    for a hand-rolled `uvicorn app:app`, where the value would otherwise be
+    reported as the default while the process bound something else entirely.
+    """
+    if os.environ.get(f"RECON_STUDIO_{name}"):
+        return os.environ[f"RECON_STUDIO_{name}"]
+    local = REPO_ROOT / "local.env"
+    if local.is_file():
+        found = re.findall(rf"^\s*(?:export\s+)?{name}=([^\s#]+)", local.read_text(), re.M)
+        if found:
+            return found[-1]
+    return default
+
+
+def _nginx_site() -> dict | None:
+    """The proxy's own view of itself: which port it forwards to, and where it
+    answers. Parsed from the enabled site rather than asked of nginx, so the
+    check needs no root and no running nginx to say something useful.
+
+    The `include`d snippet has to be followed: the two vhosts share one
+    proxy_pass, so it lives there and reading only the site file would report
+    "no proxy port" — i.e. permanent drift — on a perfectly good install."""
+    try:
+        conf = _NGINX_SITE.read_text()
+    except OSError:                      # missing, or unreadable — same answer either way
+        return None
+    for inc in _INCLUDE_RE.findall(conf):
+        try:
+            conf += Path(inc).read_text()
+        except OSError:                  # a broken include is nginx's to complain about
+            pass
+    proxy = _PROXY_RE.search(conf)
+    listen = _LISTEN_RE.search(conf)
+    name = _NAME_RE.search(conf)
+    port = listen.group(2) if listen else ""
+    return {"proxy_port": proxy.group(1) if proxy else "",
+            "listen_port": port,
+            "host": name.group(1) if name else (listen.group(1) if listen else ""),
+            # 443 is implied by https://, and a URL people are meant to type
+            # should look like the one in the browser's address bar.
+            "url_port": "" if port == "443" else f":{port}"}
+
+
+def bind_check() -> dict:
+    """What the panel is reachable ON — which is not what run.sh used to print."""
+    host, port = _shell_var("HOST", "127.0.0.1"), _shell_var("PORT", "8077")
+    if host in ("0.0.0.0", "::"):
+        extra = (f"nginx 站台也在,所以區網上有兩個入口,而 :{port} 這個沒有密碼"
+                 if _nginx_site() else "面板沒有任何登入機制,又能瀏覽檔案、開子行程")
+        return make_check("bind", "面板綁定位址", "warn", f"{host}:{port}",
+                          f"整個區網都連得到 http://<本機IP>:{port},{extra}",
+                          "改回 HOST=127.0.0.1,用 sudo scripts/deploy-nginx-lan.sh "
+                          "走 nginx(TLS + 帳密)給別人連")
+    return make_check("bind", "面板綁定位址", "ok", f"{host}:{port}",
+                      "只收本機連線;外面要連走下面的 nginx 代理或 ssh -L")
+
+
+def lan_proxy_check() -> dict:
+    """The drift this exists for: change PORT in local.env, forget the proxy, and
+    every bookmark 502s while `ss` still shows the panel listening — which reads
+    exactly like "I did expose the port and people still can't connect"."""
+    site = _nginx_site()
+    port = _shell_var("PORT", "8077")
+    if site is None:
+        return make_check("lan_proxy", "區網代理 (nginx)", "skip", "沒有安裝",
+                          "現在只有本機 / ssh -L 轉發連得到",
+                          "要給同事一個固定網址:sudo scripts/deploy-nginx-lan.sh")
+    url = f"https://{site['host']}{site['url_port']}/"
+    if site["proxy_port"] != port:
+        return make_check(
+            "lan_proxy", "區網代理 (nginx)", "err", url,
+            f"代理轉給 127.0.0.1:{site['proxy_port'] or '?'},但面板綁的是 :{port} —— "
+            "從區網連只會拿到 502",
+            "重跑 sudo scripts/deploy-nginx-lan.sh(它會直接讀 local.env 的 PORT)")
+    if probe(["systemctl", "is-active", "nginx"]).strip() != "active":
+        return make_check("lan_proxy", "區網代理 (nginx)", "err", url,
+                          "站台設定在,但 nginx 沒有在跑",
+                          "sudo systemctl start nginx")
+    return make_check("lan_proxy", "區網代理 (nginx)", "ok", url,
+                      f"轉給 127.0.0.1:{port};連線要 basic auth 帳密")
+
+
+def network_checks() -> list[dict]:
+    return [bind_check(), lan_proxy_check()]
+
+
+# --------------------------------------------------------------------------- #
 def system_report(deep: bool = True) -> list[dict]:
     """All system-level checks, in the order they matter when standing up a box."""
     return [colmap_check(), exiftool_check(), *ffmpeg_checks(), *storage_checks(), cudnn_check(),
-            *gcs_checks(deep), *supersplat_checks(), env_var_check()]
+            *gcs_checks(deep), *supersplat_checks(), *network_checks(), env_var_check()]

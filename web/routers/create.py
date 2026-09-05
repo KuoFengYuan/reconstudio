@@ -23,7 +23,7 @@ from pipeline import (
     resolve_dataset,
     resolve_matte_dataset,
 )
-from pipeline.matte import OUTPUT_ROOT, resize_target
+from pipeline.matte import OUTPUT_ROOT, resize_target, sibling_frames
 from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
@@ -309,6 +309,36 @@ async def create_matte(request: Request):
     return _page(request, "_jobview.html", job=job.to_dict(), stages=COLMAP_STAGES)
 
 
+def _repair_targets(images_dir: Path, source_rel: str, scope: str,
+                    first: str = "", last: str = "") -> list[str] | None:
+    """Which frames a repair covers. `None` means the whole folder.
+
+    "range" is the span the user dragged out on the repair page's filmstrip,
+    given as its two endpoints rather than a count: the frames that share a
+    mistake are whatever they are, and a fixed ±N either forces several passes
+    or overshoots into frames that were already fine.
+
+    The endpoints are resolved against `sibling_frames`, so they are clamped to
+    real frames in this frame's own subfolder and cannot be used to reach
+    anywhere else on disk.
+    """
+    if scope == "one":
+        return [source_rel]
+    if scope == "all":
+        return None
+    if scope != "range":
+        raise ValueError(f"未知的套用範圍: {scope}")
+
+    frames = sibling_frames(images_dir, source_rel)
+    if source_rel not in frames:          # e.g. the photo was renamed mid-session
+        return [source_rel]
+    lo, hi = (frames.index(r) if r in frames else frames.index(source_rel)
+              for r in (first or source_rel, last or source_rel))
+    if lo > hi:
+        lo, hi = hi, lo
+    return frames[lo:hi + 1]
+
+
 @router.post("/ui/matte_repair")
 async def create_matte_repair(request: Request):
     """Re-cut ONE frame from a box plus +/- clicks, and hand back the job id.
@@ -348,10 +378,29 @@ async def create_matte_repair(request: Request):
     if source_rel is None:
         return JSONResponse({"error": f"找不到原圖: {rel}"}, status_code=404)
 
-    boxes_json = json.dumps({
-        "norm": True, "apply": "all", "only": [source_rel],
-        "per_image": {source_rel: {"boxes": [box] if box else [], "points": points}},
-    })
+    scope = (form.get("scope") or "one").strip()
+    try:
+        targets = _repair_targets(images_dir, source_rel, scope,
+                                  (form.get("from") or "").strip(),
+                                  (form.get("to") or "").strip())
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    entry = {"boxes": [box] if box else [], "points": points}
+    if targets is None:
+        # Whole folder: a top-level prompt under apply=all, so frames this run has
+        # never seen are covered too. `only` is deliberately absent — its presence
+        # is what marks a spec as scoped (see pipeline.matte._write_boxes).
+        spec = {"norm": True, "apply": "all",
+                "boxes": entry["boxes"], "points": points}
+    else:
+        # A range: the same prompt copied onto each frame, because points are
+        # resolved by exact rel. Normalised, so a frame of a different size still
+        # lands in the same relative spot.
+        spec = {"norm": True, "apply": "all", "only": targets,
+                "per_image": dict.fromkeys(targets, entry)}
+    boxes_json = json.dumps(spec)
+    n_frames = "整個資料夾" if targets is None else f"{len(targets)} 張"
     params = {
         "images": images, "boxes": "json", "boxes_json": boxes_json,
         # sam2 explicitly: SAM 3 prompts with concepts, not +/- clicks.
@@ -364,8 +413,10 @@ async def create_matte_repair(request: Request):
         "no_bleed": False,
     }
     job = Job(id=new_id(), kind="matte",
-              title=f"🖌 修圖 · {Path(source_rel).name}",
-              subtitle=f"{images}  ·  {source_rel}  ({len(points)} 個點提示)",
+              title=f"🖌 修圖 · {Path(source_rel).name}"
+                    + ("" if scope == "one" else f" → {n_frames}"),
+              subtitle=f"{images}  ·  {source_rel}  "
+                       f"({len(points)} 個點提示 · 套用 {n_frames})",
               params=params, meta={"images": images, "box_source": "repair",
                                    "repair_rel": source_rel,
                                    "dataset_root": str(dataset_root)})

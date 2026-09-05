@@ -16,7 +16,8 @@
           --line:#d8cbac; --line2:#c6b487; --field:#f8f2e3;
           --fg:#211d17; --mut:#6d6453; --accent:#21466e; --accent-d:#173049;
           --on-accent:#f7f1e2; --seal:#b23020;
-          --ok:#4f6f3a; --warn:#a9781f; --err:#b23020; --radius:10px;
+          --ok:#4f6f3a; --warn:#8a5f0d; --err:#b23020; --radius:10px;   /* warn was #a9781f: 3.39:1 on --panel, under AA */
+          --mut-d:#514835;   /* body text that is still secondary but meant to be READ */
           --serif:"Hiragino Mincho ProN","Yu Mincho","Shippori Mincho","Noto Serif CJK TC","Noto Serif TC","Songti TC",serif; }
   * { box-sizing:border-box; }
   body { margin:0; font:14px/1.5 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif;
@@ -327,6 +328,28 @@
   /* The overlay tracks the IMG box, not the stage: letterboxing around a portrait
      photo would otherwise be drawable, and every box drawn there would be a
      fraction of the wrong rectangle. */
+  /* Numbered steps: the 去背 form reads as a settings page, and a first-timer's
+     failure is always the same one — hitting 開始去背 without drawing a box,
+     which only surfaces as a server error that navigates away from the form. */
+  .steps{ margin:6px 0 10px; padding-left:22px; font-size:13.5px; line-height:1.8;
+          color:var(--mut-d); }
+  .steps li{ margin:5px 0; }
+  .steps li::marker{ font-weight:700; color:var(--accent); }
+
+  /* Emphasis inside a hint used to be invisible: <b> inherited --mut, so the one
+     phrase worth reading was bold grey on grey. Global, because that is a defect
+     everywhere, not a matte-form preference. */
+  .hint b, .hint strong, .steps b, .mp-status b{ color:var(--fg); font-weight:700; }
+  /* 11px is fine for a one-line footnote under a field. The 去背 form is not that
+     — it is where a first-timer reads what to do, and the 執行 panel next to it
+     already runs its own hints at 14px (`.mp .hint` above). */
+  #form-matte .hint{ font-size:12.5px; line-height:1.7; color:var(--mut-d); }
+  #form-matte label{ font-size:12.5px; }
+  /* The one line that says what is still missing has to out-shout the rest. */
+  #form-matte .gate-wait{ font-size:13px; color:var(--seal); font-weight:700; }
+  .gate-wait{ color:var(--warn,#8a5f0d); font-weight:600; }
+  /* The next thing to press, when the form knows what it is. */
+  .ghost.needs{ border-color:var(--accent); color:var(--accent); font-weight:600; }
   .mp-summary:empty{ display:none; }
   .mp-summary{ margin:6px 0 2px; font-size:13px; display:flex; align-items:center;
                gap:8px; flex-wrap:wrap; }
@@ -1295,10 +1318,21 @@
     <form id="form-matte" style="display:none" hx-post="/ui/matte" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>去背 / 前景遮罩(SAM)</legend>
-        <div class="hint">在照片上<b>匡選要保留的物體</b>,SAM 就把整個資料夾一起去背,輸出
-          <code>no_bg/cutout/</code>(去背後的 RGBA PNG)和 <code>no_bg/masks/</code>(0/255 遮罩)。
-          原始照片不會被改動。一張圖裡匡多個物體時,各自的遮罩會<b>聯集</b>成同一張 alpha,
-          所以「一排並列的主體」一次就全部保留。</div>
+        <ol class="steps">
+          <li><b>選照片資料夾</b> —— 下面那格,或按「瀏覽」。</li>
+          <li><b>按「⬚ 匡選物體」</b> —— 照片會開在右邊,在要保留的東西上拖曳畫一個框。
+              <b>只要框一張就好</b>,資料夾裡其餘幾百張 SAM 會自己照著切,<b>不用一張一張框</b>。
+              (挑幾張各框一次會更準,但不是必要的。)這一步不能跳過 ——
+              SAM 是靠這個框知道你要留什麼。</li>
+          <li><b>按「▶ 開始去背」</b> —— 整個資料夾一起跑,可以關掉頁面,工作在背景繼續。</li>
+        </ol>
+        <details class="grp"><summary>它會產生什麼、放在哪裡</summary>
+          <div class="gbody hint">輸出兩包,都在你選的資料夾底下的 <code>no_bg/</code> 裡:
+            <code>cutout/</code>(去背後的 RGBA PNG,給人看)和 <code>masks/</code>
+            (0/255 單通道遮罩,COLMAP 和訓練器吃這包)。<b>原始照片一個位元都不會動。</b>
+            一張圖裡匡多個物體時,各自的遮罩會<b>聯集</b>成同一張 alpha,所以「一排並列的主體」
+            一次就全部保留。</div>
+        </details>
         {% if not matte_ready %}
         <div class="hint" style="color:var(--err)">⚠ 找不到 <code>sam</code> conda env。建立方式:
           <code>conda create -y -n sam python=3.11</code>,接著
@@ -1309,11 +1343,13 @@
 
         <label>images(照片資料夾,或含 images/ 的 COLMAP workspace)</label>
         <div class="row">
-          <input name="images" id="matte_images" placeholder="{{ browse_root }}" required>
+          <input name="images" id="matte_images" placeholder="{{ browse_root }}" required
+                 oninput="matteGate()">
           <button type="button" class="ghost" onclick="openPicker('matte_images')">瀏覽</button>
           <button type="button" class="ghost" id="matte_pick_btn"
                   hx-get="/ui/matte_pick" hx-include="#matte_images"
                   hx-target="#main" hx-swap="innerHTML" hx-indicator="#matte_pick_spin"
+                  title="在一張照片上框住要保留的物體;整個資料夾會照著切,不用每張都框"
                   onclick="mpOpen()">⬚ 匡選物體</button>
         </div>
         <div id="matte_pick_spin" class="hint" style="display:none">⏳ 載入中…
@@ -1368,7 +1404,7 @@
             核准後在這台機器跑一次 <code>conda run -n sam hf auth login</code>。
             還沒核准就先用 SAM 2.1 —— 框提示的品質一樣好。</div>
         </div>
-        <div class="hint bgrp" data-b="track" style="color:var(--warn,#b8860b)">⚠ <b>追蹤傳播固定使用
+        <div class="hint bgrp" data-b="track" style="color:var(--warn,#8a5f0d)">⚠ <b>追蹤傳播固定使用
           SAM 2.1 影片模式</b>,上面的模型選單在這個模式下不生效(選單會變灰)。
           原因:SAM 3 的影片工作階段會把整段序列一次載進記憶體(每張放大到 1024²),
           幾百張 4K 會吃光 RAM;SAM 2 的是從磁碟逐張讀。
@@ -1458,7 +1494,13 @@
             <span>覆蓋已存在的輸出(預設略過,可續跑)</span></label>
         </div>
       </details>
+      <div id="matte_gate" class="hint gate-wait" style="display:none"></div>
       <button class="submit" type="submit" {{ '' if matte_ready else 'disabled' }}>▶ 開始去背</button>
+      <div class="hint" style="margin-top:6px">跑完覺得切得不好?先按上面的
+        <b>🖼 檢視去背結果</b> 看是哪幾張壞掉,點進去修 ——
+        <b>整塊區域被漏掉時,先畫框再補點</b>(框給「範圍」、點給「這裡也算主體」)。
+        實測同一張:只點 53 點 → 面積 0.30 但邊緣很雜;一個框 + 6 點 → 0.31 而且乾淨。
+        點很多下不會比較準。</div>
     </form>
 
     <!-- ----- blocksplit form ----- -->
@@ -2062,6 +2104,10 @@
       ref: order[0], apply: 'all', norm: true,
       boxes: refs[order[0]], refs: refs, per_image: refs
     }) : '';
+    // Boxes are keyed by filename inside ONE folder. Remember which, so pointing
+    // the form somewhere else can drop them instead of sending SAM a prompt that
+    // names files that are not there.
+    h.dataset.dir = ((document.getElementById('matte_images')||{}).value || '').trim();
     mpRender();
   }
   function mpCur(){ return mpState.frames[mpState.rel] || []; }
@@ -2105,20 +2151,30 @@
     }
     var st = document.getElementById('mp_status');
     if (st) {
+      // The single most common first-timer misconception is that every photo
+      // needs its own box, so both states say out loud how many frames this one
+      // box already covers.
+      var pane = document.querySelector('.mp');
+      var all = pane ? parseInt(pane.dataset.total, 10) : 0;
+      var rest = all && all > frames.length
+        ? ',其餘 <b>' + (all - frames.length) + '</b> 張會自動跟著切' : '';
       st.innerHTML = total
-        ? '已在 <b>' + frames.length + '</b> 張影格匡選,共 <b>' + total + '</b> 個框。' +
-          '<b>換一張影格再匡同一個物體,追蹤會更準</b> —— 每張匡過的影格都會變成錨點,' +
+        ? '已在 <b>' + frames.length + '</b> 張影格匡選,共 <b>' + total + '</b> 個框' + rest +
+          ' —— <b>可以直接開始去背了</b>。' +
+          '想更準再<b>換一張影格匡同一個物體</b>:每張匡過的影格都會變成錨點,' +
           '遮擋或視角變化時就不會飄走(框上的號碼就是物體編號,第 1 框對第 1 框)。'
-        : '在照片上<b>拖曳</b>,匡出要保留的物體。可以框多個(遮罩會聯集),' +
-          '也可以<b>換幾張影格各匡一次</b>來提高追蹤準確度。';
+        : '在照片上<b>拖曳</b>,匡出要保留的物體。' +
+          '<b>只要框這一張</b>' + (all ? ',另外 ' + (all - 1) + ' 張會自動套用' : '') +
+          ' —— 不用每張都框。同一張可以框多個(遮罩會聯集)。';
     }
     var sum = document.getElementById('matte_pick_slot');
     if (sum) {
       sum.innerHTML = total
         ? '<span class="ok">✓ ' + frames.length + ' 張影格 · ' + total + ' 個框</span>' +
-          '<span>起始影格 ' + frames[0] + '</span>'
+          '<span>整夾自動套用 · 起始影格 ' + frames[0] + '</span>'
         : '';
     }
+    matteGate();
   }
   function mpInit(rel){
     mpState.frames = mpRead();
@@ -2218,6 +2274,37 @@
       eng.disabled = (m === 'track');
       eng.title = (m === 'track') ? '追蹤傳播固定使用 SAM 2.1 影片模式' : '';
     }
+    matteGate();
+  }
+
+  // Say which step is still missing, on the form, before the run — rather than
+  // letting create_matte's (correct) error arrive after a submit that navigates
+  // away from everything the user just filled in.
+  function matteGate(){
+    var mode = document.getElementById('matte_boxes_mode');
+    var form = document.getElementById('form-matte');
+    if (!mode || !form) return;
+    if (mode.disabled) return;          // no sam env: the button is already off
+    var dir = ((document.getElementById('matte_images')||{}).value || '').trim();
+    var h = document.getElementById('matte_boxes');
+    if (h && h.value && h.dataset.dir && h.dataset.dir !== dir) {
+      h.value = ''; h.dataset.dir = '';
+      mpState.frames = {};
+      var sum = document.getElementById('matte_pick_slot'); if (sum) sum.innerHTML = '';
+    }
+    var needs = ['track','json','exemplar'].indexOf(mode.value) >= 0;
+    var drawn = !!(h && h.value);
+    var why = !dir ? '① 還沒選照片資料夾。'
+            : (needs && !drawn)
+              ? '② 還沒匡選物體。按上面的「⬚ 匡選物體」,在照片上拖曳框住要保留的東西。'
+                + '只要框一張,整個資料夾都會照著切,不用一張一張框。'
+              : '';
+    var btn = form.querySelector('button.submit');
+    if (btn) { btn.disabled = !!why; btn.title = why; }
+    var pick = document.getElementById('matte_pick_btn');
+    if (pick) pick.classList.toggle('needs', !!(needs && dir && !drawn));
+    var gate = document.getElementById('matte_gate');
+    if (gate) { gate.textContent = why; gate.style.display = why ? '' : 'none'; }
   }
   syncMatte();
 
@@ -2397,6 +2484,9 @@
       } else {
         el.value = path;
       }
+      // Setting .value in script fires nothing, so anything watching the field
+      // (去背's step gate) would still be showing "先選資料夾" after you picked one.
+      el.dispatchEvent(new Event('input', {bubbles:true}));
     }
     document.getElementById('picker').classList.remove('open');
   }

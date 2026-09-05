@@ -17,8 +17,9 @@ removes the "which one does this consumer want" question entirely.
 """
 from __future__ import annotations
 
+import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .backends import BASE, env_python
 from .colmap._resize import resize_to_fullhd
@@ -165,15 +166,44 @@ def _preflight(py: Path, engine: str, r: Runner) -> None:
         "(env 還在安裝中的話,等它裝完即可 —— 這裡不是程式錯誤。)")
 
 
+def sibling_frames(images_dir: Path, rel: str) -> list[str]:
+    """Every photo in `rel`'s own subfolder, in sorted order.
+
+    Sorted order is shooting order for a capture sequence, which is what makes a
+    contiguous span meaningful: neighbours are the frames that look most like
+    this one, so a prompt clicked here is most likely still right on them.
+    Scoped to the one subfolder because a sibling folder is a different capture
+    however close its filenames sort.
+    """
+    parent = PurePosixPath(rel).parent
+    here = images_dir / parent if str(parent) != "." else images_dir
+    if not here.is_dir():
+        return []
+    return sorted(p.relative_to(images_dir).as_posix() for p in here.iterdir()
+                  if p.is_file() and p.suffix.lower() in _SCAN_IMAGE_EXTS)
+
+
 def _write_boxes(dataset_root: Path, boxes_json: str) -> Path:
-    """Persist the picker's boxes next to the outputs, and hand back the path.
+    """Persist a run's prompt next to the outputs, and hand back the path.
 
     Kept on disk rather than passed on the command line for two reasons: a
     hundred boxes would blow past the argv limit, and the file is the record of
     what a run was actually told to cut — re-running or auditing a job later
     needs it, and job.params only holds the raw string.
+
+    A **scoped** prompt goes to its own file. A repair carries `only`, so it
+    describes one frame (or a handful) and not the folder: writing it to
+    `matte_boxes.json` used to overwrite the picker's boxes with a one-frame
+    spec, silently destroying the prompt the other N-1 frames were cut with —
+    so re-running the folder afterwards would re-cut everything from whatever
+    the last repair happened to click.
     """
-    out = dataset_root / "matte_boxes.json"
+    scoped = False
+    try:
+        scoped = bool(json.loads(boxes_json).get("only"))
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    out = dataset_root / ("matte_repair.json" if scoped else "matte_boxes.json")
     out.write_text(boxes_json)
     return out
 

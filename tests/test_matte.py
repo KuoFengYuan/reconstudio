@@ -301,9 +301,15 @@ REPAIR = json.dumps({
 
 def test_repair_json_reaches_the_script_unchanged(dataset, fake_env):
     """The whole repair prompt travels in the boxes file — no new argv — so the
-    only thing to assert here is that it lands on disk intact."""
+    only thing to assert here is that it lands on disk intact.
+
+    On `matte_repair.json`, not `matte_boxes.json`: a spec with `only` describes
+    a few frames rather than the folder, and writing it to the picker's file
+    destroyed the prompt every other frame was cut with. See test_matte_repair.py.
+    """
     r = _run(dataset, {"boxes": "json", "boxes_json": REPAIR, "overwrite": True})
-    written = json.loads((dataset / "matte_boxes.json").read_text())
+    written = json.loads((dataset / "matte_repair.json").read_text())
     assert written["only"] == ["a.jpg"]
     assert written["per_image"]["a.jpg"]["points"] == [[0.5, 0.5, 1], [0.02, 0.02, 0]]
     assert "--overwrite" in r.argv
+    assert not (dataset / "matte_boxes.json").exists()

@@ -21,12 +21,17 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from jobs import manager
 from pipeline.config import settings
 from pipeline.heic import convert_tree
-from pipeline.matte import OUTPUT_ROOT, SKIP_DIR_NAMES, resolve_matte_dataset
+from pipeline.matte import (
+    OUTPUT_ROOT,
+    SKIP_DIR_NAMES,
+    resolve_matte_dataset,
+    sibling_frames,
+)
 from web.routers.viewer import _safe_image_dir, _safe_image_file
 from web.shared import IMAGE_EXTS_ALL, _page
 
@@ -165,10 +170,21 @@ def _pair(images_dir: Path, cutout_dir: Path) -> tuple[list[dict], int]:
         orig = originals.pop(key, None)
         if orig is None:
             orphans += 1
-        items.append({"cut": p.relative_to(cutout_dir).as_posix(), "orig": orig or ""})
+        # `t` is the cut-out's mtime, and it goes into the thumbnail URL. Without
+        # it a repair rewrites the file at a URL the browser already has cached,
+        # so the grid keeps showing the old cut-out — even after a reload.
+        items.append({"cut": p.relative_to(cutout_dir).as_posix(), "orig": orig or "",
+                      "t": _mtime(p)})
         if len(items) >= _REVIEW_MAX:
             break
     return items, orphans
+
+
+def _mtime(p: Path) -> int:
+    try:
+        return int(p.stat().st_mtime)
+    except OSError:
+        return 0
 
 
 @router.get("/matte_review", response_class=HTMLResponse)
@@ -195,6 +211,51 @@ async def matte_review(request: Request, images: str = ""):
                  cut_root=str(cutout_dir), img_root=str(images_dir),
                  items=items, orphans=orphans, total_src=total_src,
                  missing=max(0, total_src - len(items)))
+
+
+@router.get("/api/matte/frames")
+async def matte_frames(images: str = "", rel: str = ""):
+    """The frames the repair page's filmstrip shows: `rel`'s own subfolder, in
+    order, plus where `rel` sits in it and the folder the thumbnails live under.
+    """
+    images = (images or "").strip().rstrip("/")
+    rel = (rel or "").strip().lstrip("/")
+    if not images or not rel:
+        raise HTTPException(400, "images and rel are required")
+    root, folder = resolve_matte_dataset(Path(images).expanduser())
+    images_dir = _safe_image_dir(str(root / folder if folder else root))
+    frames = await asyncio.to_thread(sibling_frames, images_dir, rel)
+    # `rel` names the cut-out, which is always .png, while the frames keep their
+    # source extension — so the current frame is found on the stem, not the name.
+    stem = PurePosixPath(rel).with_suffix("").as_posix()
+    at = next((i for i, f in enumerate(frames)
+               if PurePosixPath(f).with_suffix("").as_posix() == stem), -1)
+    return JSONResponse({"frames": frames, "root": str(images_dir), "at": at})
+
+
+@router.get("/api/matte/mtimes")
+async def matte_mtimes(images: str = ""):
+    """`{rel: mtime}` for every cut-out — what the review grid re-reads to notice
+    a re-cut without a full reload.
+
+    The 修圖 page opens in its own tab, so the grid behind it is never navigated
+    and has no reason to re-render; and a repaired frame keeps its filename, so
+    there is nothing in the DOM that would change on its own. The grid therefore
+    polls this on focus and repaints only the cells whose mtime moved.
+    """
+    images = (images or "").strip().rstrip("/")
+    if not images:
+        raise HTTPException(400, "images is required")
+    root, _ = resolve_matte_dataset(Path(images).expanduser())
+    cutout_dir = _cutout_dir(root)
+    if cutout_dir is None:
+        return JSONResponse({})
+
+    def scan() -> dict[str, int]:
+        return {p.relative_to(cutout_dir).as_posix(): _mtime(p)
+                for p in cutout_dir.rglob("*.png")}
+
+    return JSONResponse(await asyncio.to_thread(scan))
 
 
 # --------------------------------------------------------------------------- #

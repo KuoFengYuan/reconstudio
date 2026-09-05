@@ -13,7 +13,15 @@ ruff check .                     # lint (line-length 100, rules E/F/I/UP/B/SIM)
 mypy pipeline/config.py          # type check — only this module is held to a strict bar
 ./run.sh                         # start the panel (reads local.env; 127.0.0.1 by default)
 ./run.sh --doctor                # same report as /doctor, to the terminal; exit code reflects FAILs
+sudo scripts/deploy-nginx-lan.sh # put the panel on the LAN behind nginx (https://recon.venraas.tw, TLS + basic auth)
+systemctl --user restart reconstudio   # if the optional user service is installed
 ```
+
+`./run.sh` prints the URLs that actually work — loopback, plus the nginx one once
+that is installed — and refuses to start on a port something else already holds,
+because the survivor on that port would be the OLD panel serving old code, which
+is indistinguishable from "my change did nothing". `HOST`/`PORT` come from
+local.env only; see the LAN section below for why they are never inherited.
 
 CI (`.github/workflows/ci.yml`) runs exactly ruff + mypy + pytest, in that order.
 
@@ -208,6 +216,64 @@ or $Copyright eq ""' -Artist= -Copyright=`, which is a no-op for any camera that
 doesn't do this and pixel-lossless where it fires. Missing `exiftool` degrades to a
 logged warning, not a failure — most datasets never hit the bug, so its absence
 shouldn't block them (`preflight.exiftool_check()` surfaces it as `warn` on `/doctor`).
+
+**The panel binds 127.0.0.1 and that is load-bearing too.** It has no login of its
+own, browses `RECON_STUDIO_BROWSE_ROOT`, and spawns processes, so LAN access goes
+through nginx (`scripts/deploy-nginx-lan.sh` renders
+`infra/nginx/reconstudio.conf.template` to `https://recon.venraas.tw/`, TLS +
+basic auth, plus an `--alt-port` IP fallback for when DNS doesn't cooperate)
+rather than through `HOST=0.0.0.0`. Several things in that path are non-obvious,
+and each has a test in `tests/test_lan_deploy.py`:
+
+- **:443 is shared with another site by SNI, so the vhost there claims only its
+  own `server_name`.** Two blocks claiming one name on one address:port is not an
+  error — nginx picks a winner and the loser silently stops answering, which is
+  how you take down an unrelated service while "only adding a site". The bare IP
+  and `localhost` belong to that other site, so this config puts them on a second
+  vhost on `--alt-port` (8443) instead, which doubles as the way in when DNS is
+  broken. The installer refuses to shadow a name another enabled site already
+  claims, and rolls the symlink back if `nginx -t` fails.
+- **The two vhosts carry different certificates**, which is why `ssl_certificate`
+  is in neither the shared snippet nor a single variable: no public CA signs a
+  bare `192.168.x.x`, so the name-based vhost holds a Let's Encrypt cert
+  (`scripts/issue-letsencrypt-cert.sh`, DNS-01 via Cloud DNS — which never needs
+  Let's Encrypt to reach this host) while the IP fallback keeps mkcert's.
+  `deploy-nginx-lan.sh --cert auto` switches the moment a real cert exists, and
+  issuance stores a `--deploy-hook` so unattended renewal reloads nginx; without
+  it the panel serves the old cert until it expires.
+- **DNS-01 runs through the gcloud CLI, not a service account.**
+  `certbot-dns-google` takes only a service-account key and only looks for the
+  managed zone inside that key's own project — and granting a service account
+  access to the zone is `setIamPolicy`, which `roles/editor` has at neither the
+  project nor the zone level. So `scripts/acme-gcloud-hook.sh` is a certbot
+  `--manual` hook that writes the TXT record as the operator, whose editor role
+  already allows it. `certbot renew` keeps only the hook command, never the
+  environment, so the hook reads `/etc/letsencrypt/acme-gcloud.env`. Zone lookup
+  matches the parent's **live NS delegation**, not just `dnsName`: this domain has
+  two stale zones with the same name in another project, and a challenge written
+  into one of those is invisible to every resolver.
+- **Until then the cert is mkcert's, so the padlock is red until a client
+  installs the root CA.** That is a trust question, not a config bug — the SAN and the realm are
+  what to check when someone reports "不安全" or a login that won't take (a 401
+  you cannot get past usually means the URL landed on a different site sharing
+  :443). README's 「網址列的紅色『不安全』」 has both ways out, including the
+  Let's Encrypt DNS-01 route that works despite the private IP.
+- **The upgrade map must not be `$connection_upgrade`.** `sirocco.conf` — an
+  unrelated site on the same box — defines that variable at http context, and a
+  second definition is `[emerg] duplicate`, which stops *every* site on the machine.
+- **`proxy_read_timeout` must be long.** `/ws` and the SSE endpoints send nothing
+  while the queue is idle, so nginx's 60s default drops the job bus and the page
+  silently stops updating mid-run.
+- **The installer reads `PORT` from local.env, never asks.** A proxy pointed at the
+  panel's *previous* port 502s while `ss` still shows the panel listening — the
+  exact shape of "the port is up but nobody can connect". `preflight.lan_proxy_check`
+  reports the drift on /doctor, and run.sh's banner reports it at startup.
+- **`HOST`/`PORT` are never inherited from the ambient environment.** conda's
+  compiler activation exports `HOST=x86_64-conda-linux-gnu`; plenty of tooling
+  exports `PORT`. run.sh unsets both before reading local.env and re-exports the
+  resolved values as `RECON_STUDIO_HOST`/`RECON_STUDIO_PORT`, which is what
+  preflight reads. The default port is `8077` in run.sh, setup.sh and
+  local.env.example, and a test pins the three equal.
 
 ## Testing
 

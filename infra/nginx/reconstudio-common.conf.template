@@ -1,0 +1,35 @@
+# Recon Studio — the half both vhosts share. GENERATED; see the main template.
+# No public exposure, but the LAN is large and the panel is unauthenticated.
+auth_basic           "Recon Studio";
+auth_basic_user_file __HTPASSWD__;
+
+add_header X-Content-Type-Options "nosniff" always;
+
+client_max_body_size 64m;
+
+access_log /var/log/nginx/reconstudio.access.log;
+error_log  /var/log/nginx/reconstudio.error.log;
+
+location / {
+    proxy_pass http://127.0.0.1:__PANEL_PORT__;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade           $http_upgrade;
+    proxy_set_header Connection        $rs_connection_upgrade;
+
+    # The job bus (/ws) and the SSE fallbacks send nothing at all while every
+    # job is idle, and nginx's 60s default read timeout would drop them on a
+    # quiet panel — which shows up as a page that stops updating and a log
+    # that stalls mid-run. An hour is longer than any idle a human waits out.
+    proxy_connect_timeout 5s;
+    proxy_send_timeout    1h;
+    proxy_read_timeout    1h;
+
+    # The panel already sends X-Accel-Buffering: no on its SSE endpoints;
+    # this covers anything added later that forgets to.
+    proxy_buffering off;
+}

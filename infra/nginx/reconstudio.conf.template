@@ -1,0 +1,88 @@
+# Recon Studio — nginx reverse proxy for LAN access.
+#
+# GENERATED FILE — do not edit /etc/nginx/. Edit this template and re-run
+#   sudo scripts/deploy-nginx-lan.sh
+# which fills in the placeholders below and reloads nginx.
+#
+# Why a proxy at all, when the panel could just bind 0.0.0.0: the panel has **no
+# authentication of its own**, browses RECON_STUDIO_BROWSE_ROOT and spawns
+# processes. On a LAN with thousands of machines that is not something to hand
+# out unauthenticated — so the panel stays on 127.0.0.1 and nginx is the only
+# thing listening outward, gating on basic auth and TLS.
+#
+# It also fixes the failure this exists for: a VS Code / ssh -L forward is
+# per-user, dies with the window, and its URL cannot be given to anyone else.
+# This URL is stable, and `./run.sh --doctor` verifies it still points at the
+# port the panel actually bound.
+#
+# TWO ways in, on purpose:
+#   https://__DOMAIN__/            the one to hand out — no port to remember
+#   https://__LAN_IP__:__ALT_PORT__/   the one that still works when DNS doesn't
+#
+# They carry DIFFERENT certificates, which is the whole reason ssl_certificate is
+# not in the shared snippet: a public CA will not sign a bare IP address, so the
+# name-based vhost can hold a real (green-padlock, zero-client-setup) Let's
+# Encrypt cert while the IP fallback keeps mkcert's — which was always going to
+# warn on an IP anyway.
+#
+# The name-based vhost shares :__HTTPS_PORT__ with whatever else already answers
+# there (sirocco, on this box) — nginx routes on SNI/Host, so they coexist as
+# long as no server_name is claimed twice. That is why __DOMAIN__ appears alone
+# on :__HTTPS_PORT__ and the IP/localhost names live on :__ALT_PORT__ instead:
+# claiming a name another site already uses makes nginx pick a winner silently.
+
+# WebSocket upgrade. The variable is deliberately NOT called
+# $connection_upgrade: sirocco.conf defines that one at the same http context
+# and a second definition is `[emerg] duplicate variable`, which takes down
+# every site on this box, not just this one.
+map $http_upgrade $rs_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# Everything the two vhosts share. Included rather than duplicated so the
+# fallback can never drift into being a *different* site from the real one.
+# (nginx has no "inherit from that server block", so this is the mechanism.)
+
+server {
+    listen __LAN_IP__:80;
+    server_name __DOMAIN__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    # `ssl http2` must match the other site's options for this address exactly —
+    # differing protocol options on a shared address:port is a config warning and
+    # whichever block nginx reads first silently wins for both.
+    listen __LAN_IP__:__HTTPS_PORT__ ssl http2;
+    server_name __DOMAIN__;
+
+    ssl_certificate     __MAIN_CERT__;
+    ssl_certificate_key __MAIN_KEY__;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    # 497 = "plain HTTP request sent to an HTTPS port". Bounce it rather than
+    # showing an unreadable SSL error. It lives here and not in the shared
+    # snippet because the redirect has to name THIS vhost's port — sending the
+    # fallback's visitors to :__HTTPS_PORT__ would land them on the other site.
+    error_page 497 =301 https://$host$request_uri;
+
+    include __SNIPPET__;
+}
+
+server {
+    listen __LAN_IP__:__ALT_PORT__ ssl http2;
+    server_name __LAN_IP__ localhost;
+
+    # Always mkcert's: there is no such thing as a publicly-trusted cert for
+    # 192.168.x.x, so this one is untrusted by construction.
+    ssl_certificate     __SSL_DIR__/cert.pem;
+    ssl_certificate_key __SSL_DIR__/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    error_page 497 =301 https://$host:__ALT_PORT__$request_uri;
+
+    include __SNIPPET__;
+}

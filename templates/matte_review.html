@@ -114,9 +114,9 @@
   var IMAGES = {{ images|tojson }};
   var bg = 'grid', srcMode = 'cut', cur = 0;
 
-  function url(rel, root, w){
+  function url(rel, root, w, t){
     return "/api/matte/imagefile?path=" + encodeURIComponent(root + "/" + rel) +
-           (w ? "&w=" + w : "");
+           (w ? "&w=" + w : "") + (t ? "&t=" + t : "");
   }
   // The original is only there to compare against; an item whose source photo is
   // gone still shows its cut-out rather than a broken image.
@@ -124,9 +124,11 @@
     return '/matte_repair?images=' + encodeURIComponent(IMAGES) +
            '&rel=' + encodeURIComponent(it.cut);
   }
+  // The cut-out carries its mtime so a repair busts the browser's cache for that
+  // one file; the original never changes, so it does not need one.
   function itemUrl(it, w){
     return (srcMode === 'orig' && it.orig) ? url(it.orig, IMG_ROOT, w)
-                                           : url(it.cut, CUT_ROOT, w);
+                                           : url(it.cut, CUT_ROOT, w, it.t);
   }
   function paint(){
     var g = document.getElementById('grid'); if (!g) return;
@@ -177,6 +179,35 @@
       render();
     }
   });
+  // Notice re-cuts made in the 修圖 tab. That tab is opened with target=_blank, so
+  // this page is never navigated and nothing here would change on its own — and a
+  // repaired frame keeps its filename, so there is no new URL either. Coming back
+  // to this tab re-reads the mtimes and repaints only the cells that moved (plus
+  // the lightbox, if it is showing one of them).
+  var syncing = false;
+  async function syncMtimes(){
+    if (syncing) return;
+    syncing = true;
+    try {
+      var r = await fetch('/api/matte/mtimes?images=' + encodeURIComponent(IMAGES));
+      if (!r.ok) return;
+      var mt = await r.json(), changed = [];
+      ITEMS.forEach(function(it, i){
+        var t = mt[it.cut];
+        if (t && t !== it.t) { it.t = t; changed.push(i); }
+      });
+      if (!changed.length) return;
+      var cells = document.querySelectorAll('#grid .cell img');
+      changed.forEach(function(i){ if (cells[i]) cells[i].src = itemUrl(ITEMS[i], 320); });
+      if (changed.indexOf(cur) >= 0) render();
+    } catch (e) { /* a failed refresh just leaves the old thumbnails */ }
+    finally { syncing = false; }
+  }
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden) syncMtimes();
+  });
+  window.addEventListener('focus', syncMtimes);
+
   paint();
 </script>
 </body>
