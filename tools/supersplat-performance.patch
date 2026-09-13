@@ -1,0 +1,387 @@
+diff --git a/src/asset-loader.ts b/src/asset-loader.ts
+--- a/src/asset-loader.ts
++++ b/src/asset-loader.ts
+@@ -1,9 +1,11 @@
+ import { ReadFileSystem } from '@playcanvas/splat-transform';
+-import { AppBase, Asset, GSplatData, GSplatResource } from 'playcanvas';
++import { AppBase, Asset, GSplatData } from 'playcanvas';
+ 
+ import { Events } from './events';
+ import { defaultLodIndex, loadGSplatData, validateGSplatData } from './io';
+ import { Splat } from './splat';
++import { PreparedSplatResource, clearPreparedTextures } from './prepared-splat-resource';
++import { loadRemoteSplat } from './remote-splat-loader';
+ import { i18n } from './ui/localization';
+ 
+ // handles loading gsplat assets using splat-transform
+@@ -22,7 +24,11 @@
+     createGSplatAsset(gsplatData: GSplatData, filename: string): Asset {
+         const asset = new Asset(filename, 'gsplat', { url: `local-asset-${Date.now()}`, filename });
+         this.app.assets.add(asset);
+-        asset.resource = new GSplatResource(this.app.graphicsDevice, gsplatData);
++        try {
++            asset.resource = new PreparedSplatResource(this.app.graphicsDevice, gsplatData);
++        } finally {
++            clearPreparedTextures(gsplatData);
++        }
+         return asset;
+     }
+ 
+@@ -63,7 +69,10 @@
+             };
+ 
+             // Skip reordering for animation frames (speed) or when explicitly requested (already ordered)
+-            const result = await loadGSplatData(filename, fileSystem, skipReorder || animationFrame, animationFrame ? undefined : pickLod);
++            const remote = /^https?:\/\//i.test(filename) && /\.ply(?:[?#]|$)/i.test(filename);
++            const result = remote && !animationFrame ?
++                await loadRemoteSplat(filename, skipReorder) :
++                await loadGSplatData(filename, fileSystem, skipReorder || animationFrame, animationFrame ? undefined : pickLod);
+             if (!result) {
+                 // user cancelled LOD selection
+                 return null;
+@@ -71,9 +80,11 @@
+             const { gsplatData, transform } = result;
+             validateGSplatData(gsplatData);
+ 
++            // Let the progress UI paint before GPU allocation / texture upload.
++            await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+             const asset = this.createGSplatAsset(gsplatData, filename);
+-
+-            return new Splat(asset, transform.rotation);
++            const splat = new Splat(asset, transform.rotation);
++            return splat;
+         } finally {
+             if (!animationFrame) {
+                 this.events.fire('stopSpinner');
+diff --git a/src/remote-splat-loader.ts b/src/remote-splat-loader.ts
+new file mode 100644
+--- /dev/null
++++ b/src/remote-splat-loader.ts
+@@ -0,0 +1,51 @@
++import { GSplatData, Quat } from 'playcanvas';
++
++import { setPreparedTextures } from './prepared-splat-resource';
++
++// Progress messages stay small. Typed array ownership is transferred, not copied.
++const reportSplatLoad = (phase: string, extra = {}) => {
++    if (window.parent !== window) {
++        window.parent.postMessage({ type: 'reconstudio:splat-load', phase, ...extra }, location.origin);
++    }
++};
++
++const loadRemoteSplat = (filename: string, skipReorder?: boolean) => new Promise<{
++    gsplatData: GSplatData; transform: { rotation: Quat };
++}>((resolve, reject) => {
++    const worker = new Worker(new URL('splat-loader-worker.js', document.baseURI), { type: 'module' });
++    const cleanup = () => {
++        worker.terminate();
++        window.removeEventListener('pagehide', cleanup);
++    };
++    window.addEventListener('pagehide', cleanup, { once: true });
++    worker.onerror = (event) => {
++        cleanup();
++        reportSplatLoad('error', { message: event.message });
++        reject(new Error(event.message || 'Background loader failed'));
++    };
++    worker.onmessage = (event) => {
++        const data = event.data;
++        if (data.type === 'progress') {
++            reportSplatLoad('loading', { loaded: data.loaded, total: data.total });
++        } else if (data.type === 'packing') {
++            reportSplatLoad('packing', { count: data.count });
++        } else if (data.type === 'result') {
++            cleanup();
++            reportSplatLoad('gpu', { count: data.count });
++            const gsplatData = new GSplatData(data.elements, data.comments);
++            setPreparedTextures(gsplatData, data.textures);
++            resolve({
++                gsplatData,
++                transform: { rotation: new Quat(data.rotation.x, data.rotation.y, data.rotation.z, data.rotation.w) }
++            });
++        } else if (data.type === 'error') {
++            cleanup();
++            reportSplatLoad('error', { message: data.message });
++            reject(new Error(data.message));
++        }
++    };
++    reportSplatLoad('loading');
++    worker.postMessage({ filename, skipReorder });
++});
++
++export { loadRemoteSplat, reportSplatLoad };
+diff --git a/src/splat-loader-worker.ts b/src/splat-loader-worker.ts
+new file mode 100644
+--- /dev/null
++++ b/src/splat-loader-worker.ts
+@@ -0,0 +1,61 @@
++// Recon Studio: keep decoding, SH materialization and Morton ordering off the UI.
++import { UrlReadFileSystem, WebPCodec, WorkerQueue } from '@playcanvas/splat-transform';
++
++import { GSplatResource } from 'playcanvas';
++
++import { loadGSplatData, validateGSplatData } from './io/read/loader';
++
++const scope = self as unknown as DedicatedWorkerGlobalScope;
++WorkerQueue.maxWorkers = 0;
++WebPCodec.wasmUrl = new URL('static/lib/webp/webp.wasm', scope.location.href).href;
++
++scope.onmessage = async (event) => {
++    const { filename, skipReorder } = event.data;
++    const fs = new UrlReadFileSystem();
++    let lastProgress = 0;
++    try {
++        const result = await loadGSplatData(filename, {
++            createSource: (name: string) => fs.createSource(name, (loaded, total) => {
++                const now = performance.now();
++                if (now - lastProgress > 150 || (total && loaded === total)) {
++                    lastProgress = now;
++                    scope.postMessage({ type: 'progress', loaded, total });
++                }
++            })
++        }, skipReorder);
++        if (!result) throw new Error('No splat data');
++        validateGSplatData(result.gsplatData);
++        const data = result.gsplatData;
++        scope.postMessage({ type: 'packing', count: data.numSplats });
++        // Reuse the exact engine packing algorithms with CPU-only texture sinks.
++        // No WebGL context is created in the Worker and no coefficients are lost.
++        const textures: Record<string, Uint16Array | Uint32Array> = {
++            splatColor: new Uint16Array(data.numSplats * 4),
++            transformA: new Uint32Array(data.numSplats * 4),
++            transformB: new Uint16Array(data.numSplats * 4)
++        };
++        if (data.shBands > 0) textures.splatSH_1to3 = new Uint32Array(data.numSplats * 4);
++        if (data.shBands > 1) {
++            textures.splatSH_4to7 = new Uint32Array(data.numSplats * 4);
++            textures.splatSH_8to11 = new Uint32Array(data.numSplats * (data.shBands > 2 ? 4 : 1));
++        }
++        if (data.shBands > 2) textures.splatSH_12to15 = new Uint32Array(data.numSplats * 4);
++        const cpuResource = {
++            numSplats: data.numSplats, shBands: data.shBands,
++            streams: { getTexture: (name: string) => textures[name] ? { lock: () => textures[name], unlock: () => {} } : null }
++        } as unknown as GSplatResource;
++        GSplatResource.prototype.updateColorData.call(cpuResource, data);
++        GSplatResource.prototype.updateTransformData.call(cpuResource, data);
++        if (data.shBands > 0) GSplatResource.prototype.updateSHData.call(cpuResource, data);
++        const { elements, comments } = result.gsplatData;
++        const buffers = elements.flatMap(element => element.properties.map(property => property.storage?.buffer))
++        .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
++        scope.postMessage({
++            type: 'result', elements, comments, textures,
++            rotation: result.transform.rotation,
++            count: result.gsplatData.numSplats
++        }, [...new Set([...buffers, ...Object.values(textures).map(texture => texture.buffer as ArrayBuffer)])]);
++    } catch (error) {
++        scope.postMessage({ type: 'error', message: String(error) });
++    }
++};
+diff --git a/src/prepared-splat-resource.ts b/src/prepared-splat-resource.ts
+new file mode 100644
+--- /dev/null
++++ b/src/prepared-splat-resource.ts
+@@ -0,0 +1,38 @@
++import { GSplatData, GSplatResource } from 'playcanvas';
++
++// The Worker executes the engine's own packing routines. Here only copy their
++// final texture bytes; keep GSplatData intact for selection, editing and export.
++type Packed = Record<string, Uint16Array | Uint32Array>;
++const pending = new WeakMap<GSplatData, Packed>();
++
++class PreparedSplatResource extends GSplatResource {
++    copyPacked(data: GSplatData, names: string[]) {
++        const packed = pending.get(data);
++        if (!packed) return false;
++        for (const name of names) {
++            const source = packed[name];
++            if (!source) continue;
++            const texture = this.streams.getTexture(name);
++            const target = texture.lock() as Uint16Array | Uint32Array;
++            target.set(source);
++            texture.unlock();
++        }
++        return true;
++    }
++
++    updateColorData(data: GSplatData) {
++        if (!this.copyPacked(data, ['splatColor'])) super.updateColorData(data);
++    }
++
++    updateTransformData(data: GSplatData) {
++        if (!this.copyPacked(data, ['transformA', 'transformB'])) super.updateTransformData(data);
++    }
++
++    updateSHData(data: GSplatData) {
++        if (!this.copyPacked(data, ['splatSH_1to3', 'splatSH_4to7', 'splatSH_8to11', 'splatSH_12to15'])) super.updateSHData(data);
++    }
++}
++
++const setPreparedTextures = (data: GSplatData, packed: Packed) => pending.set(data, packed);
++const clearPreparedTextures = (data: GSplatData) => pending.delete(data);
++export { PreparedSplatResource, setPreparedTextures, clearPreparedTextures };
+diff --git a/src/file-handler.ts b/src/file-handler.ts
+--- a/src/file-handler.ts
++++ b/src/file-handler.ts
+@@ -1,3 +1,4 @@
++import { reportSplatLoad } from './remote-splat-loader';
+ import { path, Quat, Vec3 } from 'playcanvas';
+ 
+ import { CreateDropHandler } from './drop-handler';
+@@ -306,8 +307,10 @@
+                 return null;
+             }
+             await scene.add(model);
++            reportSplatLoad('ready', { count: model.numSplats });
+             return model;
+         } catch (error) {
++            reportSplatLoad('error', { message: String(error.message ?? error) });
+             const displayName = files[0]?.filename ?? 'unknown';
+             await showLoadError(error.message ?? error, displayName);
+         }
+diff --git a/src/scene.ts b/src/scene.ts
+--- a/src/scene.ts
++++ b/src/scene.ts
+@@ -82,6 +82,7 @@
+     boundStorage = new BoundingBox();
+     boundDirty = true;
+     forceRender = false;
++    renderQuality = new URLSearchParams(location.search).get('rsQuality') || 'native';
+ 
+     lockedRenderMode = false;
+     lockedRender = false;
+@@ -120,6 +121,13 @@
+         this.config = config;
+         this.canvas = canvas;
+         this.commandQueue = commandQueue;
++        window.addEventListener('message', (event) => {
++            if (event.origin !== location.origin || event.source !== window.parent) return;
++            if (event.data?.type === 'reconstudio:quality' && ['performance', 'balanced', 'native'].includes(event.data.quality)) {
++                this.renderQuality = event.data.quality;
++                this.forceRender = true;
++            }
++        });
+ 
+         // configure the playcanvas application. we render to an offscreen buffer so require
+         // only the simplest of backbuffers.
+@@ -381,9 +389,15 @@
+             this.canvasResize = null;
+         }
+ 
++        // Cap edit viewport cost on high-DPI / large monitors; this changes
++        // only display resolution, never geometry, SH data or saved exports.
++        const quality = this.renderQuality;
++        const maxPixels = quality === 'performance' ? 1_000_000 : quality === 'balanced' ? 2_000_000 : Infinity;
++        const requestedScale = this.config.camera.pixelScale;
++        const pixelScale = Math.max(requestedScale, Math.sqrt(this.app.graphicsDevice.width * this.app.graphicsDevice.height / maxPixels));
+         // update render target size
+-        this.targetSize.width = Math.ceil(this.app.graphicsDevice.width / this.config.camera.pixelScale);
+-        this.targetSize.height = Math.ceil(this.app.graphicsDevice.height / this.config.camera.pixelScale);
++        this.targetSize.width = Math.ceil(this.app.graphicsDevice.width / pixelScale);
++        this.targetSize.height = Math.ceil(this.app.graphicsDevice.height / pixelScale);
+ 
+         this.forEachElement(e => e.onPreRender());
+ 
+diff --git a/src/sw.ts b/src/sw.ts
+--- a/src/sw.ts
++++ b/src/sw.ts
+@@ -1,59 +1,15 @@
+-import { version as appVersion } from '../package.json';
+-
+-// export default null
++// Recon Studio serves versioned local bundles. Do not cache large model requests
++// or allow a stale editor entry point to hide newly deployed worker patches.
+ declare let self: ServiceWorkerGlobalScope;
+-
+-const cacheName = `superSplat-v${appVersion}`;
+-
+-const cacheUrls = [
+-    './',
+-    './index.css',
+-    './index.html',
+-    './index.js',
+-    './index.js.map',
+-    './manifest.json',
+-    './static/icons/logo-192.png',
+-    './static/icons/logo-512.png',
+-    './static/images/screenshot-narrow.jpg',
+-    './static/images/screenshot-wide.jpg',
+-    './static/lib/webp/webp.mjs',
+-    './static/lib/webp/webp.wasm',
+-    './static/locales/de.json',
+-    './static/locales/en.json',
+-    './static/locales/fr.json',
+-    './static/locales/ja.json',
+-    './static/locales/ko.json',
+-    './static/locales/zh-CN.json'
+-];
+-
+ self.addEventListener('install', (event) => {
+-    console.log(`installing v${appVersion}`);
+-
+-    // create cache for current version
+-    event.waitUntil(
+-        caches.open(cacheName)
+-        .then((cache) => {
+-            cache.addAll(cacheUrls);
+-        })
+-    );
++    event.waitUntil(self.skipWaiting());
+ });
+-
+-self.addEventListener('activate', () => {
+-    console.log(`activating v${appVersion}`);
+-
+-    // delete the old caches once this one is activated
+-    caches.keys().then((names) => {
+-        for (const name of names) {
+-            if (name !== cacheName) {
+-                caches.delete(name);
+-            }
++self.addEventListener('activate', (event) => {
++    event.waitUntil((async () => {
++        for (const name of await caches.keys()) {
++            if (name.startsWith('superSplat-v')) await caches.delete(name);
+         }
+-    });
++        await self.clients.claim();
++    })());
+ });
+-
+-self.addEventListener('fetch', (event) => {
+-    event.respondWith(
+-        caches.match(event.request)
+-        .then(response => response ?? fetch(event.request))
+-    );
+-});
++export {};
+diff --git a/src/index.html b/src/index.html
+--- a/src/index.html
++++ b/src/index.html
+@@ -22,6 +22,6 @@
+     </head>
+ 
+     <body>
+-        <script type="module" src="./index.js"></script>
++        <script type="module" src="./index.js?recon=__RECON_BUILD__"></script>
+     </body>
+ </html>
+diff --git a/rollup.config.mjs b/rollup.config.mjs
+--- a/rollup.config.mjs
++++ b/rollup.config.mjs
+@@ -40,7 +40,7 @@
+ outputHeader();
+ 
+ const application = {
+-    input: 'src/index.ts',
++    input: { index: 'src/index.ts', 'splat-loader-worker': 'src/splat-loader-worker.ts' },
+     output: {
+         dir: 'dist',
+         format: 'esm',
+@@ -52,7 +52,7 @@
+                 {
+                     src: 'src/index.html',
+                     transform: (contents, filename) => {
+-                        return contents.toString().replace('__BASE_HREF__', HREF);
++                        return contents.toString().replace('__BASE_HREF__', HREF).replace('__RECON_BUILD__', process.env.RECON_BUILD_ID || 'worker-v1');
+                     }
+                 },
+                 { src: 'src/manifest.json' },

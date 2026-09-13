@@ -6,6 +6,8 @@
 <title>Recon Studio</title>
 <script src="/static/htmx.min.js"></script>
 <script src="/static/js/joblist.js" defer></script>
+<script src="/static/js/workspace.js" defer></script>
+<script src="/static/js/supersplat.js" defer></script>
 <style>
   /* 墨流し SUMINAGASHI — 和紙(washi paper) + 墨/藍(sumi & aizome ink) palette.
      Variable NAMES are kept identical to the old dark theme so every inline
@@ -396,18 +398,25 @@
   .mp-status{ font-size:14.5px !important; }
   .mp-status b{ color:var(--accent); }
 </style>
+<link rel="stylesheet" href="/static/css/workspace.css">
 </head>
 <body>
+<a class="skip-link" href="#workspace-output">跳至工作區</a>
 <header>
-  <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示左側設定面板">◀</button>
-  <h1>Recon Studio</h1>
-  <span class="sub">影片 → 清晰幀 → COLMAP → 訓練 → Mesh</span>
+  <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示設定面板" aria-controls="workspace-settings" aria-expanded="true" aria-label="隱藏設定面板">◀</button>
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 36 40" fill="none" aria-hidden="true"><path d="m18 2 16 9v18l-16 9-16-9V11Z" stroke="currentColor" stroke-width="1.7"/><path d="m2 11 16 9 16-9M18 20v18M10 7l16 9v18" stroke="currentColor" stroke-width="1.4"/></svg>
+    <div><h1>Recon Studio</h1><div class="brand-caption">3D RECONSTRUCTION WORKSPACE</div></div>
+  </div>
+  <div class="header-actions"><span id="connection-status" class="connection" role="status" data-state="connecting">連線中</span><a class="header-link" href="/doctor" target="_blank" rel="noopener">環境檢查 ↗</a></div>
 </header>
+<nav class="mobile-jumps" aria-label="工作區快捷導覽"><a href="#workspace-settings" onclick="if(document.querySelector('.wrap').classList.contains('nleft')) toggleLeftPanel()">設定素材 ↑</a><a href="#workspace-output">查看工作與紀錄 ↓</a></nav>
 
 <div class="wrap">
   <!-- ============================= left: forms ============================= -->
-  <div class="col left">
-    <div class="tabs steps">
+  <div class="col left" id="workspace-settings" role="region" aria-label="功能與任務設定">
+    <div class="sidebar-heading"><h2>建立任務</h2><span>選擇功能，設定素材</span></div>
+    <nav class="tabs steps" aria-label="重建功能">
       <div class="tabrow features">
         <span class="lbl">功能</span>
         <div class="tabbtns">
@@ -436,19 +445,20 @@
           <button class="ghost" id="t-supersplat" onclick="showForm('supersplat')">✨ SuperSplat</button>
         </div>
       </div>
-    </div>
+    </nav>
+    <div class="form-intro"><h2 id="form-title">雲端資料</h2><p id="form-description">下載或上傳素材，準備重建需要的檔案。</p></div>
 
     <!-- ----- frames form ----- -->
-    <form id="form-frames" hx-post="/ui/frames" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-frames" hx-sync="this:drop" hx-post="/ui/frames" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>影片來源</legend>
-        <label>input（影片檔或資料夾；資料夾會遞迴掃描）</label>
+        <label>影片來源（檔案或資料夾，包含子資料夾）</label>
         <div class="row">
           <input name="input" id="frames_input" oninput="suggestFromInput()"
                  placeholder="{{ browse_root }} " required>
           <button type="button" class="ghost" onclick="openPicker('frames_input')">瀏覽</button>
         </div>
-        <label>out_dir（每支影片 → &lt;out&gt;/&lt;group&gt;/frames_&lt;video&gt;/*.jpg）</label>
+        <label>影格輸出資料夾</label>
         <div class="row">
           <input name="out_dir" id="frames_out" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('frames_out')">瀏覽</button>
@@ -480,18 +490,18 @@
     </form>
 
     <!-- ----- colmap form ----- -->
-    <form id="form-colmap" style="display:none" hx-post="/ui/jobs" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-colmap" style="display:none" hx-sync="this:drop" hx-post="/ui/jobs" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
-        <legend>Inputs</legend>
+        <legend>重建素材</legend>
         <div class="prow stack">
-          <label class="plabel" for="image_root"><span class="ptext">image_root</span></label>
+          <label class="plabel" for="image_root"><span class="ptext">照片資料夾</span></label>
           <div class="pctl"><div class="row">
             <input name="image_root" id="image_root" placeholder="{{ browse_root }}" required>
             <button type="button" class="ghost" onclick="openPicker('image_root')">瀏覽</button>
           </div></div>
         </div>
         <div class="prow stack">
-          <label class="plabel" for="workspace"><span class="ptext">workspace</span>
+          <label class="plabel" for="workspace"><span class="ptext">重建工作目錄</span>
             <span class="info" onclick="togHint(event,'h_cm_workspace')" title="說明">?</span>
           </label>
           <div class="pctl"><div class="row">
@@ -1175,7 +1185,7 @@
     <!-- ----- 融合 form: two matted passes of one subject -> one COLMAP input -----
          Only stages the links, then prefills the COLMAP form above; it has no
          COLMAP options of its own on purpose (see web/routers/fusion.py). -->
-    <form id="form-fusion" style="display:none" hx-post="/ui/fusion/prepare"
+    <form id="form-fusion" style="display:none" hx-sync="this:drop" hx-post="/ui/fusion/prepare"
           hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>融合(兩輪拍攝 → 一個 COLMAP)</legend>
@@ -1237,7 +1247,7 @@
     </form>
 
     <!-- ----- depth/normal form (LichtFeld-Studio `preprocess` -> depth/ + normals/) ----- -->
-    <form id="form-depth" style="display:none" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-depth" style="display:none" hx-sync="this:drop" hx-post="/ui/depth" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>深度/法線生成</legend>
         <div class="hint">為每張照片產生深度圖和/或法線圖,輸出成 LichtFeld-Studio 格式的
@@ -1315,7 +1325,7 @@
     </form>
 
     <!-- ----- matte (去背) form ----- -->
-    <form id="form-matte" style="display:none" hx-post="/ui/matte" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-matte" style="display:none" hx-sync="this:drop" hx-post="/ui/matte" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>去背 / 前景遮罩(SAM)</legend>
         <ol class="steps">
@@ -1504,7 +1514,7 @@
     </form>
 
     <!-- ----- blocksplit form ----- -->
-    <form id="form-blocksplit" style="display:none" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-blocksplit" style="display:none" hx-sync="this:drop" hx-post="/ui/blocksplit" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>分塊（大場景 → 每塊獨立訓練）</legend>
         <div class="hint">把重建好的場景切成子塊,每塊各自吃滿 splat 預算;要街道級細節用這個。</div>
@@ -1568,10 +1578,10 @@
     </form>
 
     <!-- ----- train form ----- -->
-    <form id="form-train" style="display:none" hx-post="/ui/train" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-train" style="display:none" hx-sync="this:drop" hx-post="/ui/train" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>訓練</legend>
-        <label>backend（訓練器；環境由 backends.json 解析）</label>
+        <label>訓練後端</label>
         <select name="backend" id="train_backend" onchange="syncBackendParams('train')">
           {% for b in backends %}
           <option value="{{ b.name }}" {{ 'disabled' if not b.ready }}
@@ -1589,7 +1599,7 @@
           <input name="source" id="train_source" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('train_source')">瀏覽</button>
         </div>
-        <label>model_path（輸出模型目錄）</label>
+        <label>模型輸出資料夾</label>
         <div class="row">
           <input name="model_path" id="train_out" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('train_out')">瀏覽</button>
@@ -1635,21 +1645,21 @@
     </form>
 
     <!-- ----- mesh form ----- -->
-    <form id="form-mesh" style="display:none" hx-post="/ui/mesh" hx-target="#main" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+    <form id="form-mesh" style="display:none" hx-sync="this:drop" hx-post="/ui/mesh" hx-target="#main" hx-swap="innerHTML" hx-encoding="multipart/form-data">
       <fieldset>
         <legend>Mesh 抽取</legend>
         {% set mesh_backends = backends | selectattr('mesh') | list %}
         {% if not mesh_backends %}
         <div class="hint">目前沒有支援 mesh 抽取的 backend（此功能僅 GS-2M 類提供）。</div>
         {% else %}
-        <label>backend</label>
+        <label>模型處理後端</label>
         <select name="backend" id="mesh_backend" onchange="syncBackendParams('mesh')">
           {% for b in mesh_backends %}
           <option value="{{ b.name }}" {{ 'disabled' if not b.ready }}>
             {{ b.label }}{{ '' if b.ready else '（環境未就緒）' }}
           </option>{% endfor %}
         </select>
-        <label>model_path（已訓練的模型輸出目錄）</label>
+        <label>已訓練模型的資料夾</label>
         <div class="row">
           <input name="model_path" id="mesh_model" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('mesh_model')">瀏覽</button>
@@ -1728,7 +1738,7 @@
     </form>
 
     <!-- ----- GCS sync form (decoupled downloader) ----- -->
-    <form id="form-gcs" style="display:none" hx-post="/ui/gcs_sync" hx-target="#main" hx-swap="innerHTML"
+    <form id="form-gcs" style="display:none" hx-sync="this:drop" hx-post="/ui/gcs_sync" hx-target="#main" hx-swap="innerHTML"
           data-dest-root="{{ browse_root }}" data-gcs-root="{{ gcs_root }}">
       <fieldset>
         <legend>從 GCS 下載到本機</legend>
@@ -1749,7 +1759,7 @@
     </form>
 
     <!-- ----- 上傳到 GCS (local → gs://, gsutil -m rsync) ----- -->
-    <form id="form-gcsup" style="display:none" hx-post="/ui/gcs_upload" hx-target="#main" hx-swap="innerHTML">
+    <form id="form-gcsup" style="display:none" hx-sync="this:drop" hx-post="/ui/gcs_upload" hx-target="#main" hx-swap="innerHTML">
       <fieldset>
         <legend>上傳到 GCS</legend>
         <div class="hint">把本機<b>檔案 / 資料夾</b>推上 gs://(<code>gsutil -m</code> 平行;單一資料夾 rsync 只補差異,檔案/多選用 cp)。</div>
@@ -1771,7 +1781,7 @@
       <fieldset>
         <legend>圖片檢視器（看 server 資料夾）</legend>
         <div class="hint" style="margin-bottom:8px">挑 server 上<b>任一資料夾</b>,把裡面（<b>含所有子資料夾</b>）的圖片排成一張縮圖牆,並<b>依子資料夾分組</b>顯示標題,所以像 backward / forward / left / nadir / right 這種多鏡頭結構可以一次全看、又知道每張在哪個子資料夾。點一張可放大、用 ← → 翻頁。支援 <code>.jpg / .png / .webp / .gif / .bmp / .tif</code>（TIFF 自動轉 JPEG 預覽）。</div>
-        <label>server 資料夾路徑</label>
+        <label>伺服器上的圖片資料夾</label>
         <div class="row">
           <input id="gallery_path" placeholder="{{ browse_root }}/…/images_2560">
           <button type="button" class="ghost" onclick="openPicker('gallery_path')">瀏覽</button>
@@ -1789,7 +1799,7 @@
       <fieldset>
         <legend>Mesh Viewer（看任意檔案）</legend>
         <div class="hint" style="margin-bottom:8px">不綁 job:直接挑 server 上任何一個 mesh 檔開檢視器（軌道旋轉、量尺、線框、頂點色）。支援 <code>.ply / .obj / .stl / .glb</code>。量尺顯示檔案原生數值,單位標示在檢視器裡自選。</div>
-        <label>server 檔案路徑（留空 = 進去再選本機檔案）</label>
+        <label>伺服器上的檔案路徑（留空 = 進去再選本機檔案）</label>
         <div class="row">
           <input id="viewer_path" placeholder="{{ browse_root }}/…/tsdf_post_scaled_mm.ply">
           <button type="button" class="ghost" onclick="openFilePicker('viewer_path')">瀏覽</button>
@@ -1804,7 +1814,7 @@
       <fieldset>
         <legend>Mesh 量測（看任意檔案）</legend>
         <div class="hint" style="margin-bottom:8px">不綁 job:挑 server 上任何一個 mesh 檔,自動算高/寬/深並產出正面/側面/俯視三視圖。重建座標系通常是斜的,方向對不對要肉眼確認,頁面裡有翻轉/切換軸的按鈕。支援 <code>.ply</code>（binary，需含頂點座標；有頂點色會渲染更清楚）。</div>
-        <label>server 檔案路徑</label>
+        <label>伺服器上的檔案路徑</label>
         <div class="row">
           <input id="measure_path" placeholder="{{ browse_root }}/…/tsdf_post.ply">
           <button type="button" class="ghost" onclick="openFilePicker('measure_path','ply')">瀏覽</button>
@@ -1819,7 +1829,7 @@
       <fieldset>
         <legend>SuperSplat（看點雲 / 3DGS）</legend>
         <div class="hint" style="margin-bottom:8px">用自架的 SuperSplat 開<b>點雲</b>:訓練出的 3DGS（<code>point_cloud.ply</code>）、COLMAP 稀疏點雲或 <code>.splat / .ksplat / .spz / .sog</code>。看 mesh 請用 Mesh Viewer。</div>
-        <label>server 檔案路徑（留空 = 進去再開檔/拖放）</label>
+        <label>伺服器上的檔案路徑（留空 = 進去再開檔/拖放）</label>
         <div class="row">
           <input id="splat_path" placeholder="{{ browse_root }}/…/point_cloud.ply">
           <button type="button" class="ghost" onclick="openFilePicker('splat_path','splat')">瀏覽</button>
@@ -1831,30 +1841,35 @@
   </div>
 
   <!-- ============================ right: output ============================ -->
-  <div class="col">
-    <div class="tabs">
-      <button class="ghost active" onclick="showTab('run',this)">執行</button>
-      <button class="ghost" onclick="showTab('hist',this)">歷史</button>
+  <div class="col" id="workspace-output" role="main" tabindex="-1" data-view="home">
+    <div class="workspace-heading"><div><p class="section-eyebrow">WORKSPACE</p><h2>重建工作區</h2><p>從素材到模型，掌握每一步進度。</p></div></div>
+    <div class="workspace-nav">
+    <div class="tabs workspace-tabs" role="tablist" aria-label="工作區檢視">
+      <button type="button" class="ghost active" id="view-home" role="tab" aria-controls="tab-home" aria-selected="true" onclick="showTab('home')">工作區首頁</button>
+      <button type="button" class="ghost" id="view-run" role="tab" aria-controls="tab-run" aria-selected="false" tabindex="-1" onclick="showTab('run')">目前工作</button>
+      <button class="ghost" id="view-hist" role="tab" aria-controls="tab-hist" aria-selected="false" tabindex="-1" onclick="showTab('hist',this)">任務紀錄</button>
     </div>
-    <div id="tab-run">
-      <div id="main"><div class="empty">填左側設定後啟動,這裡會顯示進度、即時 log 與 3D 結果。</div></div>
     </div>
-    <div id="tab-hist" style="display:none">
+    <div id="tab-home" role="tabpanel" aria-labelledby="view-home">{% include '_welcome.html' %}</div>
+    <div id="tab-run" style="display:none" role="tabpanel" aria-labelledby="view-run">
+      <div id="main" hx-sync="this:replace"><div class="history-empty"><h3>尚未開啟任務</h3><p>從任務紀錄開啟工作，或回到首頁選擇素材開始重建。</p><button type="button" class="ghost" onclick="showTab('home')">回到工作區首頁</button> <button type="button" class="ghost" onclick="showTab('hist')">查看任務紀錄</button></div></div>
+    </div>
+    <div id="tab-hist" style="display:none" role="tabpanel" aria-labelledby="view-hist">
       <!-- SSE (joblist.js) drives instant refresh on state change; the 30s poll
            is a defensive fallback when SSE is blocked. The `[!document.hidden]`
            filter pauses the poll when the tab is in the background. (Single
            line + simple filter expression — htmx's trigger parser drops the
            whole attribute, load included, on multi-line or `===` expressions.) -->
-      <div id="joblist" hx-get="/ui/joblist" hx-trigger="load, every 30s [!document.hidden]" hx-swap="innerHTML"></div>
+      <div id="joblist" hx-sync="this:replace" hx-get="/ui/joblist" hx-trigger='load, every 30s [!document.hidden && document.getElementById("tab-hist").style.display!="none"]'  hx-swap="innerHTML"></div>
     </div>
   </div>
 </div>
 
 <!-- directory picker modal -->
-<div class="modal" id="picker">
+<div class="modal" id="picker" role="dialog" aria-modal="true" aria-labelledby="picker-title" tabindex="-1">
   <div class="box">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <strong>選擇資料夾</strong>
+      <strong id="picker-title">選擇資料夾</strong>
       <button class="ghost" onclick="document.getElementById('picker').classList.remove('open')">關閉</button>
     </div>
     <div id="picker-body"></div>
@@ -1874,20 +1889,26 @@
   </div>
 </div>
 
+<div class="ui-notice" id="ui-notice" role="alert" hidden></div>
 <script>
   // Collapsible left config panel (default open). State persists in localStorage
   // so a reload keeps the user's choice; the ◀/☰ header button toggles it.
   function applyLeftPanel(){
-    var collapsed = localStorage.getItem('rs_left_collapsed') === '1';
+    var collapsed = false;
+    try { collapsed = localStorage.getItem('rs_left_collapsed') === '1'; } catch (_) {}
     var wrap = document.querySelector('.wrap');
     if (wrap) wrap.classList.toggle('nleft', collapsed);
     var btn = document.getElementById('toggle-left');
-    if (btn) { btn.textContent = collapsed ? '☰' : '◀'; btn.title = (collapsed ? '顯示' : '隱藏') + '左側設定面板'; }
+    if (btn) { btn.textContent = collapsed ? '☰' : '◀'; btn.title = (collapsed ? '顯示' : '隱藏') + '設定面板'; btn.setAttribute('aria-label', btn.title); btn.setAttribute('aria-expanded', String(!collapsed)); }
   }
   function toggleLeftPanel(){
-    var collapsed = localStorage.getItem('rs_left_collapsed') !== '1';   // flip
-    localStorage.setItem('rs_left_collapsed', collapsed ? '1' : '0');
-    applyLeftPanel();
+    var collapsed = document.querySelector('.wrap').classList.toggle('nleft');
+    try { localStorage.setItem('rs_left_collapsed', collapsed ? '1' : '0'); } catch (_) {}
+    var btn = document.getElementById('toggle-left');
+    btn.textContent = collapsed ? '☰' : '◀';
+    btn.title = (collapsed ? '顯示' : '隱藏') + '設定面板';
+    btn.setAttribute('aria-label', btn.title);
+    btn.setAttribute('aria-expanded', String(!collapsed));
   }
   applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
 
@@ -1896,11 +1917,12 @@
       var f = document.getElementById('form-' + k);
       if (f) f.style.display = (k===which) ? '' : 'none';
       var t = document.getElementById('t-' + k);
-      if (t) t.classList.toggle('active', k===which);
+      if (t) { t.classList.toggle('active', k===which); t.setAttribute('aria-pressed', String(k===which)); }
     });
     var gu = document.getElementById('form-gcsup');     // 上傳到 GCS form (sibling of #form-gcs)
     if (gu) gu.style.display = (which==='gcs') ? '' : 'none';
     if (which==='train' || which==='mesh') syncBackendParams(which);
+    document.dispatchEvent(new CustomEvent('rs:formchange', {detail:{which:which}}));
   }
   showForm('gcs');   // default landing = the 資料 tab (free navigation, no fixed order)
 
@@ -2349,11 +2371,28 @@
     var m = document.getElementById('mesh_model'); if (m) m.value = model;
     window.scrollTo(0, 0);
   }
-  function showTab(which, btn){
-    document.getElementById('tab-run').style.display  = which==='run'  ? '' : 'none';
-    document.getElementById('tab-hist').style.display = which==='hist' ? '' : 'none';
-    document.querySelectorAll('.col:last-child > .tabs button').forEach(b=>b.classList.remove('active'));
-    if (btn) btn.classList.add('active');
+  function showTab(which){
+    if (!['home', 'run', 'hist'].includes(which)) return;
+    var output = document.getElementById('workspace-output');
+    var previous = output.dataset.view || 'home';
+    // Count explicit navigation even if the same tab is clicked while loading.
+    window._workspaceNavigation = (window._workspaceNavigation || 0) + 1;
+    window._workspaceScroll = window._workspaceScroll || {};
+    if (previous !== which) window._workspaceScroll[previous] = output.scrollTop;
+    ['home', 'run', 'hist'].forEach(function(view){
+      document.getElementById('tab-' + view).style.display = view === which ? '' : 'none';
+    });
+    output.dataset.view = which;
+    document.querySelectorAll('.workspace-tabs button').forEach(function(b){
+      var active = b.id === 'view-' + which;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', String(active));
+      b.tabIndex = active ? 0 : -1;
+    });
+    if (previous !== which) output.scrollTop = which === 'home' ? 0 : (window._workspaceScroll[which] || 0);
+    if (which === 'home' && window.matchMedia('(max-width:760px)').matches) output.scrollIntoView({block:'start'});
+    if (window.syncWorkspaceLocation) window.syncWorkspaceLocation();
+    document.dispatchEvent(new CustomEvent('rs:viewchange', {detail:{which:which}}));
   }
   function toggleBlurMode(v){
     document.getElementById('blur-pct').style.display = v==='percentile' ? '' : 'none';
@@ -2636,7 +2675,7 @@
   }
   function loadJob(id){
     showTab('run', document.querySelector('.col:last-child > .tabs button'));
-    htmx.ajax('GET', '/ui/jobs/' + id, {target:'#main', swap:'innerHTML'});
+    htmx.ajax('GET', '/ui/jobs/' + encodeURIComponent(id), {target:'#main', source:document.getElementById('main'), swap:'innerHTML'});
   }
   // embed the 3D viewer inline (its own importmap needs an isolated document -> iframe)
   function openViz(id, sub){
@@ -2668,37 +2707,6 @@
   // pre-loaded with the trained 3DGS cloud. 去背: box/sphere select → Ctrl+I invert →
   // Delete → Ctrl+Z to undo. The「送回」button asks the iframe (postMessage) to serialize
   // the edited cloud and POSTs it back; the server stages a non-destructive _edited_ dir.
-  function openSuperSplat(jobId){
-    if (window.rsBus) { window.rsBus.unwatchLog(); window._logJobId = null; }  // stop tailing before showing a 3D view
-    // The editor picks its reader from `filename`, not from the URL or the MIME
-    // type, so a .sog announced as point_cloud.ply is parsed as PLY and fails.
-    // Ask the server what the file actually is first.
-    fetch('/api/jobs/' + jobId + '/splat_info')
-      .then(function(r){ return r.ok ? r.json() : r.text().then(function(t){ throw new Error(t); }); })
-      .then(function(j){ mountSuperSplat(jobId, j.filename || 'point_cloud.ply'); })
-      .catch(function(err){
-        document.getElementById('main').innerHTML =
-          '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
-          '<button class="ghost" onclick="loadJob(\'' + jobId + '\')">← 回 log</button></div>' +
-          '<div class="hint" style="color:var(--err);word-break:break-all">⚠ 找不到可開啟的點雲：' +
-          String(err.message || err) + '</div>';
-      });
-  }
-  function mountSuperSplat(jobId, filename){
-    // The URL has to END in the real extension: the editor picks its reader from
-    // the URL path, and ignores the `filename` query parameter for that decision.
-    var src = location.origin + '/api/jobs/' + jobId + '/splat/' + encodeURIComponent(filename);
-    var url = '/static/supersplat/index.html?load=' + encodeURIComponent(src) +
-              '&filename=' + encodeURIComponent(filename);
-    document.getElementById('main').innerHTML =
-      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">' +
-      '<button class="ghost" onclick="loadJob(\'' + jobId + '\')">← 回 log</button>' +
-      '<button class="ghost" style="border-color:var(--ok);color:var(--ok)" onclick="superSplatSendBack(\'' + jobId + '\')">✅ 送回去背點雲</button>' +
-      '<span class="hint">框選物件 → Ctrl+I 反選 → Delete 刪背景（Ctrl+Z 還原）→ 按綠色鈕送回</span>' +
-      '<span id="ss-status" class="hint"></span></div>' +
-      '<iframe id="ss-frame" src="' + url + '" ' +
-      'style="width:100%;height:78vh;border:1px solid var(--line);border-radius:8px"></iframe>';
-  }
   // ask the embedded editor to serialize the 去背'd cloud, then upload it to the server.
   // Mesh backends → server stages a non-destructive _edited_ dir, we prefill the Mesh form.
   // No-mesh backends (LichtFeld) → server saves the cleaned cloud, we download it locally.
@@ -2707,10 +2715,11 @@
     var st = document.getElementById('ss-status');
     function setSt(t, c){ if (st){ st.textContent = t; st.style.color = c || 'var(--mut)'; } }
     if (!f || !f.contentWindow){ setSt('· 找不到編輯器', 'var(--err)'); return; }
+    if (f.dataset.ready !== 'true'){ setSt('· 請等模型載入完成', 'var(--warn)'); return; }
     setSt('· 匯出中…');
     function onMsg(e){
       var d = e.data;
-      if (!d || d.type !== 'supersplat:export-ply') return;
+      if (e.source !== f.contentWindow || e.origin !== location.origin || !d || d.type !== 'supersplat:export-ply') return;
       window.removeEventListener('message', onMsg);
       if (d.error || !d.data){ setSt('· 匯出失敗: ' + (d.error || 'no data'), 'var(--err)'); return; }
       var bytes = d.data;                       // keep for an optional local download
@@ -2734,7 +2743,7 @@
         .catch(function(err){ setSt('· 上傳失敗: ' + err, 'var(--err)'); });
     }
     window.addEventListener('message', onMsg);
-    f.contentWindow.postMessage({ type:'supersplat:export-ply' }, '*');
+    f.contentWindow.postMessage({ type:'supersplat:export-ply' }, location.origin);
   }
   // live log via SSE — started here (not in the swapped fragment) because htmx
   // does not reliably execute inline <script> in swapped content.
@@ -2752,6 +2761,10 @@
                               // run emits tens of thousands of lines and froze the tab
     // Log lines arrive over the shared WebSocket (window.rsBus, in joblist.js) — no
     // dedicated connection. We just register how to render them for THIS job.
+    window.rsBus.onLogReset = function(job){
+      if (job !== window._logJobId) return;
+      lines = []; lastProg = false; pre.textContent = '';
+    };
     window.rsBus.onLog = function(job, incoming){
       if (job !== window._logJobId) return;
       var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
@@ -2760,7 +2773,7 @@
       pre.textContent = lines.length ? lines.join('\n') + '\n' : '';
       if (atBottom) pre.scrollTop = pre.scrollHeight;
     };
-    window.rsBus.onLogEnd = function(job){ if (job === window._logJobId) window._logJobId = null; };
+    window.rsBus.onLogEnd = function(job){ if (job === window._logJobId) window.rsBus.unwatchLog(); };
     window.rsBus.watchLog(jobId);
   }
   // tqdm refreshes the same bar with \r; treat progress lines as in-place updates

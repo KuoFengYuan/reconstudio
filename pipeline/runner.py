@@ -89,6 +89,15 @@ class Runner:
         self._write(f"\n=== [{time.strftime('%H:%M:%S')}] {msg} ===\n")
 
     # -- subprocess --------------------------------------------------------- #
+    def _spawn(self, argv, **kwargs):
+        # Registration and the cancellation snapshot share a lock. Otherwise
+        # cancel() can miss a child created between check_cancel() and add().
+        with self._lock:
+            self.check_cancel()
+            proc = subprocess.Popen(argv, **kwargs)
+            self._procs.add(proc)
+            return proc
+
     def run(self, argv: Sequence[str], *, cwd: str | None = None,
             env: dict | None = None, check: bool = True,
             stderr_to: Path | str | None = None) -> int:
@@ -100,33 +109,27 @@ class Runner:
         """
         self.check_cancel()
         run_env = {**os.environ, **self.default_env, **(env or {})}
-        if stderr_to:
-            errfh = open(stderr_to, "w")
-            try:
-                proc = subprocess.Popen(list(argv), stdout=subprocess.DEVNULL,
-                                        stderr=errfh, cwd=cwd, env=run_env,
-                                        start_new_session=True)
-                with self._lock:
-                    self._procs.add(proc)
-                proc.wait()
-            finally:
+        errfh = open(stderr_to, "w") if stderr_to else None
+        proc = None
+        try:
+            proc = self._spawn(
+                list(argv), stdout=subprocess.DEVNULL if errfh else subprocess.PIPE,
+                stderr=errfh if errfh else subprocess.STDOUT, cwd=cwd, env=run_env,
+                text=True, bufsize=1, start_new_session=True,
+            )
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    if not _LOG_NOISE.search(line):
+                        self._write(line)
+            proc.wait()
+        finally:
+            if errfh:
                 errfh.close()
+            if proc is not None:
+                if proc.stdout is not None:
+                    proc.stdout.close()
                 with self._lock:
                     self._procs.discard(proc)
-        else:
-            proc = subprocess.Popen(list(argv), stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, cwd=cwd, env=run_env,
-                                    text=True, bufsize=1, start_new_session=True)
-            with self._lock:
-                self._procs.add(proc)
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                if _LOG_NOISE.search(line):
-                    continue
-                self._write(line)
-            proc.wait()
-            with self._lock:
-                self._procs.discard(proc)
 
         if self._cancelled:
             raise Cancelled()

@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+import os
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 from jobs import COLMAP_STAGES, MAX_JOBS, manager
+from web.services.job_history import history_context
 from web.shared import _page
 
 router = APIRouter()
@@ -17,37 +19,9 @@ router = APIRouter()
 async def joblist(request: Request,
                   q: str = "", kind: str = "all", status: str = "all",
                   limit: int = 50):
-    """Filtered + paginated job table fragment.
-
-    `q` matches title or id (substring, case-insensitive); kind/status='all' means
-    no filter on that axis. `limit` is the visible-row cap ('Load more' grows it).
-    Chip counts are computed on the FULL set so the user sees true totals."""
-    all_jobs = manager.list()                                       # sorted newest-first
-    kind_counts = Counter(j["kind"] for j in all_jobs)
-    status_counts = Counter(j["status"] for j in all_jobs)
-
-    qn = (q or "").strip().lower()
-
-    def match(j) -> bool:
-        if kind != "all" and j["kind"] != kind:
-            return False
-        if status != "all" and j["status"] != status:
-            return False
-        if qn:
-            hay = ((j.get("title") or "") + "\0" + (j.get("id") or "")).lower()
-            if qn not in hay:
-                return False
-        return True
-    filtered = [j for j in all_jobs if match(j)]
-    limit = max(10, min(int(limit or 50), 1000))
-    visible = filtered[:limit]
-
-    running = sum(1 for j in all_jobs if j["status"] == "running")
-    return _page(request, "_joblist.html",
-                 jobs=visible, total=len(filtered), all_total=len(all_jobs),
-                 kind_counts=dict(kind_counts), status_counts=dict(status_counts),
-                 q=q, sel_kind=kind, sel_status=status, limit=limit,
-                 max_jobs=MAX_JOBS, running=running)
+    """Search job summaries and show contextual category/status counts."""
+    context = history_context(manager.list(summaries=True), q, kind, status, limit)
+    return _page(request, "_joblist.html", **context, max_jobs=MAX_JOBS)
 
 
 @router.get("/api/jobs/stream")
@@ -113,9 +87,44 @@ async def cancel_job(job_id: str):
 @router.post("/api/jobs/delete")
 async def delete_jobs(request: Request):
     """Multi-select: cancel active jobs, remove finished records (+ their files)."""
-    data = await request.json()
-    ids = data.get("ids", []) if isinstance(data, dict) else []
-    return {"results": {jid: await manager.delete(jid) for jid in ids}}
+    try:
+        data = await request.json()
+    except ValueError as exc:
+        raise HTTPException(400, "invalid JSON") from exc
+    ids = data.get("ids") if isinstance(data, dict) else None
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 1000
+            or any(not isinstance(jid, str) or not jid or len(jid) > 128 for jid in ids)):
+        raise HTTPException(422, "ids must contain 1–1000 non-empty job IDs")
+    # Deduplicate before mutating: repeated IDs must not cancel and then delete
+    # the same queued job in a single request.
+    return {"results": {jid: await manager.delete(jid) for jid in dict.fromkeys(ids)}}
+
+
+@router.get("/api/jobs/{job_id}/logfile")
+async def download_log(job_id: str):
+    job = manager.get(job_id)
+    if not job or not job.log_path.is_file():
+        raise HTTPException(404, "log file not available")
+    return StreamingResponse(
+        _log_chunks(job.log_path), media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(job.id + '-console.log')}"},
+    )
+
+
+def _log_chunks(path):
+    """Bound downloads at the initial size even when an active log keeps growing.
+
+    StreamingResponse iterates this synchronous generator in its thread pool.
+    No Content-Length is sent: deletion/truncation cannot invalidate that header.
+    """
+    with path.open("rb") as stream:
+        remaining = os.fstat(stream.fileno()).st_size
+        while remaining:
+            data = stream.read(min(64 * 1024, remaining))
+            if not data:
+                break
+            remaining -= len(data)
+            yield data
 
 
 # Replay only the last _LOG_TAIL_BYTES on connect, then tail live. A 4–5k-image
@@ -214,17 +223,22 @@ async def ws_bus(websocket: WebSocket):
 
     async def reader():
         """client → server: (un)subscribe the connection to a job's log."""
+        nonlocal log
         while True:
             try:
                 msg = await websocket.receive_json()
             except ValueError:                       # malformed frame — ignore, keep socket
                 continue
-            action = (msg or {}).get("action")
+            if not isinstance(msg, dict):
+                continue
+            action = msg.get("action")
             if action == "watch_log":
-                log.update(job=(msg.get("job_id") or "").strip() or None,
-                           pos=None, first=True, trim=False)
+                jid = msg.get("job_id")
+                if not isinstance(jid, str):
+                    continue
+                log = {"job": jid.strip() or None, "pos": None, "first": True, "trim": False}
             elif action == "unwatch_log":
-                log["job"] = None
+                log = {"job": None, "pos": None, "first": True, "trim": False}
 
     async def pusher():
         """server → client: job-state refresh + the watched job's log tail."""
@@ -235,21 +249,25 @@ async def ws_bus(websocket: WebSocket):
             if sig != last_sig:
                 last_sig = sig
                 await websocket.send_json({"type": "jobs"})
-            jid = log["job"]
+            subscription = log
+            jid = subscription["job"]
             if jid:
                 job = manager.get(jid)
                 if not job:
                     log["job"] = None
                 else:
-                    text, log["pos"], started, more = await asyncio.to_thread(
-                        _tail_read, job.log_path, log["pos"], _LOG_TAIL_BYTES, _LOG_READ_CHUNK)
-                    if log["first"]:
-                        log["trim"] = started
-                        log["first"] = False
-                    if text and log["trim"]:            # started mid-line: drop the half line
+                    text, subscription["pos"], started, more = await asyncio.to_thread(
+                        _tail_read, job.log_path, subscription["pos"], _LOG_TAIL_BYTES, _LOG_READ_CHUNK)
+                    if subscription is not log:
+                        continue
+                    if subscription["first"]:
+                        await websocket.send_json({"type": "log_reset", "job": jid})
+                        subscription["trim"] = started
+                        subscription["first"] = False
+                    if text and subscription["trim"]:            # started mid-line: drop the half line
                         nl = text.find("\n")
                         text = text[nl + 1:] if nl >= 0 else ""
-                        log["trim"] = False
+                        subscription["trim"] = False
                     if text:
                         await websocket.send_json(
                             {"type": "log", "job": jid, "lines": text.splitlines()})
@@ -259,7 +277,7 @@ async def ws_bus(websocket: WebSocket):
                     if cur and cur.status in ("done", "failed", "cancelled") and not text:
                         await websocket.send_json(
                             {"type": "log_end", "job": jid, "status": cur.status})
-                        log["job"] = None               # stop tailing the finished job
+                        subscription["job"] = None               # stop tailing the finished job
             await asyncio.sleep(0.4)
 
     tasks = [asyncio.create_task(reader()), asyncio.create_task(pusher())]

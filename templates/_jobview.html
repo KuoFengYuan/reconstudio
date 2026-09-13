@@ -1,9 +1,14 @@
-<div class="rs-panel">
+<div class="rs-panel" data-current-job="{{ job.id }}">
   <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
     <strong>{{ {'frames':'🎬','train':'🧠','mesh':'🧩','gcs':'☁️'}.get(job.kind,'📐') }} {{ job.title }}</strong>
     <code class="hint">{{ job.kind }} · {{ job.id }}</code>
   </div>
   <div class="hint" style="margin-bottom:10px">{{ job.subtitle }}</div>
+
+  <div class="chips" style="margin-bottom:14px">
+    <button type="button" class="ghost" onclick="copyJobLink()">複製任務連結</button>
+    <a class="dl" href="/api/jobs/{{ job.id }}/logfile" download>下載完整紀錄</a>
+  </div>
 
   <!-- status + stage stepper; self-polls while running, then stops -->
   <div id="jobstatus"
@@ -28,8 +33,8 @@
 
   <!-- log stream is started by startLogStream() in index.html on htmx:afterSwap
        (htmx doesn't reliably execute inline <script> in swapped fragments). -->
-  <!-- 硯 (inkstone) — a warm-charcoal slab so the live log stays legible against washi -->
-  <pre id="log" data-log-job="{{ job.id }}"
+  <div class="log-toolbar"><span>最多 5,000 行 · 向上捲動可暫停跟隨</span><button type="button" class="ghost" onclick="var log=document.getElementById('log'); log.scrollTop=log.scrollHeight;">移至最新 ↓</button></div>
+  <pre id="log" data-log-job="{{ job.id }}" tabindex="0" aria-label="任務執行紀錄"
        style="background:#1c1812;border:1px solid var(--line2);border-radius:8px;
        padding:12px;margin-top:12px;height:55vh;overflow:auto;white-space:pre-wrap;
        font:12px/1.45 ui-monospace,monospace;color:#ece3d1"></pre>

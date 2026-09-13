@@ -209,3 +209,60 @@ def test_stderr_to_diverts_stderr_and_keeps_console_clean(tmp_path):
     console_text = console.read_text()
     assert "to stderr" not in console_text
     assert "to stdout" not in console_text
+
+
+@pytest.mark.parametrize("redirect", [False, True])
+def test_cancel_during_process_creation_cannot_miss_child(tmp_path, monkeypatch, redirect):
+    import io
+    import threading
+
+    import pipeline.runner as runner_mod
+
+    runner = Runner(tmp_path / "console.log")
+    killed = threading.Event()
+    cancelling = []
+
+    class Process:
+        pid = 12345
+        stdout = None if redirect else io.StringIO("")
+        returncode = -15
+
+        def poll(self):
+            return None
+
+        def wait(self):
+            assert killed.wait(2), "newly spawned child escaped cancellation"
+
+    def spawn(*args, **kwargs):
+        worker = threading.Thread(target=runner.cancel)
+        cancelling.append(worker)
+        worker.start()
+        # cancel sets the flag before waiting for the registration lock.
+        for _ in range(2000):
+            if runner.cancelled:
+                break
+            threading.Event().wait(.001)
+        assert runner.cancelled
+        return Process()
+
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", spawn)
+    monkeypatch.setattr(runner_mod.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(runner_mod.os, "killpg", lambda pid, sig: killed.set())
+    try:
+        with pytest.raises(Cancelled):
+            runner.run(["fake"], stderr_to=tmp_path / "err.log" if redirect else None)
+        assert not runner._procs
+    finally:
+        for worker in cancelling:
+            worker.join(timeout=2)
+        runner.close()
+
+
+def test_missing_binary_with_redirect_keeps_original_error(tmp_path):
+    runner = Runner(tmp_path / "console.log")
+    try:
+        with pytest.raises(FileNotFoundError):
+            runner.run([str(tmp_path / "missing-binary")], stderr_to=tmp_path / "err.log")
+        assert not runner._procs
+    finally:
+        runner.close()

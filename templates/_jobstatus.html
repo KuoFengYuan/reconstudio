@@ -3,10 +3,10 @@
      hx-get="/ui/jobstatus/{{ job.id }}" hx-trigger="every 2s" hx-swap="outerHTML"
      {% endif %}>
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-    <span class="badge {{ job.status }}" style="padding:2px 10px;font-size:12px">{{ job.status }}</span>
+    <span class="badge {{ job.status }}" style="padding:2px 10px;font-size:12px">{{ {'queued':'排隊中','running':'執行中','done':'已完成','failed':'失敗','cancelled':'已取消'}.get(job.status, job.status) }}</span>
     {% if job.status in ['queued','running'] %}
     <button class="ghost" style="margin-left:auto;border-color:var(--err);color:var(--err)"
-            hx-post="/api/jobs/{{ job.id }}/cancel" hx-swap="none">取消</button>
+            hx-post="/api/jobs/{{ job.id }}/cancel" hx-disabled-elt="this" hx-sync="this:drop" hx-swap="none">取消任務</button>
     {% endif %}
   </div>
 

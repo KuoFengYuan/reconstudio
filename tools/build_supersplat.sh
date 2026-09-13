@@ -1,79 +1,65 @@
 #!/usr/bin/env bash
-# Build the self-hosted SuperSplat editor (去背 + 點雲 viewer) and deploy it under
-# static/supersplat/. Reproducible: clones a pinned SuperSplat, applies the
-# Recon Studio patches (inline send-back API + mouse-wheel zoom fix), builds with
-# the right base path, and strips sourcemaps.
-#
-#   ./tools/build_supersplat.sh                         # pinned default version
-#   SUPERSPLAT_VER=latest ./tools/build_supersplat.sh   # newest upstream tag
-#   FORCE=1 ./tools/build_supersplat.sh                 # rebuild even if up to date
-#
-# The deployed version is stamped in static/supersplat/.version: when it already
-# matches the requested version the script exits immediately (run.sh calls this
-# with SUPERSPLAT_VER=latest at every startup, so the no-change path must cost
-# one `git ls-remote` only). Deployment is ATOMIC (build lands in a sibling dir,
-# then one mv) — a failed build, or one racing with a running server, never
-# leaves /static/supersplat/ half-written.
-#
-# Needs: node (>=18) + npm + git. SuperSplat is MIT (see THIRD_PARTY_NOTICES.md).
+# Build the tested editor plus Recon Studio patches in an isolated directory.
+# The sibling checkout is a read-only source cache; never discard local changes.
 set -euo pipefail
-
-SUPERSPLAT_VER="${SUPERSPLAT_VER:-v2.26.2}"
+SUPERSPLAT_VER="${SUPERSPLAT_VER:-v2.32.5}"
 REPO_URL="https://github.com/playcanvas/supersplat.git"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"        # reconstudio repo root
-SRC="${SUPERSPLAT_SRC:-$(dirname "$HERE")/supersplat}"          # sibling ../supersplat
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC="${SUPERSPLAT_SRC:-$(dirname "$HERE")/supersplat}"
 PATCH="$HERE/tools/supersplat-reconstudio.patch"
+PERF_PATCH="$HERE/tools/supersplat-performance.patch"
 DEST="$HERE/static/supersplat"
-
-for bin in git node npm; do
-  command -v "$bin" >/dev/null || { echo "ERROR: '$bin' not found (needed to build SuperSplat)" >&2; exit 1; }
+for bin in git node npm sha256sum flock; do
+  command -v "$bin" >/dev/null || { echo "ERROR: '$bin' is required" >&2; exit 1; }
 done
-
+# Concurrent startup/build requests must not race the deployment rename.
+LOCK_KEY="$(printf '%s' "$HERE" | sha256sum | cut -c1-16)"
+exec 9>"${TMPDIR:-/tmp}/reconstudio-supersplat-$LOCK_KEY.lock"
+flock 9
 if [[ "$SUPERSPLAT_VER" == "latest" ]]; then
-  SUPERSPLAT_VER="$(git ls-remote --tags --refs "$REPO_URL" 'v*' \
-                    | awk -F/ '{print $NF}' | sort -V | tail -1)"
-  [[ -n "$SUPERSPLAT_VER" ]] || { echo "ERROR: could not resolve latest tag (offline?)" >&2; exit 1; }
-  echo "latest upstream tag: $SUPERSPLAT_VER"
+  SUPERSPLAT_VER="$(git ls-remote --tags --refs "$REPO_URL" 'v*' | awk -F/ '{print $NF}' | sort -V | tail -1)"
+  [[ -n "$SUPERSPLAT_VER" ]] || { echo "ERROR: could not resolve latest tag" >&2; exit 1; }
 fi
-
-if [[ -z "${FORCE:-}" && -f "$DEST/.version" && "$(cat "$DEST/.version")" == "$SUPERSPLAT_VER" ]]; then
-  echo "already at $SUPERSPLAT_VER — nothing to do (FORCE=1 to rebuild)"
+RECON_BUILD_ID="$(cat "$PATCH" "$PERF_PATCH" | sha256sum | cut -c1-16)"
+export RECON_BUILD_ID
+if [[ -z "${FORCE:-}" && -f "$DEST/.version" && -f "$DEST/.patch-version" &&
+      "$(cat "$DEST/.version")" == "$SUPERSPLAT_VER" && "$(cat "$DEST/.patch-version")" == "$RECON_BUILD_ID" ]]; then
+  echo "already at $SUPERSPLAT_VER + $RECON_BUILD_ID"
   exit 0
 fi
-
-if [[ ! -d "$SRC/.git" ]]; then
-  echo "[1/5] cloning SuperSplat $SUPERSPLAT_VER -> $SRC"
-  git clone --depth 1 --branch "$SUPERSPLAT_VER" "$REPO_URL" "$SRC"
-  cd "$SRC"
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/reconstudio-supersplat.XXXXXX")"
+STAGE=""
+cleanup() {
+  rm -rf "$WORK"
+  [[ -z "$STAGE" ]] || rm -rf "$STAGE"
+}
+trap cleanup EXIT
+if git -C "$SRC" rev-parse --verify "refs/tags/$SUPERSPLAT_VER" >/dev/null 2>&1; then
+  git -C "$SRC" archive "refs/tags/$SUPERSPLAT_VER" | tar -x -C "$WORK"
 else
-  echo "[1/5] checking out $SUPERSPLAT_VER in $SRC"
-  cd "$SRC"
-  git fetch --depth 1 origin "refs/tags/$SUPERSPLAT_VER:refs/tags/$SUPERSPLAT_VER" 2>/dev/null || true
-  # -f discards a previously applied patch so [2/5] always starts from pristine upstream
-  git checkout -f "$SUPERSPLAT_VER" 2>/dev/null || git checkout -f "tags/$SUPERSPLAT_VER"
+  git clone --depth 1 --branch "$SUPERSPLAT_VER" "$REPO_URL" "$WORK"
 fi
-
-echo "[2/5] applying Recon Studio patch (idempotent)"
-if git apply --reverse --check "$PATCH" >/dev/null 2>&1; then
-  echo "      already applied — skipping"
-else
-  # a hard failure here usually means a NEW upstream version moved the patched
-  # code; the caller (run.sh) keeps serving the previously deployed bundle.
-  git apply "$PATCH"
-fi
-
-echo "[3/5] npm ci"
+cd "$WORK"
+echo "[1/4] applying Recon Studio patches to $SUPERSPLAT_VER"
+git apply "$PATCH"
+git apply "$PERF_PATCH"
+echo "[2/4] installing pinned dependencies"
 npm ci
-
-echo "[4/5] building (BASE_HREF=/static/supersplat/)"
+echo "[3/4] building background loader and editor"
 BASE_HREF=/static/supersplat/ npm run build
-
-echo "[5/5] deploying -> $DEST (atomic swap, sourcemaps stripped)"
-rm -rf "$DEST.new" "$DEST.old"
-cp -r dist "$DEST.new"
-find "$DEST.new" -name '*.map' -delete
-echo "$SUPERSPLAT_VER" > "$DEST.new/.version"
-[[ -d "$DEST" ]] && mv "$DEST" "$DEST.old"
-mv "$DEST.new" "$DEST"
-rm -rf "$DEST.old"
-echo "done. $SUPERSPLAT_VER served at /static/supersplat/index.html ($(du -sh "$DEST" | cut -f1))"
+[[ -s dist/index.js && -s dist/splat-loader-worker.js ]] || { echo 'ERROR: incomplete editor build' >&2; exit 1; }
+echo "[4/4] deploying editor"
+STAGE="$(mktemp -d "$HERE/static/.supersplat.XXXXXX")"
+cp -a dist/. "$STAGE/"
+find "$STAGE" -name '*.map' -delete
+printf '%s\n' "$SUPERSPLAT_VER" > "$STAGE/.version"
+printf '%s\n' "$RECON_BUILD_ID" > "$STAGE/.patch-version"
+# Keep the previous bundle until the new one has been moved successfully.
+BACKUP="$WORK/previous"
+[[ ! -d "$DEST" ]] || mv "$DEST" "$BACKUP"
+if ! mv "$STAGE" "$DEST"; then
+  [[ ! -d "$BACKUP" ]] || mv "$BACKUP" "$DEST"
+  exit 1
+fi
+STAGE=""
+echo "done: $SUPERSPLAT_VER + $RECON_BUILD_ID"

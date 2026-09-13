@@ -1,62 +1,75 @@
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
-  <button class="ghost" onclick="deleteSelected()" style="border-color:var(--err);color:var(--err)">🗑 刪除選取</button>
-  <input class="ghost" type="search" id="jobsearch" placeholder="🔍 搜尋 title / id…"
-         value="{{ q }}" oninput="onJobSearchInput(this.value)"
-         style="flex:1;min-width:160px;max-width:280px;padding:4px 8px">
-  <span class="hint">勾選後刪除;進行中的會先取消。狀態即時更新(SSE)。
-    {% if max_jobs %}· 同時執行 {{ running or 0 }}/{{ max_jobs }}{% endif %}</span>
+<div class="job-summary" aria-label="任務概況">
+  <div class="job-metric"><span>所有任務</span><strong>{{ all_total }}</strong></div>
+  <div class="job-metric"><span>執行中{% if max_jobs %} / 上限 {{ max_jobs }}{% endif %}</span><strong>{{ summary_counts.get('running', 0) }}</strong></div>
+  <div class="job-metric"><span>排隊中</span><strong>{{ summary_counts.get('queued', 0) }}</strong></div>
+  <div class="job-metric"><span>失敗待確認</span><strong>{{ summary_counts.get('failed', 0) }}</strong></div>
+</div>
+<div class="job-toolbar">
+  <div class="job-search-field">
+    <label for="jobsearch">搜尋任務</label>
+    <input type="search" id="jobsearch" placeholder="專案、資料夾、任務名稱或 ID…" aria-describedby="jobsearch-help" value="{{ q }}" oninput="onJobSearchInput(this.value)">
+    <span class="hint" id="jobsearch-help">可組合關鍵字，例如「花瓶 訓練」或「COLMAP 失敗」</span>
+  </div>
+  <button type="button" class="ghost" onclick="resetJobFilters()">清除篩選</button>
+  <button type="button" class="ghost danger" id="delete-jobs" onclick="deleteSelected()" disabled>刪除選取</button>
 </div>
 {% if not all_total %}
-<p class="hint">尚無 job。</p>
+<div class="history-empty"><h3>還沒有任務紀錄</h3><p>啟動第一個任務後，即可在這裡搜尋、追蹤進度與開啟成果。</p><button class="ghost" onclick="showTab('run')">回到工作區</button></div>
 {% else %}
-{% set kinds = [('frames','🎬','抽幀'),('colmap','📐','COLMAP'),('train','🧠','訓練'),('mesh','🧩','Mesh')] %}
-{% set kinds_map = {} %}{% for k, emo, _ in kinds %}{% do kinds_map.update({k: emo}) %}{% endfor %}
-<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap;align-items:center">
-  <span class="hint" style="min-width:2.6em;text-align:right">類型</span>
-  <button class="ghost jf{% if sel_kind == 'all' %} active{% endif %}" data-axis="kind" data-val="all" onclick="setJobFilter('kind','all')">全部 ({{ all_total }})</button>
-  {% for k, emo, lab in kinds %}
-    {% set n = kind_counts.get(k, 0) %}
-    {% if n %}<button class="ghost jf{% if sel_kind == k %} active{% endif %}" data-axis="kind" data-val="{{ k }}" onclick="setJobFilter('kind','{{ k }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
+<div class="jobfilter job-category-section" role="group" aria-labelledby="job-category-heading">
+  <div class="job-filter-heading">
+    <strong id="job-category-heading">依工作類別尋找</strong>
+    <button type="button" class="ghost jf{% if sel_kind == 'all' %} active{% endif %}" aria-pressed="{{ 'true' if sel_kind == 'all' else 'false' }}" data-axis="kind" data-val="all" onclick="setJobFilter('kind','all')">全部類別 <span>{{ kind_total }}</span></button>
+  </div>
+  <div class="job-categories">
+  {% for category in categories %}
+    {% set k = category.key %}{% set n = kind_counts.get(k, 0) %}
+    <button type="button" class="ghost job-category{% if sel_kind == k %} active{% endif %}" aria-pressed="{{ 'true' if sel_kind == k else 'false' }}" data-axis="kind" data-val="{{ k }}" onclick="setJobFilter('kind',this.dataset.val)" {% if not n and sel_kind != k %}disabled{% endif %}>
+      <span class="job-category-name">{{ category.label }}</span><span class="job-category-count">{{ n }}</span>
+      <span class="job-category-description">{{ category.description }}</span>
+    </button>
+  {% endfor %}
+  </div>
+</div>
+<div class="jobfilter job-status-filter" role="group" aria-label="依任務狀態篩選">
+  <span class="hint">任務狀態</span>
+  <button type="button" class="ghost jfs{% if sel_status == 'all' %} active{% endif %}" aria-pressed="{{ 'true' if sel_status == 'all' else 'false' }}" data-axis="status" data-val="all" onclick="setJobFilter('status','all')">全部狀態 {{ status_total }}</button>
+  {% for s, lab in status_labels.items() %}
+    {% set n = status_counts.get(s, 0) %}
+    <button type="button" class="ghost jfs{% if sel_status == s %} active{% endif %}" aria-pressed="{{ 'true' if sel_status == s else 'false' }}" data-axis="status" data-val="{{ s }}" onclick="setJobFilter('status','{{ s }}')" {% if not n and sel_status != s %}disabled{% endif %}>{{ lab }} {{ n }}</button>
   {% endfor %}
 </div>
-{% set statuses = [('done','✅','成功'),('failed','❌','失敗'),('cancelled','⏸','取消'),('running','▶','執行中'),('queued','⏳','排隊')] %}
-<div class="jobfilter" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
-  <span class="hint" style="min-width:2.6em;text-align:right">狀態</span>
-  <button class="ghost jfs{% if sel_status == 'all' %} active{% endif %}" data-axis="status" data-val="all" onclick="setJobFilter('status','all')">全部 ({{ all_total }})</button>
-  {% for s, emo, lab in statuses %}
-    {% set n = status_counts.get(s, 0) %}
-    {% if n %}<button class="ghost jfs{% if sel_status == s %} active{% endif %}" data-axis="status" data-val="{{ s }}" onclick="setJobFilter('status','{{ s }}')">{{ emo }} {{ lab }} ({{ n }})</button>{% endif %}
-  {% endfor %}
+<div class="job-results" role="status" aria-live="polite">
+  <strong>找到 {{ total }} 筆任務</strong>
+  {% if q %}<button type="button" class="ghost job-filter-token" onclick="clearJobSearch()" aria-label="移除搜尋條件：{{ q }}">搜尋：{{ q }} <span aria-hidden="true">×</span></button>{% endif %}
+  {% if sel_kind != 'all' %}<button type="button" class="ghost job-filter-token" onclick="setJobFilter('kind','all')" aria-label="移除類別篩選">{{ kinds_map.get(sel_kind, sel_kind) }} <span aria-hidden="true">×</span></button>{% endif %}
+  {% if sel_status != 'all' %}<button type="button" class="ghost job-filter-token" onclick="setJobFilter('status','all')" aria-label="移除狀態篩選">{{ status_labels.get(sel_status, sel_status) }} <span aria-hidden="true">×</span></button>{% endif %}
+  <span class="hint">類別與狀態數量會隨篩選條件更新</span>
 </div>
 {% if not jobs %}
-<p class="hint">符合篩選條件的 job 為 0 筆。</p>
+<div class="history-empty"><h3>找不到符合條件的任務</h3><p>試試其他關鍵字，或清除篩選條件查看所有紀錄。</p><button class="ghost" onclick="resetJobFilters()">顯示所有任務</button></div>
 {% else %}
-<table style="width:100%;border-collapse:collapse;font-size:13px">
-  <thead><tr style="color:var(--mut);text-align:left">
-    <th style="padding:6px 8px"><input type="checkbox" onclick="toggleAllJobs(this)"></th>
-    <th>狀態</th><th>內容</th><th>開始</th><th>結束</th><th>id</th><th></th>
+<div class="job-table-scroll" role="region" aria-label="任務清單，可橫向捲動" tabindex="0">
+<table class="job-table">
+  <caption>顯示 {{ jobs|length }} / {{ total }} 筆{% if total != all_total %} · 已套用篩選{% endif %}</caption>
+  <thead><tr>
+    <th scope="col"><input type="checkbox" id="select-all-jobs" aria-label="選取本頁所有任務" onclick="toggleAllJobs(this)"></th>
+    <th scope="col">狀態</th><th scope="col">任務</th><th scope="col">開始時間</th><th scope="col">結束時間</th><th scope="col">操作</th>
   </tr></thead>
   <tbody>
   {% for j in jobs %}
-  <tr data-kind="{{ j.kind }}" data-status="{{ j.status }}" style="border-top:1px solid var(--line)">
-    <td style="padding:6px 8px"><input type="checkbox" class="jobsel" value="{{ j.id }}"></td>
-    <td><span class="badge {{ j.status }}" style="padding:1px 8px;font-size:11px">{{ j.status }}</span></td>
-    <td>{{ kinds_map.get(j.kind, '📐') }} {{ j.title }}{% if j.current_stage %} <span class="hint">@{{ j.current_stage }}</span>{% endif %}</td>
-    <td style="white-space:nowrap;color:var(--mut);font-size:12px">{{ j.started_at | dt('%Y-%m-%d') }}{% if j.started_at %}<br><span style="opacity:.65">{{ j.started_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
-    <td style="white-space:nowrap;color:var(--mut);font-size:12px">{{ j.finished_at | dt('%Y-%m-%d') }}{% if j.finished_at %}<br><span style="opacity:.65">{{ j.finished_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
-    <td><code class="hint">{{ j.id }}</code></td>
-    <td><button class="ghost" onclick="loadJob('{{ j.id }}')">開啟</button></td>
+  <tr data-kind="{{ j.kind }}" data-status="{{ j.status }}">
+    <td><input type="checkbox" class="jobsel" value="{{ j.id }}" aria-label="選取 {{ j.title }}" onchange="updateJobSelection()"></td>
+    <td><span class="badge {{ j.status }}">{{ status_labels.get(j.status, j.status) }}</span></td>
+    <td class="job-title"><span class="job-kind-label">{{ kinds_map.get(j.kind, j.kind) }}</span><div>{{ j.title }}</div>{% if j.subtitle %}<div class="job-path" title="{{ j.subtitle }}">{{ j.subtitle }}</div>{% endif %}<code class="job-id">{{ j.id }}</code>{% if j.current_stage and j.current_stage not in ['done', 'failed', 'cancelled'] %}<span class="hint">{{ j.current_stage }}</span>{% endif %}</td>
+    <td class="job-date">{{ j.started_at | dt('%Y-%m-%d') or '—' }}{% if j.started_at %}<br><span>{{ j.started_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
+    <td class="job-date">{{ j.finished_at | dt('%Y-%m-%d') or '—' }}{% if j.finished_at %}<br><span>{{ j.finished_at | dt('%H:%M:%S') }}</span>{% endif %}</td>
+    <td><button class="ghost" aria-label="開啟 {{ j.title }}" onclick="loadJob('{{ j.id }}')">開啟 →</button></td>
   </tr>
   {% endfor %}
   </tbody>
 </table>
-{% if total > jobs|length %}
-<div style="text-align:center;padding:10px">
-  <span class="hint">顯示 {{ jobs|length }} / 共 {{ total }} 筆{% if total != all_total %}(經篩選){% endif %}</span>
-  <button class="ghost" onclick="loadMoreJobs()" style="margin-left:10px">載入更多 ▼</button>
 </div>
-{% else %}
-<div style="text-align:center;padding:6px"><span class="hint">已顯示全部 {{ total }} 筆{% if total != all_total %}(經篩選){% endif %}</span></div>
-{% endif %}
+<div class="job-pagination"><span class="hint">{% if total > jobs|length %}顯示 {{ jobs|length }} / {{ total }} 筆{% else %}已顯示全部 {{ total }} 筆{% endif %}</span>{% if total > jobs|length %}<button class="ghost" onclick="loadMoreJobs()">載入更多 ↓</button>{% endif %}</div>
 {% endif %}
 {% endif %}
