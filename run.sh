@@ -101,18 +101,18 @@ fi
 
 mkdir -p "$RECON_STUDIO_DATA" "$TMPDIR"
 
-# --- SuperSplat auto-update: sync to the newest upstream release at startup --- #
+# --- SuperSplat: sync the tested release and local patches at startup --- #
 # Runs in the BACKGROUND so the server starts immediately; the build script swaps
-# the bundle atomically when done, so the current version keeps serving meanwhile.
+# the bundle when done, so the current version keeps serving during the build.
 # Fail-soft: offline / node missing / patch conflict on a new release just keeps
-# the existing bundle (details in the log). Up-to-date check costs one ls-remote.
+# the existing bundle (details in the log). Local version/hash checks skip rebuilds.
 # Disable with SUPERSPLAT_AUTOUPDATE=0 (e.g. in local.env), or pin SUPERSPLAT_VER.
 : "${SUPERSPLAT_AUTOUPDATE:=1}"
 if [[ "$SUPERSPLAT_AUTOUPDATE" == "1" ]]; then
   SS_LOG="$RECON_STUDIO_DATA/supersplat_build.log"
   (
     flock -n 9 || exit 0          # another startup is already syncing
-    if SUPERSPLAT_VER="${SUPERSPLAT_VER:-latest}" ./tools/build_supersplat.sh >>"$SS_LOG" 2>&1; then
+    if SUPERSPLAT_VER="${SUPERSPLAT_VER:-v2.32.5}" ./tools/build_supersplat.sh >>"$SS_LOG" 2>&1; then
       echo "supersplat: $(cat static/supersplat/.version 2>/dev/null || echo '?') (synced)"
     else
       echo "supersplat: update failed — keeping current bundle (see $SS_LOG)" >&2

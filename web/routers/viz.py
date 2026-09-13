@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -569,13 +570,26 @@ def _job_splat(job_id: str) -> Path:
     return splat
 
 
+def _splat_info(job_id: str) -> dict:
+    # Run directory scanning/stat/header I/O in a worker, not the HTTP loop.
+    splat = _job_splat(job_id)
+    stat = splat.stat()
+    count = None
+    if splat.suffix.lower() == ".ply":
+        with splat.open("rb") as stream:
+            header = stream.read(64 * 1024).split(b"end_header", 1)[0]
+        match = re.search(rb"(?m)^element vertex (\d+)\r?$", header)
+        if match:
+            count = int(match.group(1))
+    return {"ok": True, "filename": splat.name, "size": stat.st_size,
+            "count": count, "large": stat.st_size >= 100 * 1024 * 1024 or (count or 0) >= 500_000,
+            "revision": f"{stat.st_mtime_ns:x}-{stat.st_size:x}"}
+
+
 @router.get("/api/jobs/{job_id}/splat_info")
 async def splat_info(job_id: str):
-    """Name + size of the job's trained splat. The viewer needs the name *before*
-    it loads: the bundled SuperSplat picks its reader from the filename, so a .sog
-    served as "point_cloud.ply" is parsed as PLY and fails."""
-    splat = _job_splat(job_id)
-    return JSONResponse({"ok": True, "filename": splat.name, "size": splat.stat().st_size})
+    """Cheap model metadata before allocating an editor or fetching the cloud."""
+    return JSONResponse(await asyncio.to_thread(_splat_info, job_id))
 
 
 @router.get("/api/jobs/{job_id}/splat")

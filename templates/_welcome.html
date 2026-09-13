@@ -1,0 +1,26 @@
+<section class="welcome" aria-labelledby="welcome-title">
+  <div class="welcome-top">
+    <div>
+      <p class="section-eyebrow">從影像開始，讓場景成形</p>
+      <h3 id="welcome-title">你的下一個 3D 作品，<br>從這裡開始。</h3>
+      <p class="welcome-copy">選擇手上的素材，開始重建。任務啟動後，可在「目前工作」查看執行進度、即時紀錄與模型成果。</p>
+    </div>
+    <svg class="recon-art" viewBox="0 0 180 190" fill="none" aria-hidden="true">
+      <path d="M90 12 163 54v83l-73 42-73-42V54Z" fill="#edf1e6" stroke="currentColor" stroke-opacity=".2"/>
+      <path d="m17 54 73 43 73-43M90 97v82M53 33l74 43v82M127 33 53 76v82M17 96l73 42 73-42" stroke="currentColor" stroke-opacity=".2" stroke-dasharray="3 4"/>
+      <path d="m90 43 47 27v54l-47 27-47-27V70Z" stroke="currentColor" stroke-width="1.5"/>
+      <path d="m43 70 47 27 47-27M90 97v54" stroke="currentColor" stroke-width="1.5"/>
+      <g fill="currentColor"><circle cx="90" cy="43" r="4"/><circle cx="43" cy="70" r="4"/><circle cx="137" cy="70" r="4"/><circle cx="90" cy="97" r="4"/><circle cx="43" cy="124" r="4"/><circle cx="137" cy="124" r="4"/><circle cx="90" cy="151" r="4"/></g>
+    </svg>
+  </div>
+  <div class="quick-starts">
+    <button type="button" class="quick-start" onclick="startWorkflow('frames')"><span class="quick-icon" aria-hidden="true">▤</span><strong>我有影片 <span aria-hidden="true">→</span></strong><small>擷取清晰影格，準備重建素材</small></button>
+    <button type="button" class="quick-start" onclick="startWorkflow('colmap')"><span class="quick-icon" aria-hidden="true">▧</span><strong>我有照片 <span aria-hidden="true">→</span></strong><small>對齊相機，重建場景與點雲</small></button>
+    <button type="button" class="quick-start" onclick="startWorkflow('viewer')"><span class="quick-icon" aria-hidden="true">◇</span><strong>我有 3D 模型 <span aria-hidden="true">→</span></strong><small>開啟 Mesh，檢查模型與量測</small></button>
+  </div>
+  <div class="workflow-guide">
+    <p>重建流程參考 · 可依素材直接選擇需要的功能</p>
+    <ol aria-label="重建流程"><li>準備素材</li><li>COLMAP 重建</li><li>3DGS 訓練</li><li>Mesh 輸出</li></ol>
+  </div>
+</section>
+<div class="workspace-note"><span>隨時切換首頁、目前工作與任務紀錄，已填寫的設定會保留。</span><button type="button" onclick="showTab('hist')">查看任務紀錄 <span aria-hidden="true">→</span></button></div>

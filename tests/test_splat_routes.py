@@ -111,3 +111,35 @@ def test_named_route_404s_on_a_name_that_is_not_the_job_splat(tmp_path, monkeypa
         with pytest.raises(HTTPException) as e:
             asyncio.run(viz.gaussians_splat_named("j1", name))
         assert e.value.status_code == 404
+
+
+def test_splat_info_reads_count_without_loading_payload(tmp_path, monkeypatch):
+    import json
+
+    d = tmp_path / "model"
+    d.mkdir()
+    f = d / "large.ply"
+    with f.open("wb") as stream:
+        stream.write(b"ply\nformat binary_little_endian 1.0\nelement vertex 892394\nproperty float x\nend_header\n")
+        stream.truncate(221315488)  # sparse file: metadata inspection never reads the payload
+    _use(monkeypatch, _job(d))
+    result = json.loads(asyncio.run(viz.splat_info("j1")).body)
+    assert result["count"] == 892394
+    assert result["size"] == 221315488 and result["large"] is True
+    assert result["revision"]
+
+
+def test_splat_info_revision_changes_when_model_is_replaced(tmp_path, monkeypatch):
+    import json
+
+    d = tmp_path / "model"
+    d.mkdir()
+    f = d / "model.ply"
+    f.write_bytes(b"ply\nelement vertex 1\nend_header\n")
+    _use(monkeypatch, _job(d))
+    first = json.loads(asyncio.run(viz.splat_info("j1")).body)
+    f.write_bytes(b"ply\nelement vertex 2\nend_header\nmore bytes")
+    second = json.loads(asyncio.run(viz.splat_info("j1")).body)
+    assert first["revision"] != second["revision"]
+    assert first["count"] == 1 and second["count"] == 2
+    assert second["large"] is False

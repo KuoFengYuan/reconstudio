@@ -185,6 +185,14 @@ class Job:
         with self._lock:
             parser(self, line)
 
+    def summary(self) -> dict:
+        """List views need scalar fields, never multi-MB mask/point parameters."""
+        with self._lock:
+            return {key: getattr(self, key) for key in (
+                "id", "kind", "title", "subtitle", "status", "created_at",
+                "started_at", "finished_at", "current_stage",
+            )}
+
     def to_dict(self) -> dict:
         with self._lock:
             return asdict(self)
@@ -432,8 +440,8 @@ class JobManager:
                 and (j.meta or {}).get("workspace") == workspace]
         return max(hits, key=lambda j: j.created_at, default=None)
 
-    def list(self) -> list[dict]:
-        return [j.to_dict() for j in sorted(self.jobs.values(),
+    def list(self, *, summaries: bool = False) -> list[dict]:
+        return [j.summary() if summaries else j.to_dict() for j in sorted(self.jobs.values(),
                                             key=lambda j: j.created_at, reverse=True)]
 
     def get(self, job_id: str) -> Job | None:
@@ -445,25 +453,31 @@ class JobManager:
             return False
         if job.status == "queued":
             job.status = "cancelled"
+            job.finished_at = time.time()
             job.save()
             return True
         runner = self.runners.get(job_id)
         if runner:
-            runner.cancel()
+            await asyncio.to_thread(runner.cancel)
             return True
         return False
 
     async def delete(self, job_id: str) -> str:
         """Cancel an active job, or remove a finished job's record + files.
-        Returns 'cancelled' | 'deleted' | 'missing'."""
+        Returns 'cancelled' | 'deleted' | 'missing' | 'failed'."""
         job = self.jobs.get(job_id)
         if not job:
             return "missing"
         if job.status in ("queued", "running"):
-            await self.cancel(job_id)
-            return "cancelled"          # finished records can be removed on a 2nd pass
+            return "cancelled" if await self.cancel(job_id) else "failed"
+        try:
+            await asyncio.to_thread(shutil.rmtree, job.dir)
+        except FileNotFoundError:
+            if job.dir.exists():
+                return "failed"
+        except OSError:
+            return "failed"
         self.jobs.pop(job_id, None)
-        shutil.rmtree(job.dir, ignore_errors=True)
         return "deleted"
 
     async def _run_worker(self, wid: int) -> None:
@@ -519,6 +533,7 @@ class JobManager:
         fn = RUN_FUNCS[job.kind]
         try:
             await asyncio.to_thread(fn, job.params, runner)
+            runner.check_cancel()
             job.status = "done"
         except Cancelled:
             job.status = "cancelled"
