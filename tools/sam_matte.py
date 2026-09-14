@@ -167,17 +167,22 @@ def load_boxes_file(path: Path) -> dict:
     script that just wants the same crop everywhere.
     """
     raw = json.loads(Path(path).read_text())
-    out = {"ref": "", "apply": "all", "norm": False, "boxes": [], "per_image": {},
-           "refs": {}, "only": []}
+    out = {"ref": "", "apply": "all", "norm": False, "boxes": [], "points": [],
+           "per_image": {}, "refs": {}, "only": []}
     if isinstance(raw, list):
         out["boxes"] = raw
         return out
     if not isinstance(raw, dict):
         raise ValueError(f"unsupported boxes JSON: {path}")
-    if not ({"boxes", "per_image", "refs", "only"} & set(raw)):
+    if not ({"boxes", "points", "per_image", "refs", "only"} & set(raw)):
         out["per_image"] = raw            # bare {rel: [[...]]} map
         return out
-    keys = ("ref", "apply", "norm", "boxes", "per_image", "refs", "only")
+    # `points` belongs in BOTH lists above. Leaving it out of the whitelist made
+    # a top-level click prompt vanish at load time — the run then looked
+    # box-only, took the batched path, and finished "done" having ignored every
+    # click. Leaving it out of the shape probe misread a points-only file as a
+    # bare {rel: boxes} map.
+    keys = ("ref", "apply", "norm", "boxes", "points", "per_image", "refs", "only")
     out.update({k: raw[k] for k in keys if k in raw})
     # `refs` is the multi-frame seed map: the SAME object boxed on several frames.
     # Single-frame files predate it, so synthesise it rather than special-casing
@@ -873,8 +878,13 @@ def run_track(args, dataset_root: Path, images_dir: Path, images: list[Path],
     # and large viewpoint changes, and each extra seed re-anchors it — frames
     # between two seeds are corrected from both sides. Box index is the object
     # identity, so box #1 on frame A and box #1 on frame C are one object.
-    seeds = {}          # global frame index -> boxes (numpy is a local import here)
-    for rel, raw_boxes in sorted((spec.get("refs") or {}).items()):
+    # A seed frame contributes boxes AND any +/- clicks placed on it. The clicks
+    # matter most here: a box that was already ambiguous propagates that
+    # ambiguity down the whole sequence, so correcting the seed is worth far
+    # more than correcting one output frame.
+    seeds = {}          # global frame index -> (boxes, point coords, point labels)
+    seeded_rels = sorted(set(spec.get("refs") or {}) | set(spec.get("per_image") or {}))
+    for rel in seeded_rels:
         if rel not in rels:
             print(f"warning: 匡選的參考影格不在這個資料夾裡,略過: {rel}", flush=True)
             continue
@@ -883,13 +893,14 @@ def run_track(args, dataset_root: Path, images_dir: Path, images: list[Path],
         if rgb is None:
             print(f"warning: 讀不到參考影格,略過: {rel}", flush=True)
             continue
+        ih, iw = rgb.shape[0], rgb.shape[1]
         boxes = _enc.clip_boxes(
-            denorm(_enc.as_boxes(raw_boxes), spec, rgb.shape[1], rgb.shape[0]),
-            rgb.shape[1], rgb.shape[0])
-        if len(boxes):
-            seeds[gi] = boxes
+            denorm(_enc.as_boxes((spec.get("refs") or {}).get(rel) or []), spec, iw, ih), iw, ih)
+        pts, lbls = points_for_image(spec, rel, iw, ih)
+        if len(boxes) or (pts is not None and len(pts)):
+            seeds[gi] = (boxes, pts, lbls)
     if not seeds:
-        print("error: track 模式需要至少一個匡選框 (--boxes-json)", file=sys.stderr)
+        print("error: track 模式需要至少一個匡選框或提示點 (--boxes-json)", file=sys.stderr)
         return 2
 
     groups: dict[tuple, list[int]] = {}
@@ -908,7 +919,8 @@ def run_track(args, dataset_root: Path, images_dir: Path, images: list[Path],
 
     per_frame = {}      # global frame index -> merged bool mask
     unseeded: list[int] = []
-    n_boxes = max(len(b) for b in seeds.values())
+    n_boxes = max(len(b) for b, _p, _l in seeds.values())
+    n_points = sum(0 if p is None else len(p) for _b, p, _l in seeds.values())
     for size, indices in groups.items():
         group_seeds = {local: seeds[gi] for local, gi in enumerate(indices) if gi in seeds}
         if not group_seeds:
@@ -925,12 +937,24 @@ def run_track(args, dataset_root: Path, images_dir: Path, images: list[Path],
                 state = predictor.init_state(video_path=str(staging),
                                              offload_video_to_cpu=True,
                                              offload_state_to_cpu=True)
-                for local, boxes in sorted(group_seeds.items()):
-                    for obj_id, box in enumerate(boxes, 1):
+                for local, (boxes, pts, lbls) in sorted(group_seeds.items()):
+                    # One call per object carrying its box and its own clicks:
+                    # SAM 2 folds a box into the same prompt as the points, but
+                    # only for the obj_id it is called with, so clicks routed to
+                    # the wrong object would silently argue about the wrong mask.
+                    objs = _enc.group_points_by_box(boxes, pts, lbls)
+                    for obj_id, (box, p, lab) in enumerate(objs, 1):
+                        kw = {}
+                        if box is not None:
+                            kw["box"] = np.asarray(box, dtype=np.float32)
+                        if p is not None and len(p):
+                            kw["points"] = np.asarray(p, dtype=np.float32)
+                            kw["labels"] = np.asarray(lab, dtype=np.int32)
                         predictor.add_new_points_or_box(
-                            state, frame_idx=local, obj_id=obj_id,
-                            box=np.asarray(box, dtype=np.float32))
-                    print(f"    seeded {len(boxes)} object(s) on {rels[indices[local]]}",
+                            state, frame_idx=local, obj_id=obj_id, **kw)
+                    n_p = 0 if pts is None else len(pts)
+                    print(f"    seeded {len(objs)} object(s)"
+                          f"{f' + {n_p} point(s)' if n_p else ''} on {rels[indices[local]]}",
                           flush=True)
                 # Two passes: forward from the earliest seed, then reverse, so a box
                 # drawn on a middle frame still covers the start of the sequence.
@@ -955,7 +979,8 @@ def run_track(args, dataset_root: Path, images_dir: Path, images: list[Path],
         if not args.overwrite and outputs_present(args, dataset_root, image, images_dir):
             fanout.note(image, "skip (exists)", skipped=True)
             continue
-        fanout.submit(image, per_frame.get(i), f"boxes={n_boxes}")
+        fanout.submit(image, per_frame.get(i),
+                      f"boxes={n_boxes}" + (f" points={n_points}" if n_points else ""))
     written, skipped = fanout.close()
     if unseeded:
         print(f"warning: {len(unseeded)} 張因為所屬尺寸沒有匡選框而未追蹤", flush=True)
@@ -1144,10 +1169,18 @@ def run_one_at_a_time(args, runner: MaskRunner, detector, images: list,
         staged = False
         note = ""
         if points is not None and len(points):
-            # Repair: one object, box + clicks in a single prompt.
+            # Box + clicks. Each object is decoded on its own: the box and the
+            # clicks that argue about it must reach the decoder as ONE prompt, so
+            # several objects cannot share a call. The encoder pass is already
+            # paid for by set_image, and the decoder is the cheap half, so the
+            # loop costs little even with a handful of boxes.
             runner.set_image(rgb)
             staged = True
-            masks = runner.masks_for_prompt(boxes, points, labels)
+            parts = []
+            for box, pts, lbls in _enc.group_points_by_box(boxes, points, labels):
+                one = _enc.as_boxes([box] if box is not None else [])
+                parts.append(_as_nhw(runner.masks_for_prompt(one, pts, lbls), (h, w)))
+            masks = np.concatenate(parts, axis=0) if parts else None
             mask = _enc.merge_masks(masks, (h, w))
         elif masks is None:
             runner.set_image(rgb)

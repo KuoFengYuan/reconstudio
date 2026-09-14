@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>重建驗收 · Recon Studio</title>
+<script src="/static/htmx.min.js"></script>
+<style>
+  :root { --bg:#0e1014; --panel:#161922; --line:#2a3038; --fg:#e6e9ef; --mut:#8b93a3;
+          --accent:#4c8bf5; --ok:#3fb950; --err:#f85149; --warn:#d29922; }
+  body { margin:0; font:14px/1.6 ui-sans-serif,system-ui,"Noto Sans CJK TC",sans-serif;
+         background:var(--bg); color:var(--fg); padding:24px 28px; }
+  a { color:var(--accent); }
+  h1 { font-size:17px; margin:0 0 4px; } h2 { font-size:13px; margin:16px 0 6px; color:var(--accent); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:14px 16px; margin:10px 0; }
+  .mut { color:var(--mut); } .ok { color:var(--ok); } .err { color:var(--err); }
+  label { display:block; font-size:12px; color:var(--mut); margin:8px 0 3px; }
+  input[type=text], input[type=number] { width:100%; box-sizing:border-box; background:#0e1014;
+    border:1px solid var(--line); border-radius:6px; color:var(--fg); padding:6px 8px;
+    font:12px/1.5 ui-monospace,monospace; }
+  input[type=number] { width:90px; }
+  button { background:var(--accent); border:0; border-radius:6px; color:#fff;
+           padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:0 14px; }
+  .row { display:flex; gap:14px; align-items:center; margin-top:12px; }
+  code { font-family:ui-monospace,monospace; color:#c9d1d9; font-size:12px; }
+  .joblist a { display:block; padding:3px 0; font-size:12px; border-top:1px solid var(--line);
+               text-decoration:none; }
+  .joblist a:first-child { border-top:0; }
+  .joblist .t { color:var(--fg); } .joblist .s { color:var(--mut); }
+  .htmx-request #runbtn { opacity:.5; }
+  .spin { display:none; } .htmx-request .spin { display:inline; color:var(--mut); }
+</style>
+</head>
+<body>
+<h1>重建驗收</h1>
+<div class="mut" style="font-size:12.5px;margin-bottom:12px">
+  <code>model_aligner</code> 報的 EO RMS 只驗證參考鏡頭的<b>位置</b> ——
+  一組重建可以 RMS 看起來正常，實際上某台相機 0 個觀測、或各鏡頭中心差了幾十公尺。
+  這裡跑的是會看見那些問題的檢核。<a href="/">← 回面板</a>
+</div>
+
+<div class="card">
+  <form hx-post="/ui/verify" hx-target="#result" hx-swap="innerHTML" hx-indicator="this">
+    <label>模型目錄或 workspace（給 workspace 會自動找 <code>sparse/0</code> → <code>sparse</code> → <code>sparse/N</code>）</label>
+    <input type="text" name="path" value="{{ prefill.path }}" required
+           placeholder="/Disk0/will/FY115/20260813_region">
+    <div class="grid">
+      <div>
+        <label>database.db<span class="mut">（對極測試用，留空則自動找同層）</span></label>
+        <input type="text" name="db" value="{{ prefill.db }}" placeholder="自動">
+      </div>
+      <div>
+        <label>case manifest<span class="mut">（留空則自動找 case.yaml；沒有就只跑 1/1b/4/5）</span></label>
+        <input type="text" name="manifest" value="{{ prefill.manifest }}" placeholder="自動">
+      </div>
+    </div>
+    <div class="row">
+      <label style="margin:0"><input type="checkbox" name="undistorted" value="1"
+        {% if prefill.undistorted %}checked{% endif %}> 模型已去畸變（跳過對極測試）</label>
+      <label style="margin:0">每組取樣對數 <input type="number" name="maxper" value="12" min="2" max="60"></label>
+      <button id="runbtn" type="submit">執行驗收</button>
+      <span class="spin">跑對極測試中，大模型可能要 1–2 分鐘…</span>
+    </div>
+  </form>
+  {% if checker_python %}
+    <div class="mut" style="font-size:11.5px;margin-top:10px">
+      檢核器 python：<code>{{ checker_python }}</code>
+    </div>
+  {% else %}
+    <div class="err" style="font-size:12px;margin-top:10px">
+      找不到裝有 pycolmap 的 conda env。在 <code>local.env</code> 設
+      <code>RECON_VERIFY_PYTHON=/path/to/env/bin/python</code>，或
+      <code>conda install -n gsplat pycolmap</code>。
+    </div>
+  {% endif %}
+</div>
+
+<div id="result"></div>
+
+{% if recent %}
+<h2>最近的 COLMAP job</h2>
+<div class="card joblist">
+  {% for j in recent %}
+    <a href="/verify?job={{ j.id }}"><span class="t">{{ j.title }}</span>
+      <span class="s"> · {{ j.status }} · {{ j.id }}</span></a>
+  {% endfor %}
+</div>
+{% endif %}
+</body>
+</html>

@@ -28,6 +28,7 @@ from pipeline.matte_encode import (  # noqa: E402
     compose_rgba,
     encode_mask_l,
     filter_small,
+    group_points_by_box,
     largest_component,
     merge_masks,
     refine_alpha,
@@ -216,3 +217,57 @@ def test_output_root_matches_the_panel_side_copy():
 def test_the_output_root_is_itself_skipped():
     """Otherwise a second run walks into no_bg/ and mattes its own cut-outs."""
     assert OUTPUT_ROOT in SKIP_DIR_NAMES
+
+
+# --------------------------------------------------------------------------- #
+# Routing clicks to objects. A box says "an object is roughly here", a click
+# says "this pixel is (not) part of THAT object" — SAM takes the two together
+# per object, so every click has to belong to exactly one.
+# --------------------------------------------------------------------------- #
+def test_a_box_with_no_clicks_is_unchanged():
+    """The box-only path must survive routing through here untouched, or every
+    ordinary run changes behaviour to gain a feature it never uses."""
+    got = group_points_by_box([[0, 0, 10, 10], [20, 20, 30, 30]])
+    assert [b.tolist() for b, _p, _l in got] == [[0, 0, 10, 10], [20, 20, 30, 30]]
+    assert all(p is None and lab is None for _b, p, lab in got)
+
+
+def test_clicks_go_to_the_box_they_sit_in():
+    got = group_points_by_box([[0, 0, 4, 4], [6, 6, 10, 10]],
+                                 [[1, 1], [8, 8]], [1, 0])
+    assert got[0][1].tolist() == [[1, 1]] and got[0][2].tolist() == [1]
+    assert got[1][1].tolist() == [[8, 8]] and got[1][2].tolist() == [0]
+
+
+def test_a_click_outside_every_box_goes_to_the_nearest():
+    """Negative clicks are routinely placed just outside the box they correct —
+    that is what makes them negative — so containment alone loses them."""
+    got = group_points_by_box([[0, 0, 2, 2], [8, 8, 10, 10]], [[9, 5]], [0])
+    assert got[0][1] is None
+    assert got[1][1].tolist() == [[9, 5]]
+
+
+def test_a_click_inside_nested_boxes_corrects_the_smaller_one():
+    got = group_points_by_box([[0, 0, 10, 10], [4, 4, 6, 6]], [[5, 5]], [1])
+    assert got[0][1] is None
+    assert got[1][1].tolist() == [[5, 5]]
+
+
+def test_clicks_with_no_box_at_all_are_one_object():
+    got = group_points_by_box([], [[5, 5], [6, 6]], [1, 0])
+    assert len(got) == 1 and got[0][0] is None
+    assert got[0][1].tolist() == [[5, 5], [6, 6]]
+
+
+def test_every_box_survives_a_prompt_that_carries_clicks():
+    """The bug this exists for: the box+click path fed `boxes[0]` to the decoder
+    and dropped the rest, so drawing three boxes and adding one click silently
+    lost two objects with nothing logged."""
+    got = group_points_by_box([[0, 0, 2, 2], [4, 4, 6, 6], [8, 8, 10, 10]],
+                                 [[5, 5]], [1])
+    assert len(got) == 3
+
+
+def test_unlabelled_clicks_default_to_keep():
+    got = group_points_by_box([[0, 0, 10, 10]], [[5, 5]])
+    assert got[0][2].tolist() == [1]

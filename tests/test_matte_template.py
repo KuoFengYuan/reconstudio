@@ -142,3 +142,104 @@ def test_the_form_leads_with_the_steps_not_the_reference(index_html):
     form = index_html.split('id="form-matte"')[1]
     steps, first_label = form.index('class="steps"'), form.index("<label>")
     assert steps < first_label, "the numbered steps must come before the fields"
+
+
+# --------------------------------------------------------------------------- #
+# Point prompts in the picker. A box alone is often not enough — a differently
+# textured part reads as its own object — so the picker places +/- clicks too.
+# --------------------------------------------------------------------------- #
+def test_the_picker_writes_points_where_the_pipeline_reads_them(index_html):
+    """`points_for_image` looks in per_image[rel]["points"], so the picker has to
+    write the dict shape. The bare-array shape it used to write is still what
+    `boxes_for_image` accepts, which is why this can regress silently."""
+    body = index_html.split("function mpWrite(")[1].split("\n  }")[0]
+    assert "points: mpState.points[k] || []" in body
+    assert "per_image: per" in body
+
+
+def test_the_folder_wide_fallback_carries_points_too(index_html):
+    """apply=all resolves an UNannotated frame against the top-level boxes; the
+    top-level points are the matching half, or '框一張,整夾自動套用' would apply
+    the box to every photo and the clicks to one."""
+    body = index_html.split("function mpWrite(")[1].split("\n  }")[0]
+    assert "points: per[order[0]].points" in body
+
+
+def test_paging_frames_restores_points(index_html):
+    """mpInit re-reads state from the hidden field on every htmx swap; reading
+    back only the boxes would drop every click the moment you hit ▶."""
+    body = index_html.split("function mpInit(")[1].split("\n  }")[0]
+    assert "mpState.points = mpReadPoints()" in body
+
+
+def test_a_click_is_a_point_not_a_discarded_stray(index_html):
+    body = index_html.split("mpState.up = function(ev)")[1].split("\n    };")[0]
+    assert "mpState.points[mpState.rel].push" in body
+    assert "ev.shiftKey ? 0 : 1" in body
+
+
+def test_a_frame_with_only_points_still_counts_as_annotated(index_html):
+    """Otherwise a points-only prompt is invisible to the chips, the counters and
+    the submit gate — the run would be blocked with the prompt sitting right
+    there on screen."""
+    body = index_html.split("function mpFrames(")[1].split("\n  }")[0]
+    assert "mpState.points[k]" in body
+
+
+def test_the_form_accepts_a_points_only_prompt():
+    """The picker can now produce one, so the handler must not still demand a
+    box — and `exemplar` must still demand one, since SAM 3 matches a box's
+    shape against the image and a click carries no shape."""
+    body = CREATE.read_text()
+    assert "沒有任何框或提示點" in body
+    assert "範例提示需要一個框當範例" in body
+
+
+# --------------------------------------------------------------------------- #
+# The frame-jump list. It was `rels[:400]`, so on a 666-frame folder the last
+# 266 frames could only be reached by clicking ◀ ▶ that many times.
+# --------------------------------------------------------------------------- #
+from web.routers.matte import _JUMP_MAX, _jump_names  # noqa: E402
+
+
+def _rels(n: int) -> list[str]:
+    return [f"IMG_{i:05d}.JPG" for i in range(n)]
+
+
+def test_every_frame_is_selectable_in_a_normal_folder():
+    rels = _rels(666)
+    assert _jump_names(rels, 0) == list(enumerate(rels))
+
+
+def test_a_huge_folder_is_sampled_across_its_whole_length_not_truncated():
+    """Truncating leaves the tail unreachable; sampling keeps every part of the
+    sequence one jump plus a few ◀ ▶ away."""
+    rels = _rels(_JUMP_MAX * 3)
+    got = _jump_names(rels, 0)
+    assert len(got) <= _JUMP_MAX + 1
+    assert got[0][0] == 0
+    assert got[-1][0] >= len(rels) - 3      # the tail is represented
+
+
+def test_the_current_frame_is_always_offered():
+    """Otherwise the select renders blank while sitting on a real frame."""
+    rels = _rels(_JUMP_MAX * 3)
+    here = len(rels) - 1
+    assert any(i == here for i, _ in _jump_names(rels, here))
+
+
+def test_options_carry_the_real_frame_index():
+    """In a sampled list, position-in-list and frame index diverge; using the
+    position would jump somewhere else entirely."""
+    fragment = FRAGMENT.read_text()
+    assert 'value="{{ n }}"' in fragment
+    assert "{% for n, name in names %}" in fragment
+
+
+def test_jumping_matches_on_data_rel_not_the_label(index_html):
+    """The label gained a position prefix, so matching option text would now
+    silently never fire — mpJump would always fall through to its alert."""
+    fragment = FRAGMENT.read_text()
+    assert 'data-rel="{{ name }}"' in fragment
+    body = index_html.split("function mpJump(")[1].split("\n  }")[0]
+    assert "dataset.rel === rel" in body

@@ -220,7 +220,7 @@
     if (!t || t.id !== "joblist") return;
     if (composingSearch) { e.detail.shouldSwap = false; listDirty = true; return; }
     savedSel = new Set(Array.from(document.querySelectorAll(".jobsel:checked")).map((x) => x.value));
-    const sc = t.closest(".col"); savedScroll = sc ? sc.scrollTop : 0;
+    const sc = t.closest("#workspace-content"); savedScroll = sc ? sc.scrollTop : 0;
     const table = t.querySelector(".job-table-scroll");
     savedHorizontal = table ? table.scrollLeft : 0;
     const inp = document.getElementById("jobsearch");
@@ -237,7 +237,7 @@
     const table = t.querySelector(".job-table-scroll");
     if (table) table.scrollLeft = savedHorizontal;
     window.updateJobSelection();
-    const sc = t.closest(".col"); if (sc) sc.scrollTop = savedScroll;
+    const sc = t.closest("#workspace-content"); if (sc) sc.scrollTop = savedScroll;
     if (savedSearchFocus) {
       const inp = document.getElementById("jobsearch");
       if (inp) {

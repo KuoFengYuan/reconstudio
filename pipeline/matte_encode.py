@@ -59,6 +59,51 @@ def as_boxes(raw) -> np.ndarray:
     return np.stack([x0, y0, x1, y1], axis=1)
 
 
+def group_points_by_box(boxes, coords=None, labels=None) -> list:
+    """Split +/- clicks across the objects they are arguing about.
+
+    A box says "an object is roughly here"; a click says "this pixel is (not)
+    part of *that* object". SAM's decoder takes the two together per object, so
+    a click has to be routed to one — and there is exactly one sensible rule:
+    the box that contains it, or failing that the nearest one. A negative click
+    is routinely placed just *outside* the box it corrects (that is what makes
+    it negative), which is why containment alone is not enough.
+
+    Returns one `(box, points, labels)` per object, in box order, so the index
+    doubles as SAM 2's `obj_id` — the same identity the picker numbers boxes by.
+
+    Without this the box+click path silently kept only `boxes[0]`: draw three
+    boxes, add one click, and two objects vanished from the output with nothing
+    logged. Both callers (the single-image prompt and the video seeding) route
+    through here so the UI's "a click belongs to the box it sits in" and the
+    pipeline's idea of the same cannot drift apart.
+    """
+    boxes = as_boxes(boxes if boxes is not None else [])
+    if coords is None or len(coords) == 0:
+        return [(b, None, None) for b in boxes]     # unchanged box-only behaviour
+    pts = np.asarray(coords, dtype=np.float32).reshape(-1, 2)
+    lbl = (np.asarray(labels, dtype=np.int32).reshape(-1)
+           if labels is not None else np.ones(len(pts), dtype=np.int32))
+    if len(boxes) == 0:
+        return [(None, pts, lbl)]                   # clicks alone are one object
+
+    inside = ((pts[:, None, 0] >= boxes[None, :, 0]) & (pts[:, None, 0] <= boxes[None, :, 2])
+              & (pts[:, None, 1] >= boxes[None, :, 1]) & (pts[:, None, 1] <= boxes[None, :, 3]))
+    # Smallest containing box wins, so a click inside a box that itself sits
+    # inside a larger one corrects the specific object, not the enclosing scene.
+    area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    ranked = np.where(inside, area[None, :], np.inf)
+    centres = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, (boxes[:, 1] + boxes[:, 3]) / 2], axis=1)
+    dist = np.linalg.norm(pts[:, None, :] - centres[None, :, :], axis=2)
+    owner = np.where(inside.any(axis=1), ranked.argmin(axis=1), dist.argmin(axis=1))
+
+    out = []
+    for i, box in enumerate(boxes):
+        m = owner == i
+        out.append((box, pts[m], lbl[m]) if m.any() else (box, None, None))
+    return out
+
+
 def clip_boxes(boxes: np.ndarray, width: int, height: int) -> np.ndarray:
     """Clamp to the image and drop degenerate (sub-pixel) boxes.
 

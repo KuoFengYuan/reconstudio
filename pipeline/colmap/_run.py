@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass, field
@@ -111,8 +112,8 @@ COLMAP_DEFAULTS = {
     # the deviation is what lets a caller that never mentions it inherit COLMAP's default —
     # and keeps the flag off the command line entirely, so a default run still works
     # against pre-4.3 builds, which reject the unknown option outright. Same for the
-    # blank-means-COLMAP-default min size. Only sparse/0 flows downstream; the extra
-    # components are reported by _stage_models_report, not consumed.
+    # blank-means-COLMAP-default min size. The largest reconstructed model is promoted
+    # to sparse/0 for downstream stages; extra components remain available.
     "gm_single_model": False, "gm_min_model_size": "",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
@@ -1298,17 +1299,20 @@ def _stage_mapper(c: _Ctx) -> None:
                 # itself. Distortion is written as zero and so must be solved.
                 extra += [f"--{prefix}.ba_refine_principal_point", "1"]
                 label += " [calibrated intrinsics: f held, PP+distortion refined]"
-            c.r.banner(f"{label} -> {c.ws / 'sparse'}")
+            # A fresh output directory prevents a previous run's sparse/1, etc.
+            # from competing with this run's models. Publish only after success.
+            output = Path(tempfile.mkdtemp(prefix=".mapper-", dir=c.ws))
+            c.r.banner(f"{label} -> {output}")
             c.r.run([COLMAP_BIN, sub, "--database_path", str(c.db),
-                     "--image_path", c.img_root, "--output_path", str(c.ws / "sparse"), *extra])
-            # the mapper just rebuilt sparse/0 from scratch — any simplify backup from a
-            # previous run describes a *different* model. If kept, the simplify stage would
-            # delete this run's outliers out of that stale backup (different image_ids), so
-            # drop it (and any legacy *_heavy.bin files) and let simplify re-back-up *this*
-            # model.
-            shutil.rmtree(c.ws / "sparse" / "0_heavy", ignore_errors=True)
-            for stale in ("images_heavy.bin", "points3D_heavy.bin"):
-                (c.ws / "sparse" / "0" / stale).unlink(missing_ok=True)
+                     "--image_path", c.img_root, "--output_path", str(output), *extra])
+            if not any((m / "cameras.bin").is_file() for m in _model_dirs(output)):
+                raise PipelineError(f"mapper produced no sparse model in {output}")
+            archive = Path(tempfile.mkdtemp(prefix=".model-backup-", dir=c.ws))
+            sparse = c.ws / "sparse"
+            moves = [(sparse, archive / "sparse")] if sparse.exists() else []
+            moves += [(output, sparse), *_downstream_backups(c, archive)]
+            _move_with_rollback(moves)
+            c.r.log(f"  previous model outputs preserved in {archive}")
         else:
             c.r.log("skip mapper (sparse/0/cameras.bin exists; set FORCE=1 to redo)")
 
@@ -1337,15 +1341,80 @@ def _bin_count(path: Path) -> int | None:
         return None
 
 
+def _move_with_rollback(moves: list[tuple[Path, Path]]) -> None:
+    """Rename whole models (including rigs/frames) without copying large binaries."""
+    completed: list[tuple[Path, Path]] = []
+    try:
+        for src, dst in moves:
+            src.rename(dst)
+            completed.append((src, dst))
+    except OSError:
+        for src, dst in reversed(completed):
+            dst.rename(src)
+        raise
+
+
+def _downstream_backups(c: _Ctx, archive: Path) -> list[tuple[Path, Path]]:
+    # Retain the old dataset, masks and pre-reorientation model together. Merely
+    # deleting cameras.bin would leave stale images/masks in the next dataset.
+    paths = [c.dense_dir, *(c.ws / f".{stage}.done" for stage in
+                           ("simplify", "align", "masks", "cutout", "reorient"))]
+    return [(p, archive / p.name) for p in paths if p.exists()]
+
+
+def _stage_select_model(c: _Ctx) -> None:
+    """Promote the largest reconstructed component to the canonical sparse/0.
+
+    Model numbers describe output order, not size. Rank by registered images,
+    then points; numeric order breaks exact ties. A simplified model is ranked
+    by its original backup to keep an unchanged resume on the same component.
+    """
+    if not any(c.stage_on(s) for s in ("mapper", "simplify", "align", "undistort")):
+        return
+    sparse = c.ws / "sparse"
+    models = _model_dirs(sparse)
+    if not models or (len(models) == 1 and models[0].name == "0"):
+        return
+    ranked: list[tuple[int, int, Path]] = []
+    for model in models:
+        source = model
+        heavy = sparse / "0_heavy"
+        if model.name == "0" and (c.ws / ".simplify.done").exists() and heavy.is_dir():
+            source = heavy
+        images = _bin_count(source / "images.bin")
+        points = _bin_count(source / "points3D.bin")
+        if not (source / "cameras.bin").is_file() or not images or points is None:
+            c.r.log(f"  [warn] sparse/{model.name}: incomplete/empty model; excluded from selection")
+            continue
+        ranked.append((images, points, model))
+    if not ranked:
+        raise PipelineError("no readable, non-empty sparse model available for downstream output")
+    images, points, chosen = max(ranked, key=lambda item: (item[0], item[1]))
+    c.r.banner(f"selected largest model: sparse/{chosen.name} "
+               f"({images} registered images, {points} points) -> sparse/0")
+    if chosen.name == "0":
+        return
+    archive = Path(tempfile.mkdtemp(prefix=".model-backup-", dir=c.ws))
+    model0 = sparse / "0"
+    moves: list[tuple[Path, Path]] = []
+    if model0.exists():
+        moves.append((model0, archive / "model0"))
+    moves.append((chosen, model0))
+    if model0.exists():
+        moves.append((archive / "model0", chosen))
+    if (sparse / "0_heavy").exists():
+        moves.append((sparse / "0_heavy", archive / "0_heavy"))
+    moves += _downstream_backups(c, archive)
+    _move_with_rollback(moves)
+    c.r.log(f"  largest model is now sparse/0; other components retained. "
+            f"Previous downstream outputs preserved in {archive}; enabled stages will rebuild them.")
+
+
 def _stage_models_report(c: _Ctx) -> None:
     """4a''. Report every sparse/N the mapper wrote, not just the one that is used.
 
-    A mapper run can produce several models: the incremental mapper always could
-    (Mapper.multiple_models), and global_mapper does so as of COLMAP 4.3 (#4589) —
-    it reconstructs every connected component of the view graph, largest first,
-    where before everything outside the largest was silently discarded. Only
-    sparse/0 is carried downstream by the stages below, so without this the extra
-    components are invisible: real registered images that never reach training.
+    Runs after selection, so sparse/0 is the chosen component. Extra components
+    are retained and reported, but are not merged into the downstream model.
     """
     models = _model_dirs(c.ws / "sparse")
     if len(models) < 2:
@@ -1357,16 +1426,16 @@ def _stage_models_report(c: _Ctx) -> None:
     for m, imgs, pts in counts:
         c.r.log(f"  sparse/{m.name:<3} {'?' if imgs is None else imgs:>7} images  "
                 f"{'?' if pts is None else pts:>9} points")
-    used = counts[0][1] or 0
+    used = next((n or 0 for m, n, _ in counts if m.name == "0"), 0)
     rest = total - used
     if rest and total:
         c.r.log(f"  {rest} of {total} registered images ({rest / total:.0%}) sit in the "
-                f"{len(models) - 1} component(s) below sparse/0 and are not undistorted, "
+                f"{len(models) - 1} other component(s) and are not undistorted, "
                 f"trained on, or exported.")
         c.r.log("  A split like this means the view graph is disconnected — usually a "
                 "coverage gap or a stretch too textureless to match across. Bridging it "
-                "(more overlap / loop-closure pairs) is what merges them into one model; "
-                "tick GM_SINGLE_MODEL to go back to reconstructing only the largest.")
+                "(more overlap / loop-closure pairs) is what merges them into one model. "
+                "Downstream selection uses the largest reconstructed model automatically.")
 
 
 def _stage_coverage_report(c: _Ctx) -> None:
@@ -1569,6 +1638,7 @@ def _stage_undistort(c: _Ctx) -> None:
         if c.need(c.dense_dir / "sparse" / "cameras.bin"):
             if not (c.ws / "sparse" / "0" / "cameras.bin").is_file():
                 raise RuntimeError("sparse model missing, cannot undistort")
+            c.dense_dir.mkdir(parents=True, exist_ok=True)
             _sanitize_exif(c, c.img_root, "images")
             c.r.banner(f"image_undistorter -> {c.dense_dir}"
                        + (f" (max_image_size={c.max_image_size})" if c.max_image_size else ""))
@@ -1691,6 +1761,7 @@ def run_colmap(p: dict, r: Runner) -> None:
     _stage_calibrate(c)         # 3. view_graph_calibrator (global only)
     _stage_rig_calibrate(c)     # 3b. derive sensor_from_rig for non-global mappers
     _stage_mapper(c)            # 4. mapper -> sparse/0
+    _stage_select_model(c)      # largest registered component -> canonical sparse/0
     _stage_models_report(c)     # 4a''. report extra sparse/N components, if any
     _stage_coverage_report(c)   # 4a'''. per-folder registration rate in sparse/0
     _stage_intrinsics_report(c) # 4a'. calibrated vs solved intrinsics

@@ -1231,3 +1231,162 @@ def test_coverage_report_is_silent_for_a_single_folder(patched, imgroot, vocab, 
     r = FakeRunner()
     _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab), r)
     assert not [b for b in r.banners if b.startswith("sparse/0 coverage:")]
+
+
+# Largest model selection must precede every stage that consumes sparse/0.
+def _selection_model(path, images, points):
+    _fake_model(path, images, points)
+    (path / "cameras.bin").write_bytes(struct.pack("<Q", 1))
+    for name in ("rigs.bin", "frames.bin"):
+        (path / name).write_bytes(f"{path.name}:{images}".encode())
+
+
+def _selection_ctx(ws, stages=("undistort",)):
+    return SimpleNamespace(ws=ws, r=FakeRunner(),
+                           dense_dir=ws / "training_dataset_pose_prior_mapper",
+                           stage_on=lambda stage: stage in stages)
+
+
+def test_select_largest_preserves_entire_models_and_archives_old_dataset(tmp_path):
+    c = _selection_ctx(tmp_path)
+    sparse = tmp_path / "sparse"
+    _selection_model(sparse / "0", 4, 4527)
+    _selection_model(sparse / "1", 269, 119227)
+    original = {m.name: {p.name: p.read_bytes() for p in m.iterdir()}
+                for m in sparse.iterdir()}
+    c.dense_dir.mkdir()
+    (c.dense_dir / "old-image.jpg").write_bytes(b"keep old result")
+    for stage in ("simplify", "align", "masks", "cutout", "reorient"):
+        (tmp_path / f".{stage}.done").touch()
+    _run._stage_select_model(c)
+    assert {p.name: p.read_bytes() for p in (sparse / "0").iterdir()} == original["1"]
+    assert {p.name: p.read_bytes() for p in (sparse / "1").iterdir()} == original["0"]
+    assert not c.dense_dir.exists()
+    archive, = tmp_path.glob(".model-backup-*")
+    assert (archive / c.dense_dir.name / "old-image.jpg").read_bytes() == b"keep old result"
+    assert not list(tmp_path.glob(".*.done"))
+    assert len(list(archive.glob(".*.done"))) == 5
+    assert "269 registered images" in c.r.banners[0]
+    _run._stage_select_model(c)
+    assert list(tmp_path.glob(".model-backup-*")) == [archive]
+
+
+@pytest.mark.parametrize("counts,expected", [
+    ({"0": (4, 999999), "1": (269, 100)}, "1"),
+    ({"0": (269, 100), "1": (269, 101)}, "1"),
+    ({"0": (269, 100), "1": (269, 100)}, "0"),
+    ({"2": (269, 100), "10": (269, 100)}, "2"),
+    ({"3": (269, 100)}, "3"),
+])
+def test_selection_ranks_images_then_points_then_numeric_order(tmp_path, counts, expected):
+    for name, (images, points) in counts.items():
+        _selection_model(tmp_path / "sparse" / name, images, points)
+    c = _selection_ctx(tmp_path)
+    _run._stage_select_model(c)
+    assert (tmp_path / "sparse" / "0" / "rigs.bin").read_bytes().startswith(expected.encode() + b":")
+    assert len(_run._model_dirs(tmp_path / "sparse")) == len(counts)
+
+
+def test_selection_does_not_switch_away_from_an_already_simplified_model(tmp_path):
+    sparse = tmp_path / "sparse"
+    _selection_model(sparse / "0", 200, 100)
+    _selection_model(sparse / "1", 250, 1000)
+    _selection_model(sparse / "0_heavy", 269, 119227)
+    (tmp_path / ".simplify.done").touch()
+    c = _selection_ctx(tmp_path)
+    _run._stage_select_model(c)
+    assert _run._bin_count(sparse / "0" / "images.bin") == 200
+    assert (tmp_path / ".simplify.done").exists()
+    assert not list(tmp_path.glob(".model-backup-*"))
+
+
+@pytest.mark.parametrize("bad", ["images.bin", "points3D.bin", "cameras.bin"])
+def test_selection_excludes_incomplete_models(tmp_path, bad):
+    sparse = tmp_path / "sparse"
+    _selection_model(sparse / "0", 269, 119227)
+    _selection_model(sparse / "1", 500, 999999)
+    (sparse / "1" / bad).unlink()
+    c = _selection_ctx(tmp_path)
+    _run._stage_select_model(c)
+    assert _run._bin_count(sparse / "0" / "images.bin") == 269
+    assert any("excluded from selection" in line for line in c.r.logs)
+
+
+def test_selection_rolls_back_model_swap_on_dataset_move_failure(tmp_path, monkeypatch):
+    sparse = tmp_path / "sparse"
+    _selection_model(sparse / "0", 4, 4527)
+    _selection_model(sparse / "1", 269, 119227)
+    _selection_model(sparse / "0_heavy", 4, 4527)
+    c = _selection_ctx(tmp_path)
+    c.dense_dir.mkdir()
+    rename = Path.rename
+
+    def fail_dataset(src, dest):
+        if src == c.dense_dir:
+            raise OSError("simulated move failure")
+        return rename(src, dest)
+
+    monkeypatch.setattr(Path, "rename", fail_dataset)
+    with pytest.raises(OSError, match="simulated move failure"):
+        _run._stage_select_model(c)
+    assert _run._bin_count(sparse / "0" / "images.bin") == 4
+    assert _run._bin_count(sparse / "1" / "images.bin") == 269
+    assert (sparse / "0_heavy").exists() and c.dense_dir.exists()
+
+
+@pytest.mark.parametrize("mapper", ["global", "incremental", "pose_prior", "hierarchical"])
+def test_every_mapper_undistorts_largest_current_run_model(patched, imgroot, vocab, tmp_path, mapper):
+    patched.gps = "full"
+    ws = tmp_path / "ws"
+    _selection_model(ws / "sparse" / "0", 3, 50)
+    _selection_model(ws / "sparse" / "9", 9999, 999999)  # stale previous run
+
+    class SplitRunner(FakeRunner):
+        def _simulate(self, argv):
+            super()._simulate(argv)
+            if argv[1] in ("global_mapper", "mapper", "pose_prior_mapper", "hierarchical_mapper"):
+                output = Path(self._arg_after(argv, "--output_path"))
+                _selection_model(output / "0", 4, 4527)
+                _selection_model(output / "1", 269, 119227)
+            elif argv[1] == "image_undistorter":
+                source = Path(self._arg_after(argv, "--input_path"))
+                assert _run._bin_count(source / "images.bin") == 269
+                assert (source / "frames.bin").read_bytes() == b"1:269"
+
+    r = SplitRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, mapper=mapper, force=True), r)
+    assert r.argv_for("image_undistorter")
+    assert not (ws / "sparse" / "9").exists()
+    assert any((p / "sparse" / "9" / "images.bin").exists() for p in ws.glob(".model-backup-*"))
+
+
+def test_undistort_only_resume_uses_largest_and_rebuilds_existing_output(patched, imgroot, vocab, tmp_path):
+    patched.gps = "full"
+    ws = tmp_path / "ws"
+    _selection_model(ws / "sparse" / "0", 4, 4527)
+    _selection_model(ws / "sparse" / "1", 269, 119227)
+    dense = ws / "training_dataset_pose_prior_mapper"
+    _selection_model(dense / "sparse", 4, 4527)
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, ws, vocab, mapper="pose_prior", stages=["undistort"]), r)
+    assert r.subcommands() == ["image_undistorter"]
+    assert _run._bin_count(ws / "sparse" / "0" / "images.bin") == 269
+    assert _run._bin_count(next(ws.glob(".model-backup-*")) / dense.name / "sparse" / "images.bin") == 4
+
+
+def test_failed_mapper_keeps_existing_model_and_dataset(patched, imgroot, vocab, tmp_path):
+    ws = tmp_path / "ws"
+    _selection_model(ws / "sparse" / "0", 269, 119227)
+    dense = ws / "training_dataset_global_mapper"
+    _selection_model(dense / "sparse", 269, 119227)
+
+    class FailedMapper(FakeRunner):
+        def _simulate(self, argv):
+            if argv[1] == "global_mapper":
+                raise PipelineError("mapper failed")
+            super()._simulate(argv)
+
+    with pytest.raises(PipelineError, match="mapper failed"):
+        _run.run_colmap(_params(imgroot, ws, vocab, force=True), FailedMapper())
+    assert _run._bin_count(ws / "sparse" / "0" / "images.bin") == 269
+    assert _run._bin_count(dense / "sparse" / "images.bin") == 269

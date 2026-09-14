@@ -74,6 +74,29 @@ def _cutout_dir(root: Path) -> Path | None:
     return None
 
 
+# The jump list used to be `rels[:400]`, which on a 666-frame folder left the last
+# 266 reachable only by clicking ◀ ▶ that many times — a dead end, not a limit.
+# It exists at all because the whole fragment re-renders on every frame change, so
+# the options are paid for on each click; 4000 of them is ~250 KB, which is the
+# point where that stops being free.
+_JUMP_MAX = 4000
+
+
+def _jump_names(rels: list[str], idx: int) -> list[tuple[int, str]]:
+    """`(index, rel)` for the frame picker's jump list.
+
+    Under the cap this is every frame. Over it, the list is spread EVENLY across
+    the whole sequence rather than truncated, so every part of a huge folder is
+    still a click away — and the frame you are on is always in it, or the select
+    would show a blank while sitting on a real frame.
+    """
+    if len(rels) <= _JUMP_MAX:
+        return list(enumerate(rels))
+    step = len(rels) / _JUMP_MAX
+    picked = sorted({int(k * step) for k in range(_JUMP_MAX)} | {idx})
+    return [(i, rels[i]) for i in picked]
+
+
 @router.get("/ui/matte_pick", response_class=HTMLResponse)
 async def matte_pick(request: Request, images: str = "", i: int = 0):
     """One frame from `images`, ready to be drawn on. `i` selects which."""
@@ -93,8 +116,9 @@ async def matte_pick(request: Request, images: str = "", i: int = 0):
         return _page(request, "_error.html", message=f"這個資料夾裡沒有照片: {d}")
     idx = max(0, min(int(i), len(rels) - 1))
     rel = rels[idx]
+    names = _jump_names(rels, idx)
     return _page(request, "_matte_pick.html", images=images, dir=str(d), rel=rel,
-                 idx=idx, total=len(rels), names=rels[:400],
+                 idx=idx, total=len(rels), names=names, complete=len(names) == len(rels),
                  src=f"/api/gallery/imagefile?path={quote(str(d / rel))}&w=1400")
 
 
