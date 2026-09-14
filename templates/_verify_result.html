@@ -1,0 +1,19 @@
+{# 驗收結果片段：htmx 換進 verify.html 的 #result #}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:baseline">
+    <strong class="{{ 'ok' if res.ok else 'err' }}">
+      {{ '✓ 全部通過' if res.ok else ('✗ 有問題' if res.rc == 1 else '⚠ 執行失敗') }}
+    </strong>
+    {% if model %}<code class="mut">{{ model }}</code>{% endif %}
+  </div>
+  <pre style="background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:12px;
+       margin-top:10px;max-height:65vh;overflow:auto;white-space:pre-wrap;
+       font:12px/1.45 ui-monospace,monospace;color:#d8dee9">{{ res.text }}</pre>
+  {% if res.cmd %}
+    <details style="margin-top:8px">
+      <summary class="mut" style="font-size:12px;cursor:pointer">在終端機重跑</summary>
+      <pre style="margin:6px 0 0;font:11.5px ui-monospace,monospace;color:#8b93a3;
+           white-space:pre-wrap">{{ res.cmd }}</pre>
+    </details>
+  {% endif %}
+</div>

@@ -184,3 +184,43 @@ def test_a_folder_wide_prompt_still_owns_matte_boxes_json(tmp_path):
 
 def test_unparseable_json_keeps_the_old_destination(tmp_path):
     assert _write_boxes(tmp_path, "not json").name == "matte_boxes.json"
+
+
+# --- a top-level click prompt has to survive being loaded --------------------- #
+def test_the_loader_keeps_top_level_points(tmp_path):
+    """`load_boxes_file` normalises through an explicit key whitelist, and
+    `points` was missing from it. A folder-wide click prompt was therefore
+    dropped at load: the run then looked box-only, took the batched path, and
+    finished "done" having never shown SAM a single click.
+
+    Measured on the frame this was found with — one box, one negative click:
+    31.5% coverage (clicks ignored) vs 21.6% (clicks applied).
+    """
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"norm": True, "apply": "all",
+                             "boxes": [[0.1, 0.1, 0.9, 0.9]],
+                             "points": [[0.5, 0.5, 0]]}))
+    spec = sm.load_boxes_file(f)
+    assert spec["points"] == [[0.5, 0.5, 0]]
+    assert sm.has_points(spec)                       # so the run leaves the batch path
+
+
+def test_a_points_only_file_is_not_mistaken_for_a_per_image_map(tmp_path):
+    """The shape probe treats a dict with none of the known keys as a bare
+    {rel: boxes} map. Without `points` in that probe, a click-only prompt was
+    swallowed whole into per_image as garbage."""
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"norm": True, "apply": "all", "points": [[0.5, 0.5, 1]]}))
+    spec = sm.load_boxes_file(f)
+    assert spec["per_image"] == {} and spec["points"] == [[0.5, 0.5, 1]]
+
+
+def test_points_reach_the_decoder_for_an_unannotated_frame(tmp_path):
+    """The picker writes top-level boxes AND points from the first annotated
+    frame; apply=all is what makes '框一張,整夾自動套用' cover the clicks too."""
+    f = tmp_path / "b.json"
+    f.write_text(json.dumps({"norm": True, "apply": "all",
+                             "boxes": [[0, 0, 1, 1]], "points": [[0.5, 0.25, 1]]}))
+    spec = sm.load_boxes_file(f)
+    coords, labels = sm.points_for_image(spec, "never/seen.jpg", 100, 200)
+    assert coords.tolist() == [[50.0, 50.0]] and labels.tolist() == [1]

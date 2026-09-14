@@ -103,11 +103,11 @@
     });
   }
   // Replacing a tall job/editor must not inherit a scroll position that hides
-  // the new controls underneath the sticky workspace navigation.
+  // the new controls above the visible content area.
   window.revealWorkspaceContent = function () {
     const output = document.getElementById('workspace-output');
     if (output.dataset.view !== 'run') return;
-    output.scrollTop = 0;
+    document.getElementById('workspace-content').scrollTop = 0;
     if (window.matchMedia('(max-width:760px)').matches) output.scrollIntoView({block:'start'});
   };
 

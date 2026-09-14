@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from pipeline.config import settings
+from pipeline.frames import FRAMES_DEFAULTS as FRAME_OPTIONS
 
 BASE = Path(__file__).resolve().parent.parent          # reconstudio/
 
@@ -91,7 +92,7 @@ COLMAP_DEFAULTS = {
     "REORIENT": "0", "REORIENT_TARGET_MED_DIST": "20", "REORIENT_UPSCALE": "0",
     "HM_LEAF_MAX_NUM_IMAGES": "", "HM_IMAGE_OVERLAP": "", "HM_NUM_WORKERS": "",
 }
-FRAMES_DEFAULTS = {"FPS": "1", "MODE": "percentile", "KEEP_PCT": "70", "THRESHOLD": ""}
+FRAMES_DEFAULTS = {key.upper(): value for key, value in FRAME_OPTIONS.items()}
 ENUMS = {
     "CAMERA_MODE": ["per_folder", "single"],
     "MATCHER": ["sequential", "vocab", "both", "spatial", "custom", "exhaustive"],

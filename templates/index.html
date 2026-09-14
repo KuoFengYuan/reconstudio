@@ -395,6 +395,14 @@
               padding:0 7px; border-radius:13px; background:#0b2c1b; color:#8ef0bd;
               font-size:15px; line-height:26px; text-align:center; font-weight:700;
               font-variant-numeric:tabular-nums; }
+  /* Same shape and colours as the repair page's markers, deliberately: the two
+     pages teach the same gesture (click = keep, shift-click = drop, click the
+     marker to delete it) and a different-looking dot would read as a different
+     thing. */
+  .mp-pt{ position:absolute; width:22px; height:22px; margin:-11px 0 0 -11px;
+          border-radius:50%; border:2px solid #0b2c1b; cursor:pointer;
+          box-shadow:0 1px 4px rgba(0,0,0,.45); }
+  .mp-pt.keep{ background:#35d07f; } .mp-pt.drop{ background:#f85149; }
   .mp-status{ font-size:14.5px !important; }
   .mp-status b{ color:var(--accent); }
 </style>
@@ -463,30 +471,35 @@
           <input name="out_dir" id="frames_out" placeholder="{{ browse_root }}" required>
           <button type="button" class="ghost" onclick="openPicker('frames_out')">瀏覽</button>
         </div>
-        <div class="hint">已開啟 <code>-F</code> 攤平:只輸出清晰幀,丟掉模糊/原始幀。</div>
+        <div class="hint">只輸出通過篩選的影格，原始影片保留。重跑同一資料夾會替換系統產生的舊影格。</div>
       </fieldset>
 
       <fieldset>
-        <legend>抽幀 / 去模糊</legend>
-        <label>fps（每秒抽幀數）</label>
-        <input name="fps" value="{{ frames_defaults.FPS }}">
-        <div class="hint">解碼自動使用 GPU(NVDEC),失敗時自動退回 CPU。</div>
-        <label>去模糊方式</label>
-        <select name="mode" onchange="toggleBlurMode(this.value)">
-          <option value="percentile" {{ 'selected' if frames_defaults.MODE=='percentile' }}>百分位（保留最清晰 P%）</option>
-          <option value="threshold" {{ 'selected' if frames_defaults.MODE=='threshold' }}>絕對閾值（blur ≤ t）</option>
+        <legend>抽幀與模糊篩選</legend>
+        <label for="frames-fps">每秒抽幾張</label>
+        <input type="number" id="frames-fps" name="fps" value="{{ frames_defaults.FPS }}" min="0.001" step="any" required>
+        <div class="hint">解碼自動使用 GPU（NVDEC），失敗時退回 CPU。篩選後的實際張數會減少。</div>
+        <label for="frames-mode">模糊影格處理方式</label>
+        <select name="mode" id="frames-mode" onchange="toggleBlurMode(this.value)">
+          <option value="hybrid" {{ 'selected' if frames_defaults.MODE=='hybrid' }}>雙重篩選（建議）：品質門檻＋清晰度排序</option>
+          <option value="threshold" {{ 'selected' if frames_defaults.MODE=='threshold' }}>只用品質門檻：保留所有達標影格</option>
+          <option value="percentile" {{ 'selected' if frames_defaults.MODE=='percentile' }}>只按比例：保留最清晰的一部分</option>
         </select>
+        <div class="hint" id="frames-mode-help">先排除超過模糊門檻的影格，再限制保留比例；不會為了湊張數留下不合格影格。</div>
+        <div id="blur-thr">
+          <label for="frames-threshold">模糊分數上限（越低越嚴格）</label>
+          <input type="number" id="frames-threshold" name="threshold" value="{{ frames_defaults.THRESHOLD }}" min="0.001" step="any" required>
+          <div class="hint">預設 8 作為起點。分數受場景紋理與解析度影響，可依輸出結果和篩選報告調整。</div>
+        </div>
         <div id="blur-pct">
-          <label>keep_percent（保留最清晰的 %）</label>
-          <input name="keep_pct" value="{{ frames_defaults.KEEP_PCT }}">
+          <label for="frames-keep">最多保留有效評分影格的比例（%）</label>
+          <input type="number" id="frames-keep" name="keep_pct" value="{{ frames_defaults.KEEP_PCT }}" min="1" max="100" step="1" required>
+          <div class="hint">預設 70%。想保留更多視角，可提高比例；雙重篩選仍會排除超過門檻的影格。</div>
         </div>
-        <div id="blur-thr" style="display:none">
-          <label>blur_threshold（內容相關;清晰約 2–6,模糊 10+）</label>
-          <input name="threshold" value="{{ frames_defaults.THRESHOLD }}">
-        </div>
+        <div class="hint">完成後顯示保留／淘汰數量，並輸出 <code>blur_scores.csv</code>（逐幀分數與原因）。無法評分的影格不會當成清晰影格保留。</div>
       </fieldset>
 
-      <button class="submit" type="submit">▶ 抽幀 + 去模糊</button>
+      <button class="submit" type="submit">▶ 抽幀並移除模糊影格</button>
     </form>
 
     <!-- ----- colmap form ----- -->
@@ -935,7 +948,7 @@
               </label>
               <div class="pctl"><input type="checkbox" id="cm_gm_single" name="GM_SINGLE_MODEL" value="1" {{ 'checked' if colmap_defaults.GM_SINGLE_MODEL=='1' }}></div>
             </div>
-            <div class="fhint" id="h_cm_gm_single">視圖圖(view graph)斷成好幾塊時,COLMAP 4.3 預設會把每一塊各自重建成 sparse/0、sparse/1…(依註冊張數由大到小);在這之前只保留最大的那一塊,其餘影像整批丟掉。勾選 = 回到只重建最大元件的舊行為。不勾 = 用 COLMAP 預設(全部重建)。注意下游(undistort / 訓練 / 匯出)目前仍只吃 sparse/0,多出來的元件會列在 log 的「mapper produced N models」區塊供你判讀。</div>
+            <div class="fhint" id="h_cm_gm_single">僅適用 global_mapper：勾選後只重建最大的視圖圖元件；不勾則使用 COLMAP 預設重建多個元件。無論使用哪種 mapper，系統都會依已註冊影像數選擇最大的重建模型（同張數時比較 3D 點數），整理為 sparse/0，供去畸變、訓練與匯出使用。模型編號不代表大小；其他元件會保留，並列在 log 的「mapper produced N models」區塊。</div>
             <div class="prow">
               <label class="plabel" for="cm_gm_min_size"><span class="ptext">GM_MIN_MODEL_SIZE</span>
                 <span class="info" onclick="togHint(event,'h_cm_gm_min_size')" title="說明">?</span>
@@ -1333,7 +1346,9 @@
           <li><b>按「⬚ 匡選物體」</b> —— 照片會開在右邊,在要保留的東西上拖曳畫一個框。
               <b>只要框一張就好</b>,資料夾裡其餘幾百張 SAM 會自己照著切,<b>不用一張一張框</b>。
               (挑幾張各框一次會更準,但不是必要的。)這一步不能跳過 ——
-              SAM 是靠這個框知道你要留什麼。</li>
+              SAM 是靠這個框知道你要留什麼。<br>
+              框不夠準時,<b>在圖上點一下就是提示點</b>:點 = ＋這裡也是主體,
+              Shift+點 = －這裡不是。框給範圍、點給細節,兩個一起最穩。</li>
           <li><b>按「▶ 開始去背」</b> —— 整個資料夾一起跑,可以關掉頁面,工作在背景繼續。</li>
         </ol>
         <details class="grp"><summary>它會產生什麼、放在哪裡</summary>
@@ -1384,9 +1399,12 @@
           <option value="full">整張當一個框(單一主體、滿版)</option>
         </select>
         <div class="hint bgrp" data-b="track">框畫在<b>一張</b>參考影格上,SAM 2 的記憶注意力沿著序列往前後傳播,
-          主體移動或相機繞行都跟得上。需要照片本身是有順序的序列(抽幀出來的就是)。</div>
+          主體移動或相機繞行都跟得上。需要照片本身是有順序的序列(抽幀出來的就是)。
+          <b>框選畫面裡點一下可以加提示點</b>,點會跟著框一起當種子傳播下去 ——
+          種子錯了整段序列都會跟著錯,所以在種子影格上把它修對最划算。</div>
         <div class="hint bgrp" data-b="json">同一組框直接套用到每一張。機位固定時最省算力,
-          相機一動框就會對不上。</div>
+          相機一動框就會對不上。<b>框 + 提示點</b>會一起套用到每一張,所以主體在畫面裡
+          位置要大致固定(轉盤序列通常成立)。</div>
         <div class="hint bgrp" data-b="text">SAM 2 / SAM 1 本身看不懂文字,會先用 Grounding DINO
           把名詞變成框再交給 SAM(Grounded-SAM 的標準組合);SAM 3 則直接吃文字。請填英文名詞,
           多個用逗號分隔。</div>
@@ -1842,6 +1860,7 @@
 
   <!-- ============================ right: output ============================ -->
   <div class="col" id="workspace-output" role="main" tabindex="-1" data-view="home">
+    <div class="workspace-header">
     <div class="workspace-heading"><div><p class="section-eyebrow">WORKSPACE</p><h2>重建工作區</h2><p>從素材到模型，掌握每一步進度。</p></div></div>
     <div class="workspace-nav">
     <div class="tabs workspace-tabs" role="tablist" aria-label="工作區檢視">
@@ -1850,6 +1869,8 @@
       <button class="ghost" id="view-hist" role="tab" aria-controls="tab-hist" aria-selected="false" tabindex="-1" onclick="showTab('hist',this)">任務紀錄</button>
     </div>
     </div>
+    </div>
+    <div id="workspace-content" tabindex="0" role="region" aria-label="工作區內容">
     <div id="tab-home" role="tabpanel" aria-labelledby="view-home">{% include '_welcome.html' %}</div>
     <div id="tab-run" style="display:none" role="tabpanel" aria-labelledby="view-run">
       <div id="main" hx-sync="this:replace"><div class="history-empty"><h3>尚未開啟任務</h3><p>從任務紀錄開啟工作，或回到首頁選擇素材開始重建。</p><button type="button" class="ghost" onclick="showTab('home')">回到工作區首頁</button> <button type="button" class="ghost" onclick="showTab('hist')">查看任務紀錄</button></div></div>
@@ -1861,6 +1882,7 @@
            line + simple filter expression — htmx's trigger parser drops the
            whole attribute, load included, on multi-line or `===` expressions.) -->
       <div id="joblist" hx-sync="this:replace" hx-get="/ui/joblist" hx-trigger='load, every 30s [!document.hidden && document.getElementById("tab-hist").style.display!="none"]'  hx-swap="innerHTML"></div>
+    </div>
     </div>
   </div>
 </div>
@@ -2099,32 +2121,62 @@
   // in pixels: this canvas is a downscaled JPEG preview, and a folder may mix
   // resolutions, so pixel corners would be wrong twice over. tools/sam_matte.py
   // scales them back per image (see `denorm` there).
-  var mpState = { frames:{}, rel:'', up:null };
+  // `points[rel]` holds [x, y, label] triples alongside `frames[rel]`'s boxes —
+  // the shape tools/sam_matte.py's points_for_image already reads. A click is
+  // routed to the box it sits in (nearest one otherwise) by
+  // matte_encode.group_points_by_box, so the UI stores no object index and the
+  // two sides cannot disagree about which object a click argues with.
+  var mpState = { frames:{}, points:{}, rel:'', up:null, log:[] };
 
-  function mpRead(){
+  function mpSpec(){
     var h = document.getElementById('matte_boxes');
     if (!h || !h.value) return {};
-    try {
-      var v = JSON.parse(h.value);
-      if (v.refs) return v.refs;
-      return (v.ref && v.boxes && v.boxes.length) ? (function(){ var o={}; o[v.ref]=v.boxes; return o; })() : {};
-    } catch(e){ return {}; }
+    try { return JSON.parse(h.value) || {}; } catch(e){ return {}; }
   }
+  function mpRead(){
+    var v = mpSpec();
+    if (v.refs) return v.refs;
+    return (v.ref && v.boxes && v.boxes.length) ? (function(){ var o={}; o[v.ref]=v.boxes; return o; })() : {};
+  }
+  function mpReadPoints(){
+    // Points live in per_image so that 固定框 mode reads them without a second
+    // key; paging through frames must restore them or they vanish on every swap.
+    var per = mpSpec().per_image || {}, out = {};
+    Object.keys(per).forEach(function(k){
+      var e = per[k];
+      if (e && !Array.isArray(e) && e.points && e.points.length) out[k] = e.points;
+    });
+    return out;
+  }
+  function mpCurPts(){ return mpState.points[mpState.rel] || []; }
   function mpFrames(){
-    return Object.keys(mpState.frames).filter(function(k){
-      return mpState.frames[k] && mpState.frames[k].length;
+    // A frame counts as annotated if it carries EITHER a box or a click: a
+    // points-only seed is a legitimate prompt, and dropping it here would make
+    // it invisible to the chips, the counts and the submit gate.
+    var keys = Object.keys(mpState.frames).concat(Object.keys(mpState.points));
+    return keys.filter(function(k, i){
+      return keys.indexOf(k) === i &&
+             ((mpState.frames[k] || []).length || (mpState.points[k] || []).length);
     }).sort();
   }
   function mpWrite(){
     var h = document.getElementById('matte_boxes'); if (!h) return;
-    var order = mpFrames(), refs = {};
-    order.forEach(function(k){ refs[k] = mpState.frames[k]; });
+    var order = mpFrames(), refs = {}, per = {};
+    order.forEach(function(k){
+      refs[k] = mpState.frames[k] || [];
+      per[k] = { boxes: mpState.frames[k] || [], points: mpState.points[k] || [] };
+    });
     // `ref`/`boxes` keep the single-frame shape the other prompt modes read;
     // `refs` is what 追蹤 seeds every conditioning frame from. `per_image` lets
     // 固定框 mode use each annotated frame's own boxes for that frame.
+    // Top-level `boxes`/`points` are what 固定框 applies to every UNannotated
+    // frame (apply=all), so they mirror the first annotated frame — that is the
+    // "框一張,整夾自動套用" behaviour. `refs` stays boxes-only: run_track reads
+    // it for box seeding and picks the clicks up from per_image separately.
     h.value = order.length ? JSON.stringify({
       ref: order[0], apply: 'all', norm: true,
-      boxes: refs[order[0]], refs: refs, per_image: refs
+      boxes: refs[order[0]], points: per[order[0]].points,
+      refs: refs, per_image: per
     }) : '';
     // Boxes are keyed by filename inside ONE folder. Remember which, so pointing
     // the form somewhere else can drop them instead of sending SAM a prompt that
@@ -2156,18 +2208,33 @@
         x.onclick = function(ev){ ev.stopPropagation(); mpCur().splice(i,1); mpWrite(); };
         d.appendChild(tag); d.appendChild(x); ov.appendChild(d);
       });
+      ov.querySelectorAll('.mp-pt').forEach(function(e){ e.remove(); });
+      mpCurPts().forEach(function(pt, i){
+        var d = document.createElement('div');
+        d.className = 'mp-pt ' + (pt[2] ? 'keep' : 'drop');
+        d.style.left = (pt[0]*100)+'%'; d.style.top = (pt[1]*100)+'%';
+        d.title = (pt[2] ? '保留點' : '去除點') + ' — 點一下刪除';
+        // mousedown too: the overlay begins a draft box on mousedown, so without
+        // this, deleting a marker also starts a drag.
+        d.onmousedown = function(ev){ ev.stopPropagation(); };
+        d.onclick = function(ev){ ev.stopPropagation(); mpCurPts().splice(i,1); mpWrite(); };
+        ov.appendChild(d);
+      });
     }
     var frames = mpFrames();
-    var total = frames.reduce(function(a,k){ return a + mpState.frames[k].length; }, 0);
+    var total = frames.reduce(function(a,k){ return a + (mpState.frames[k]||[]).length; }, 0);
+    var pts = frames.reduce(function(a,k){ return a + (mpState.points[k]||[]).length; }, 0);
     var c = document.getElementById('mp_count');
-    if (c) c.textContent = boxes.length + ' 框 · 共 ' + frames.length + ' 張影格';
+    if (c) c.textContent = boxes.length + ' 框 · ' + mpCurPts().length + ' 點 · 共 ' +
+                           frames.length + ' 張影格';
     var chips = document.getElementById('mp_frames');
     if (chips) {
       chips.innerHTML = frames.length
         ? frames.map(function(f){
+            var nb = (mpState.frames[f]||[]).length, npt = (mpState.points[f]||[]).length;
             return '<span class="fchip' + (f === mpState.rel ? ' on' : '') +
                    '" onclick="mpJump(' + JSON.stringify(f).replace(/"/g,'&quot;') + ')">' +
-                   f + ' · ' + mpState.frames[f].length + '</span>';
+                   f + ' · ' + nb + (npt ? '框+' + npt + '點' : '') + '</span>';
           }).join('')
         : '';
     }
@@ -2180,19 +2247,23 @@
       var all = pane ? parseInt(pane.dataset.total, 10) : 0;
       var rest = all && all > frames.length
         ? ',其餘 <b>' + (all - frames.length) + '</b> 張會自動跟著切' : '';
-      st.innerHTML = total
-        ? '已在 <b>' + frames.length + '</b> 張影格匡選,共 <b>' + total + '</b> 個框' + rest +
+      st.innerHTML = (total || pts)
+        ? '已在 <b>' + frames.length + '</b> 張影格匡選,共 <b>' + total + '</b> 個框' +
+          (pts ? '、<b>' + pts + '</b> 個提示點' : '') + rest +
           ' —— <b>可以直接開始去背了</b>。' +
           '想更準再<b>換一張影格匡同一個物體</b>:每張匡過的影格都會變成錨點,' +
           '遮擋或視角變化時就不會飄走(框上的號碼就是物體編號,第 1 框對第 1 框)。'
         : '在照片上<b>拖曳</b>,匡出要保留的物體。' +
           '<b>只要框這一張</b>' + (all ? ',另外 ' + (all - 1) + ' 張會自動套用' : '') +
-          ' —— 不用每張都框。同一張可以框多個(遮罩會聯集)。';
+          ' —— 不用每張都框。同一張可以框多個(遮罩會聯集)。<br>' +
+          '框不夠準時<b>直接在圖上點</b>:點一下 = <b>＋這裡也是主體</b>,' +
+          'Shift+點 = <b>－這裡不是</b>。點會歸給包含它的框。';
     }
     var sum = document.getElementById('matte_pick_slot');
     if (sum) {
-      sum.innerHTML = total
-        ? '<span class="ok">✓ ' + frames.length + ' 張影格 · ' + total + ' 個框</span>' +
+      sum.innerHTML = (total || pts)
+        ? '<span class="ok">✓ ' + frames.length + ' 張影格 · ' + total + ' 個框' +
+          (pts ? ' · ' + pts + ' 點' : '') + '</span>' +
           '<span>整夾自動套用 · 起始影格 ' + frames[0] + '</span>'
         : '';
     }
@@ -2200,6 +2271,7 @@
   }
   function mpInit(rel){
     mpState.frames = mpRead();
+    mpState.points = mpReadPoints();
     mpState.rel = rel;
     var ov = document.getElementById('mp_ov'); if (!ov) return;
     ov.dataset.rel = rel;
@@ -2236,10 +2308,21 @@
       var p = pt(ev); draft.remove(); draft = null;
       var x0 = Math.min(sx,p[0]), y0 = Math.min(sy,p[1]);
       var x1 = Math.max(sx,p[0]), y1 = Math.max(sy,p[1]);
-      if (x1-x0 < 0.005 || y1-y0 < 0.005) { mpRender(); return; }   // stray click
+      // Too small to be a box = a click, and a click is a point prompt — the
+      // same gesture the repair page uses, so the two pages don't teach
+      // different things. It used to be discarded as a stray click.
+      if (x1-x0 < 0.005 || y1-y0 < 0.005) {
+        if (!mpState.points[mpState.rel]) mpState.points[mpState.rel] = [];
+        mpState.points[mpState.rel].push(
+          [+sx.toFixed(5), +sy.toFixed(5), ev.shiftKey ? 0 : 1]);
+        mpState.log.push({rel: mpState.rel, kind: 'point'});
+        mpWrite();
+        return;
+      }
       if (!mpState.frames[mpState.rel]) mpState.frames[mpState.rel] = [];
       mpState.frames[mpState.rel].push(
         [+x0.toFixed(5), +y0.toFixed(5), +x1.toFixed(5), +y1.toFixed(5)]);
+      mpState.log.push({rel: mpState.rel, kind: 'box'});
       mpWrite();
     };
     window.addEventListener('mouseup', mpState.up);
@@ -2249,8 +2332,10 @@
   // the navigation stays one htmx swap rather than a second code path.
   function mpJump(rel){
     var sel = document.querySelector('#main .mp-jump'); if (!sel) return;
+    // Match on data-rel, not the option's text: the label carries a position
+    // prefix now, so text matching would silently never fire.
     for (var i = 0; i < sel.options.length; i++) {
-      if (sel.options[i].textContent.trim() === rel) {
+      if (sel.options[i].dataset.rel === rel) {
         sel.selectedIndex = i;
         sel.dispatchEvent(new Event('change', {bubbles:true}));
         return;
@@ -2258,9 +2343,22 @@
     }
     alert('這張影格不在下拉選單列出的範圍內,請用 ◀ ▶ 翻到 ' + rel);
   }
-  function mpUndo(){ mpCur().pop(); mpWrite(); }
-  function mpClear(){ delete mpState.frames[mpState.rel]; mpWrite(); }
-  function mpClearAll(){ mpState.frames = {}; mpWrite(); }
+  // Undo the last thing ADDED, box or point. Popping boxes only would strand a
+  // mis-clicked point with no way back except 清除這張.
+  function mpUndo(){
+    while (mpState.log.length) {
+      var a = mpState.log.pop();
+      var arr = a.kind === 'box' ? mpState.frames[a.rel] : mpState.points[a.rel];
+      if (arr && arr.length) { arr.pop(); mpWrite(); return; }
+    }
+    if (mpCur().length) mpCur().pop();        // spec restored from a reload: no log
+    else mpCurPts().pop();
+    mpWrite();
+  }
+  function mpClear(){
+    delete mpState.frames[mpState.rel]; delete mpState.points[mpState.rel]; mpWrite();
+  }
+  function mpClearAll(){ mpState.frames = {}; mpState.points = {}; mpState.log = []; mpWrite(); }
 
   // Opens the review page for whatever folder is in the form right now, rather
   // than requiring a finished job in this session — the outputs live on disk and
@@ -2374,11 +2472,12 @@
   function showTab(which){
     if (!['home', 'run', 'hist'].includes(which)) return;
     var output = document.getElementById('workspace-output');
+    var scroller = document.getElementById('workspace-content');
     var previous = output.dataset.view || 'home';
     // Count explicit navigation even if the same tab is clicked while loading.
     window._workspaceNavigation = (window._workspaceNavigation || 0) + 1;
     window._workspaceScroll = window._workspaceScroll || {};
-    if (previous !== which) window._workspaceScroll[previous] = output.scrollTop;
+    if (previous !== which) window._workspaceScroll[previous] = scroller.scrollTop;
     ['home', 'run', 'hist'].forEach(function(view){
       document.getElementById('tab-' + view).style.display = view === which ? '' : 'none';
     });
@@ -2389,15 +2488,24 @@
       b.setAttribute('aria-selected', String(active));
       b.tabIndex = active ? 0 : -1;
     });
-    if (previous !== which) output.scrollTop = which === 'home' ? 0 : (window._workspaceScroll[which] || 0);
+    if (previous !== which) scroller.scrollTop = which === 'home' ? 0 : (window._workspaceScroll[which] || 0);
     if (which === 'home' && window.matchMedia('(max-width:760px)').matches) output.scrollIntoView({block:'start'});
     if (window.syncWorkspaceLocation) window.syncWorkspaceLocation();
     document.dispatchEvent(new CustomEvent('rs:viewchange', {detail:{which:which}}));
   }
   function toggleBlurMode(v){
-    document.getElementById('blur-pct').style.display = v==='percentile' ? '' : 'none';
-    document.getElementById('blur-thr').style.display = v==='threshold'  ? '' : 'none';
+    var usePercent = v === 'hybrid' || v === 'percentile';
+    var useThreshold = v === 'hybrid' || v === 'threshold';
+    document.getElementById('blur-pct').style.display = usePercent ? '' : 'none';
+    document.getElementById('blur-thr').style.display = useThreshold ? '' : 'none';
+    document.getElementById('frames-keep').disabled = !usePercent;
+    document.getElementById('frames-threshold').disabled = !useThreshold;
+    document.getElementById('frames-mode-help').textContent = v === 'hybrid'
+      ? '先排除超過模糊門檻的影格，再限制保留比例；不會為了湊張數留下不合格影格。'
+      : v === 'threshold' ? '保留所有低於模糊分數上限的影格，不額外按比例刪除。'
+      : '只在同一影片內排序；若整段影片都模糊，仍可能保留模糊影格。';
   }
+  toggleBlurMode(document.getElementById('frames-mode').value);
   function openPicker(target, root){
     window._pickerMode = 'dir';                        // single-folder mode (no multi-select)
     var t1 = document.getElementById('gcs-tray'); if (t1) t1.style.display = 'none';

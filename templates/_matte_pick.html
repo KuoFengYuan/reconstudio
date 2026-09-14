@@ -7,6 +7,8 @@
   <div class="mp-head">
     <div>
       <div class="mp-title">⬚ 匡選要保留的物體</div>
+      <div class="hint" style="margin:3px 0 0"><b>拖曳</b> = 畫框 · <b>點一下</b> =
+        ＋這裡也是主體 · <b>Shift+點</b> = －這裡不是 · 點標記可刪除</div>
       <div class="hint" style="margin:2px 0 0">{{ dir }}</div>
     </div>
     <span class="mp-spacer"></span>
@@ -39,11 +41,13 @@
     <select class="mp-jump" name="i"
             hx-get="/ui/matte_pick?images={{ images|urlencode }}"
             hx-target="#main" hx-swap="innerHTML" hx-include="this">
-      {% for n in names %}
-      <option value="{{ loop.index0 }}" {{ 'selected' if loop.index0 == idx }}>{{ n }}</option>
+      {# `value` is the frame's REAL index, not its position in this list: when the
+         list is sampled they are not the same, and jumping would land elsewhere. #}
+      {% for n, name in names %}
+      <option value="{{ n }}" data-rel="{{ name }}" {{ 'selected' if n == idx }}>{{ n + 1 }} · {{ name }}</option>
       {% endfor %}
-      {% if total > names|length %}
-      <option disabled>… 只列出前 {{ names|length }} 張,其餘請用 ◀ ▶</option>
+      {% if not complete %}
+      <option disabled>… 這個資料夾太大,只均勻列出 {{ names|length }} / {{ total }} 張;跳過去再用 ◀ ▶ 微調</option>
       {% endif %}
     </select>
   </div>
@@ -55,5 +59,9 @@
   <div class="hint">畫好之後回到左邊按「▶ 開始去背」。座標是<b>相對比例</b>存的,
     所以資料夾裡就算混著不同解析度的照片也對得上。<b>追蹤模式建議在序列的頭、中、尾各匡一次</b>
     (同一個物體用同一個號碼),中間的影格會被兩側的錨點一起修正。</div>
+  <div class="hint"><b>框漏掉一整塊時補點,不要一直改框</b> —— 框給的是「範圍」,
+    點給的是「這裡也算主體」。實測同一張:只點 53 點 → 面積 0.30 但邊緣很雜;
+    <b>一個框 + 6 點 → 0.31 且乾淨</b>。點會歸給<b>包含它的框</b>(在框外就歸最近的那個),
+    所以多個物體時,點在誰身上就是在修誰。</div>
 </div>
 <script>mpInit({{ rel|tojson }});</script>

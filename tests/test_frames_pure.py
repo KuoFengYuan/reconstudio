@@ -76,10 +76,8 @@ def test_blur_re_findall_collects_every_score():
     assert _BLUR_RE.findall(log) == ["1.0", "22.75", "0.50"]
 
 
-def test_blur_re_requires_decimal_point():
-    # An integer-only "blur: 100" has no decimal point and must NOT match,
-    # mirroring the regex [0-9]+\.[0-9]+.
-    assert _BLUR_RE.search("blur: 100") is None
+def test_blur_re_keeps_invalid_and_integer_tokens_in_sequence():
+    assert _BLUR_RE.findall("blur: 100\nblur: -nan\nblur: inf\nblur: 2e1") == ["100", "-nan", "inf", "2e1"]
 
 
 def test_blur_re_does_not_match_unrelated_line():

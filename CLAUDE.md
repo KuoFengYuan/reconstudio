@@ -158,6 +158,26 @@ The differences:
 Three failure modes in this stage are silent — they produce a valid PNG that is
 simply wrong — so each has a guard and a test rather than a comment:
 
+**A box and a click are different kinds of information, and both reach the
+decoder per object.** The picker places `[x, y, label]` triples next to its
+boxes; `matte_encode.group_points_by_box` routes each click to the box that
+contains it (nearest one otherwise, smallest when nested) and returns one
+`(box, points, labels)` per object, so the index doubles as SAM 2's `obj_id`.
+Both consumers go through it — the single-image prompt and `run_track`'s video
+seeding — precisely so the UI's idea of "this click belongs to that box" cannot
+drift from the pipeline's. Two silent failures live here:
+
+- `masks_for_prompt` takes ONE object (`boxes[0]`), so before the grouping
+  existed, adding a click to a multi-box prompt dropped every box but the first.
+  Measured on the frame it was found with: 21.8% coverage with both boxes,
+  13.6% with the silent drop.
+- `load_boxes_file` normalises through an explicit key whitelist that did not
+  include `points`, so a folder-wide click prompt was discarded at load; the run
+  then looked box-only, took the batched path, and finished "done" having shown
+  SAM no clicks at all (31.5% vs 21.6% on that same frame). `points` belongs in
+  that whitelist AND in the shape probe above it, or a click-only file is
+  mistaken for a bare `{rel: boxes}` map.
+
 - **Edge colour.** A feathered alpha leaves the *background's* RGB under the
   semi-transparent band, which composites as the dark fringe people blame on the
   segmentation. `compose_rgba` bleeds foreground colour outward first, and runs

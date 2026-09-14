@@ -74,7 +74,7 @@ def test_route_uses_lightweight_summaries_and_escapes_search_and_paths(monkeypat
     assert "找到 1 筆任務" in html
     assert '<script>alert(' not in html
     assert "&lt;script&gt;" in html
-    assert "依工作類別尋找" in html and "照片重建" in html
+    assert "依工作類型尋找" in html and "照片重建" in html
     assert 'aria-pressed="true"' in html
 
 

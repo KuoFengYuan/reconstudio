@@ -23,6 +23,7 @@ from pipeline import (
     resolve_dataset,
     resolve_matte_dataset,
 )
+from pipeline.frames import validate_frame_options
 from pipeline.matte import OUTPUT_ROOT, resize_target, sibling_frames
 from web.services.forms import (
     build_blocksplit_params,
@@ -158,28 +159,17 @@ async def create_frames(request: Request):
     inp = (form.get("input") or "").strip().rstrip("/")
     out = (form.get("out_dir") or "").strip().rstrip("/")
     fps = (form.get("fps") or "1").strip()
-    mode = form.get("mode") or "percentile"
-    keep = (form.get("keep_pct") or "70").strip()
-    thr = (form.get("threshold") or "").strip()
+    mode = form.get("mode") or "hybrid"
     try:
         if not (Path(inp).is_dir() or Path(inp).is_file()):
             raise ValueError(f"input not found: {inp!r}")
         if not out:
             raise ValueError("output dir is required")
-        try:
-            float(fps)
-        except ValueError:
-            raise ValueError("fps must be a number") from None
-        params = {"inputs": [inp], "out_dir": out, "fps": fps,
+        options = validate_frame_options({"fps": fps, "mode": mode,
+                                          "keep_pct": form.get("keep_pct"),
+                                          "threshold": form.get("threshold")})
+        params = {"inputs": [inp], "out_dir": out, **options,
                   "flatten": True, "ffmpeg_bin": FFMPEG_BIN}
-        if mode == "threshold":
-            if not thr:
-                raise ValueError("threshold mode needs a value")
-            params["threshold"] = thr
-        else:
-            if not keep.isdigit():
-                raise ValueError("keep_percent must be an integer")
-            params["keep_pct"] = keep
     except ValueError as exc:
         return _page(request, "_error.html", message=str(exc))
 
@@ -260,8 +250,19 @@ async def create_matte(request: Request):
                 drawn = json.loads(boxes_json)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"匡選資料不是合法的 JSON: {exc}") from exc
-            if not (drawn.get("boxes") if isinstance(drawn, dict) else drawn):
-                raise ValueError("匡選資料裡沒有任何框")
+            # A points-only prompt is legitimate — SAM segments from clicks
+            # alone — so this asks for "any prompt", not "any box". `exemplar`
+            # is the exception: SAM 3 matches a box against the rest of the
+            # image, and a click carries no shape to match with.
+            drawn = drawn if isinstance(drawn, dict) else {"boxes": drawn}
+            has_box = bool(drawn.get("boxes"))
+            has_point = bool(drawn.get("points")) or any(
+                isinstance(v, dict) and v.get("points")
+                for v in (drawn.get("per_image") or {}).values())
+            if boxes == "exemplar" and not has_box:
+                raise ValueError("範例提示需要一個框當範例,點提示不夠")
+            if not (has_box or has_point):
+                raise ValueError("匡選資料裡沒有任何框或提示點")
         params = {
             "images": images, "boxes": boxes, "boxes_json": boxes_json,
             "matte_engine": (form.get("matte_engine") or "sam2").strip(),
