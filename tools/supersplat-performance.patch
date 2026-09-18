@@ -385,3 +385,78 @@ diff --git a/rollup.config.mjs b/rollup.config.mjs
                      }
                  },
                  { src: 'src/manifest.json' },
+diff --git a/src/box-shape.ts b/src/box-shape.ts
+--- a/src/box-shape.ts
++++ b/src/box-shape.ts
+@@ -86,7 +86,10 @@ class BoxShape extends Element {
+         this.material.setParameter('boxLen', [this._lenX * 0.5, this._lenY * 0.5, this._lenZ  * 0.5]);
+ 
+         const device = this.scene.graphicsDevice;
+-        device.scope.resolve('targetSize').setValue([device.width, device.height]);
++        // the shader unprojects gl_FragCoord, which spans the render target and
++        // not the backbuffer - the two differ when rendering below full res
++        const { width, height } = this.scene.targetSize;
++        device.scope.resolve('targetSize').setValue([width, height]);
+     }
+ 
+     moved() {
+diff --git a/src/camera.ts b/src/camera.ts
+--- a/src/camera.ts
++++ b/src/camera.ts
+@@ -334,8 +334,10 @@ class Camera extends Element {
+         this.finalPass = new SimpleRenderPass(device,
+             new ShaderQuad(device, vertexShader, fragmentShader, 'final-blit'), {
+                 vars: () => {
++                    const { mainTarget } = this;
+                     return {
+-                        srcTexture: this.mainTarget.colorBuffer
++                        srcTexture: mainTarget.colorBuffer,
++                        blitScale: [mainTarget.width / device.width, mainTarget.height / device.height]
+                     };
+                 }
+             });
+diff --git a/src/shaders/blit-shader.ts b/src/shaders/blit-shader.ts
+--- a/src/shaders/blit-shader.ts
++++ b/src/shaders/blit-shader.ts
+@@ -7,8 +7,12 @@ const vertexShader = /* glsl*/ `
+ 
+ const fragmentShader = /* glsl*/ `
+     uniform sampler2D srcTexture;
++    uniform vec2 blitScale;
+     void main(void) {
+-        ivec2 texel = ivec2(gl_FragCoord.xy);
++        // map destination pixel -> source texel so a render target smaller than
++        // the destination upscales to fill it, instead of being copied 1:1 into
++        // its bottom-left corner. blitScale = srcSize / dstSize, so 1 at full res.
++        ivec2 texel = ivec2(gl_FragCoord.xy * blitScale);
+         gl_FragColor = texelFetch(srcTexture, texel, 0);
+     }
+ `;
+diff --git a/src/sphere-shape.ts b/src/sphere-shape.ts
+--- a/src/sphere-shape.ts
++++ b/src/sphere-shape.ts
+@@ -77,7 +77,10 @@ class SphereShape extends Element {
+         this.material.setParameter('sphere', [v.x, v.y, v.z, this.radius]);
+ 
+         const device = this.scene.graphicsDevice;
+-        device.scope.resolve('targetSize').setValue([device.width, device.height]);
++        // the shader unprojects gl_FragCoord, which spans the render target and
++        // not the backbuffer - the two differ when rendering below full res
++        const { width, height } = this.scene.targetSize;
++        device.scope.resolve('targetSize').setValue([width, height]);
+     }
+ 
+     moved() {
+diff --git a/src/underlay.ts b/src/underlay.ts
+--- a/src/underlay.ts
++++ b/src/underlay.ts
+@@ -44,7 +44,8 @@ class Underlay extends Element {
+             }
+ 
+             this.renderPass.execute({
+-                srcTexture: camera.workTarget.colorBuffer
++                srcTexture: camera.workTarget.colorBuffer,
++                blitScale: [1, 1]
+             });
+         });
+     }
