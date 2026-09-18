@@ -87,7 +87,7 @@
     url.searchParams.set('filename',filename);
     url.searchParams.set('rsQuality',document.getElementById('ss-quality').value);
     // Version the entry URL too: older installed service workers must not mask a patched bundle.
-    url.searchParams.set('rsBuild','worker-v1');
+    url.searchParams.set('rsBuild','blit-v2');
     const details=metadata ? (metadata.size/1048576).toFixed(1)+' MB'+(metadata.count?' · '+metadata.count.toLocaleString()+' splats':'') : filename;
     status(details+' · 正在啟動編輯器…');
     const hint=document.createElement('p');hint.className='hint';
