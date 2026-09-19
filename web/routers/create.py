@@ -29,6 +29,7 @@ from web.services.forms import (
     build_blocksplit_params,
     build_colmap_params,
     parse_marker,
+    parse_texture,
     scene_label,
 )
 from web.services.models import inspect_workspace, prepare_edited_model
@@ -590,15 +591,19 @@ async def create_mesh(request: Request):
         marker = parse_marker(form, spec)   # optional ChArUco scaling -> mm mesh
         if marker:
             params["marker"] = marker
+        texture = parse_texture(form, spec)  # optional texrecon photo texture -> OBJ
+        if texture:
+            params["texture"] = texture
     except ValueError as exc:
         return _page(request, "_error.html", message=str(exc))
 
-    meta = {"model_path": model, "backend": backend, "marker": bool(marker)}
+    meta = {"model_path": model, "backend": backend, "marker": bool(marker),
+            "texture": bool(texture)}
     if edited_from:
         meta["edited_from"] = edited_from
     job = Job(id=new_id(), kind="mesh",
               title=f"mesh · {scene_label(model)}" + (" · 去背" if edited_from else "")
-                    + (" · scaled" if marker else ""),
+                    + (" · 貼圖" if texture else "") + (" · scaled" if marker else ""),
               subtitle=f"{model}  (gpu={gpu or 'default'})",
               params=params, mirror=str(Path(model) / "mesh.log"),
               meta=meta)

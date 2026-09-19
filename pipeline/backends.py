@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from functools import lru_cache
@@ -113,10 +114,20 @@ BUILTIN_BACKENDS: dict[str, dict] = {
             "square_mm": 28.806, "marker_mm": 21.12,
             "dict": "DICT_5X5_100",
         },
+        # --- texture baking (texrecon / mvs-texturing) ---------------------- #
+        # The mesh render.py writes carries per-VERTEX colour only, so its detail is
+        # capped by the triangle count. These two scripts live in the GS-2M repo and
+        # project the real photos onto the mesh instead: bake -> many atlases, merge
+        # -> exactly one. Paths are relative to `repo`; "texrecon" overrides the
+        # binary lookup (see texrecon_bin) on machines that built it elsewhere.
+        "texture_script": "scripts/bake_texture_texrecon.py",
+        "atlas_script": "scripts/merge_atlases.py",
         "mesh_params": [
             {"key": "mesh_only", "flag": "--mesh_only", "type": "bool", "default": True,
              "label": "只抽 mesh（加速）",
-             "hint": "跳過逐視角 PNG（render/normal/depth/PBR）輸出，只做 TSDF 融合抽 mesh，大幅加速。只想要 mesh 時建議開。"},
+             "hint": "跳過 gt / normal / depth / PBR 的逐視角 PNG 輸出，只做 TSDF 融合抽 mesh，大幅加速。"
+                     "注意 render/ 一定會產生（TSDF 的顏色就是從那些圖取樣的，跳過就沒有頂點色），"
+                     "gt/normal/depth 三個資料夾也會被建出來、但裡面是空的。只想要 mesh 時建議開。"},
             {"key": "auto_voxel", "flag": "--auto_voxel", "type": "bool", "default": True,
              "label": "自動體素大小（推薦）",
              "hint": "從高斯點雲密度自動估 voxel_size（作者推薦,跨尺度最穩）。需要 scipy;不可用時自動 fallback 到啟發式。勾選時下方 voxel_size / sdf_trunc 會停用,由程式自行決定。"},
@@ -400,6 +411,42 @@ def repo_path(spec: dict) -> Path:
     return r if r.is_absolute() else (BASE / r).resolve()
 
 
+# Where mvs-texturing's texrecon usually ends up, most specific first. Checked in
+# this order because a backend that ships its own build (GS-2M's third_party/) must
+# win over a stale copy on PATH from another project.
+_TEXRECON_CANDIDATES = (
+    "third_party/mvs-texturing/build/apps/texrecon/texrecon",
+    "build/apps/texrecon/texrecon",
+)
+
+
+def texrecon_bin(spec: dict) -> Path | None:
+    """Resolved `texrecon` executable for a backend that declares texture baking,
+    or None if it isn't built on this machine.
+
+    texrecon is a C++ binary, not a python module, so it can't be found the way the
+    trainer's env is. It is looked up in the backend's own repo first, then via an
+    explicit "texrecon" key in backends.json, then PATH / ~/.local/bin — which is
+    where the README's build step symlinks it.
+    """
+    override = (spec.get("texrecon") or "").strip()
+    if override:
+        exe = Path(override).expanduser()
+        if not exe.is_absolute():
+            exe = (BASE / exe).resolve()
+        return exe if (exe.is_file() and os.access(exe, os.X_OK)) else None
+    repo = repo_path(spec)
+    cands = [repo / rel for rel in _TEXRECON_CANDIDATES]
+    found = shutil.which("texrecon")
+    if found:
+        cands.append(Path(found))
+    cands.append(Path.home() / ".local" / "bin" / "texrecon")
+    for exe in cands:
+        if exe.is_file() and os.access(exe, os.X_OK):
+            return exe.resolve()
+    return None
+
+
 def binary_exec(spec: dict) -> Path | None:
     """Resolved executable for a `launch: "binary"` backend (e.g. LichtFeld Studio),
     or None if missing / not executable. Such backends invoke a compiled binary
@@ -451,6 +498,10 @@ def available_backends() -> list[dict]:
             # supports it only if it declares mesh_args. gsplat & co. won't.
             "mesh": bool(spec.get("mesh_args")),
             "mesh_params": spec.get("mesh_params", []),
+            # texture baking: a backend opts in by declaring texture_script, and it
+            # is only usable once texrecon is actually built (the scripts alone do
+            # nothing). The Mesh form greys the block out when this is False.
+            "texture": bool(spec.get("texture_script")) and bool(texrecon_bin(spec)),
             # marker-board scaling: a backend opts in by declaring a board geometry
             # (marker_defaults). The scripts are panel-owned (tools/) and run in
             # this backend's env. The UI shows a checkbox + the configured spec.
@@ -544,6 +595,16 @@ def _backend_checks(spec: dict, py: Path | None, repo: Path,
                    "" if script_ok else f"找不到 {spec.get('train_script', 'train.py')}",
                    "" if script_ok else 'clone 到面板的兄弟目錄,或在 backends.json 覆蓋 "repo"'),
     ]
+    if spec.get("texture_script"):
+        tex = texrecon_bin(spec)
+        script_path = repo / spec["texture_script"]
+        ok = bool(tex) and script_path.is_file()
+        checks.append(make_check(
+            "texrecon", "貼圖", "ok" if ok else "warn",
+            str(tex) if tex else "找不到 texrecon",
+            "" if ok else ("缺 texrecon 執行檔" if not tex else f"找不到 {script_path}"),
+            "" if ok else "建置 mvs-texturing（見 README 貼圖章節）,"
+                          '或在 backends.json 設 "texrecon" 絕對路徑'))
     if not probe_result:                 # deep=False, or no interpreter to probe
         return checks
 

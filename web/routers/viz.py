@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -85,8 +86,10 @@ async def viz(request: Request, job_id: str, m: str | None = None):
 
 @router.get("/viz/mesh/{job_id}", response_class=HTMLResponse)
 async def mesh_viz(request: Request, job_id: str):
-    """In-browser mesh viewer (orbit/zoom + mm ruler). Lets the user switch
-    between the raw (recon-unit) mesh and the marker-scaled (mm) mesh."""
+    """In-browser mesh viewer (orbit/zoom + mm ruler). Lets the user switch between
+    the raw (recon-unit) mesh, the marker-scaled (mm) mesh, and — when the job baked
+    one — the photo-textured mesh, which is served as .glb because that is the only
+    textured format that survives a single-file URL."""
     job = manager.get(job_id)
     if not job:
         raise HTTPException(404, "no such job")
@@ -95,6 +98,8 @@ async def mesh_viz(request: Request, job_id: str):
     meta = job.meta or {}
     return _page(request, "mesh_viz.html", job=job.to_dict(),
                  has_scaled=bool(meta.get("mesh_scaled_path")),
+                 has_textured=bool(meta.get("texture_glb")),
+                 has_textured_mm=bool(meta.get("texture_glb_mm")),
                  mm_per_unit=meta.get("mm_per_unit"))
 
 
@@ -354,6 +359,75 @@ async def mesh_scaled_ply(job_id: str):
     if not (path and path.is_file()):
         raise HTTPException(404, "scaled mesh not found (未啟用 marker 或縮放失敗)")
     return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+def _mesh_job(job_id: str):
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "no such job")
+    if job.kind != "mesh":
+        raise HTTPException(404, "not a mesh job")
+    return job
+
+
+def _textured_path(job, key: str, glob: str) -> Path:
+    """A textured-mesh artifact of a mesh job: the path the log parser captured,
+    else the same file re-globbed under the model dir (a job.json from before the
+    texture stage existed, or a panel restart mid-run, has no meta key)."""
+    p = (job.meta or {}).get(key)
+    path = Path(p) if p else None
+    if not (path and path.is_file()):
+        model = Path((job.meta or {}).get("model_path", ""))
+        cands = sorted(model.glob(glob)) if str(model) else []
+        path = cands[-1] if cands else None
+    if not (path and path.is_file()):
+        raise HTTPException(404, "textured mesh not found (未啟用貼圖,或貼圖失敗)")
+    return path
+
+
+@router.get("/api/jobs/{job_id}/mesh_textured.glb")
+async def mesh_textured_glb(job_id: str, mm: int = 0):
+    """Serve the textured mesh as a single .glb — geometry + UVs + atlas in one
+    file, which is what makes it viewable through a one-file endpoint at all
+    (an .obj would arrive without its .mtl and render untextured). `mm=1` asks for
+    the marker-scaled copy."""
+    job = _mesh_job(job_id)
+    key, glob = ("texture_glb_mm", "*/*/mesh/textured/mm/*.glb") if mm else \
+                ("texture_glb", "*/*/mesh/textured/*.glb")
+    path = _textured_path(job, key, glob)
+    return FileResponse(path, media_type="model/gltf-binary", filename=path.name)
+
+
+@router.get("/api/jobs/{job_id}/mesh_textured.zip")
+async def mesh_textured_zip(job_id: str, mm: int = 0):
+    """Download the textured mesh as OBJ + MTL + atlas in one archive.
+
+    A zip, not the bare .obj: the three files reference each other by relative
+    path, and an .obj downloaded alone is a mesh with no texture — the exact
+    failure this whole stage exists to avoid."""
+    job = _mesh_job(job_id)
+    key, glob = ("texture_obj_mm", "*/*/mesh/textured/mm/*.obj") if mm else \
+                ("texture_obj", "*/*/mesh/textured/*.obj")
+    obj = _textured_path(job, key, glob)
+
+    def _build() -> Path:
+        import zipfile
+        stem = f"{obj.parent.parent.name}_{obj.stem}" + ("_mm" if mm else "")
+        zpath = Path(tempfile.gettempdir()) / f"reconstudio_{job_id}_{stem}.zip"
+        newest = max(f.stat().st_mtime for f in obj.parent.rglob("*") if f.is_file())
+        if zpath.is_file() and zpath.stat().st_mtime >= newest:
+            return zpath                          # cached; atlases are tens of MB
+        tmp = zpath.with_suffix(".zip.part")
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as z:
+            for f in sorted(obj.parent.rglob("*")):
+                if f.is_file():
+                    z.write(f, f.relative_to(obj.parent))
+        tmp.replace(zpath)
+        return zpath
+
+    zpath = await asyncio.to_thread(_build)
+    return FileResponse(zpath, media_type="application/zip",
+                        filename=f"{obj.stem}{'_mm' if mm else ''}_textured.zip")
 
 
 @router.get("/api/jobs/{job_id}/model.ply")

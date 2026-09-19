@@ -3,7 +3,7 @@
 把**影片或照片變成 3D 模型**的本機網頁面板,一條龍跑完:
 
 ```
-影片 ──抽幀──► 清晰照片 ──COLMAP──► 相機位姿+點雲 ──訓練──► 3DGS 模型 ──Mesh──► 三角網格(.ply)
+影片 ──抽幀──► 清晰照片 ──COLMAP──► 相機位姿+點雲 ──訓練──► 3DGS 模型 ──Mesh──► 三角網格(.ply / 貼圖 OBJ)
 ```
 
 打開瀏覽器就能操作:每一步都有表單、即時 log、可取消、跑完有「接著跑下一步」按鈕自動帶路徑。
@@ -163,6 +163,17 @@ pip install -r requirements.txt          # 編 CUDA submodule(依顯卡,要跑�
 ```
 
 > 要量**實際尺寸 (mm)** 再補:`conda run -n gs2m pip install opencv-contrib-python plyfile`
+
+> 要 **照片貼圖**(Mesh 表單的 🎨,見下面 Mesh 章節)再補 GS-2M 內附的 mvs-texturing:
+> ```bash
+> cd ../GS-2M && git submodule update --init --recursive third_party/mvs-texturing
+> cmake -B third_party/mvs-texturing/build -S third_party/mvs-texturing -DCMAKE_BUILD_TYPE=Release
+> cmake --build third_party/mvs-texturing/build -j                 # 產出 apps/texrecon/texrecon
+> ```
+> 面板會自己在 `<repo>/third_party/mvs-texturing/build/apps/texrecon/texrecon`、PATH、
+> `~/.local/bin` 依序找;裝在別處就在 `backends.json` 設 `"texrecon": "/絕對/路徑"`。
+> `./run.sh --doctor` 的 gs2m 底下會多一列「貼圖 (texrecon)」,綠了才會在表單裡開放。
+> 轉單檔 `.glb` 另外需要 `conda run -n gs2m pip install trimesh`(多數 GS-2M env 已經有)。
 
 > **新顯卡(Blackwell 等)注意**:GS-2M 的 `environment.yml` 釘的 torch 版本可能沒有
 > 你這張卡的 CUDA arch。裝完先確認 `./run.sh --doctor` 的 gs2m 那項 torch/CUDA 是綠的
@@ -473,7 +484,7 @@ service:`infra/systemd/reconstudio.service`(檔頭有指令)。
 | 功能 | 抽幀 | 影片抽成清晰照片(去模糊) | 影片資料夾 → 每支影片一夾 .jpg |
 | 功能 | COLMAP | 照片算相機位姿 + 稀疏點雲 | 照片 → workspace(sparse + 去畸變 dense) |
 | 功能 | 訓練 | 3DGS 訓練(可開深度監督) | COLMAP workspace → 3DGS 模型 |
-| 功能 | Mesh | 模型抽三角網格,可量實際尺寸 | 3DGS 模型 → `tsdf_post.ply`(+mm 版) |
+| 功能 | Mesh | 模型抽三角網格,可貼圖、可量實際尺寸 | 3DGS 模型 → `tsdf_post.ply`(+貼圖 OBJ/GLB、+mm 版) |
 | 工具 | 🌊 深度 | 為照片產生深度/法向量圖(LichtFeld preprocess) | 影像夾 → `depth/`、`normals/`(同名同尺寸) |
 | 工具 | ✂️ 影像去背 | 匡選要保留的物體,整夾去背(可即時檢視 / 單張修圖) | 影像夾 → `no_bg/cutout/`(RGBA)、`no_bg/masks/` |
 | 工具 | 🧱 分塊 | 大場景切成可獨立訓練的子塊 | COLMAP workspace → 每塊一夾 |
@@ -878,13 +889,67 @@ LichtFeld 則直接下載乾淨點雲。
 (拍攝時放 ChArUco 板,板規格已寫在 `backends.json`,免手填)。完成後可下載原始版和 mm 版,
 或 **🧊 檢視 Mesh**。
 
+### 🎨 照片貼圖(預設開啟)
+
+TSDF 只給**頂點色**:一個顏色對一個頂點,所以顏色的精細度等於面數——面不夠多時,
+再清楚的照片也會糊掉。勾「照片貼圖」後會多跑一段 `texrecon`(mvs-texturing),
+把**原始去畸變影像**投影回 mesh,產生真正的貼圖:
+
+```
+<model>/train/ours_<iter>/mesh/
+├── tsdf_post.ply                 原本的頂點色 mesh(照舊,不會被動到)
+└── textured/
+    ├── raw/mesh.obj              texrecon 原始輸出(可能幾十張貼圖)
+    ├── mesh.obj / mesh.mtl       合併後:一個材質、一張貼圖
+    ├── texture/mesh_atlas.jpg
+    ├── mesh.glb                  單檔版(檢視器/下載用)
+    └── mm/                       有 marker 時:同一份的實際尺寸 (mm) 版本
+```
+
+- **合併成一張**是無損重排:每張貼圖整數像素貼進大圖、UV 同步改寫,不重新取樣,
+  面與 `vt` 索引都不變(JPG 95,填 0 改存 PNG)。
+- **貼圖尺寸是自動決定的**,不問使用者:要貼完才知道 texrecon 總共產出多少貼圖面積。
+  規則是「放得下的最小正方形」(2048 / 4096 / 8192 / 16384),放不下才降解析度。
+  上限 16384 是硬體限制不是偏好 —— 原本固定寬度往下長,一個 800k 面的物件就長出
+  8192×44800 的貼圖:顯卡(上限多半 16384/邊)不能綁定,Pillow 也會當成 decompression
+  bomb 直接拒讀,而 **trimesh 會把那個拒讀吞掉**,於是 `.glb` 靜靜地變成沒有貼圖的白模型。
+  真的要全解析度就取消「合併成單張貼圖」,保留 texrecon 原本的多張。
+- **順序是先貼圖、後縮放**,不能反過來:texrecon 要求 mesh 與相機在**同一個座標系**,
+  對已縮放/加底板的 mesh 貼圖會「成功」但幾乎每個面都判定沒被看到,整片變成補洞內插。
+  縮放對 UV 和貼圖沒有影響,所以貼完再縮放是精確的。
+- **物件去背的場景建議填「前景遮罩資料夾」**(去背輸出的 `no_bg/masks`):先把背景塗黑,
+  texrecon 的離群值剔除才會把拍到背景的視角從那些面剔掉,否則邊緣會沾到背景色。
+- 下載一律是 **zip**(OBJ + MTL + 貼圖三個檔互相引用,單抓 `.obj` 會是沒有貼圖的 mesh),
+  另外給一個 `.glb` 單檔;面板檢視器的「貼圖」版本讀的就是這個 `.glb`。
+- 貼圖失敗不會讓整個 job 失敗——`tsdf_post.ply` 仍然是有效輸出,log 會標出原因。
+
+**記憶體(這一步最容易把機器打爆)**:`texrecon` 會用 OpenMP 開滿所有核心去畸變 / 評分每個
+視角,每個 worker 手上都有一張解碼後的照片加一張同尺寸的浮點梯度圖——72 核配 24 MP 照片就是
+二十幾 GB 的瞬間尖峰,被 OOM killer 砍掉時通常連面板一起帶走。所以面板會先**估算再決定**:
+
+1. 量影像張數、最大尺寸與 `MemAvailable`,**先砍執行緒數**(log 會印 `執行緒 n/總核數`);
+2. 連幾個執行緒都放不下時,**才**自動縮圖(最長邊,底線 1600px),並在 log 寫明縮到多少
+   ——原尺寸是這條流程的重點,縮圖是最後手段,不是預設;
+3. 合併貼圖時估算畫布大小,太大就先降倍率,不會在最後一步才 OOM;
+4. 轉 `.glb` 前估 OBJ 的記憶體需求,放不下就跳過(OBJ + 貼圖仍然完整)。
+
+表單的「影像最長邊上限 / 執行緒」留空就是上面的自動流程;真的很緊再手動壓。
+面數到千萬級還是爆的話,勾「省記憶體模式」跳過全域接縫平滑(最大的單一配置)。
+影像縮放不需要改內參——mvs-texturing 讀 NVM 時是用**實際載入的影像**最長邊去正規化焦距
+(`generate_texture_views.cpp:196`),等比例縮放剛好抵銷。
+
+貼圖讀的影像會先 stage 到 `textured/scene/`(原尺寸時只是 symlink),跑完就刪:
+`model.nvm` 因此寫在暫存區而不是你的資料集影像資料夾,同一個場景也可以同時跑兩個貼圖 job。
+
 ## 檢視器
 
 - **🧊 3D 結果**(COLMAP 後):拖曳旋轉 · 滾輪縮放 · 右鍵平移 · WASD 飛行;雙擊相機看該張
   影像與品質分數。可**框選壞相機移除**、**框選 / 筆刷刪雜點**(先標紅預覽再確認)——都是
   非破壞性,寫到 `cleaned/<時間>/` 新資料夾,可直接拿去重新訓練。
-- **🧊 Mesh 檢視**(Mesh job 後):實體打光、mm / recon 切換、**📏 量尺**點兩點量距離、
-  線框 / 頂點色 / 白底。
+- **🧊 Mesh 檢視**(Mesh job 後):**不打光**顯示(貼圖與頂點色本身就含有拍攝時的光線,
+  再打一次光只會讓它變暗變糊)、**貼圖開關**(關掉會用法線著色顯示網格本身,看得到凹凸)、
+  線框 / 白底、**📏 量尺**點兩點量距離。有貼圖時就只顯示貼圖版本(幾何是同一份),
+  有 marker 縮放時可切 mm / 原始比例。
 - **👁 Mesh Viewer(工具)**:不綁 job,看任何 mesh 檔。填 server 路徑(「瀏覽」逐層挑檔),
   或**留空直接開**,進去選這台電腦的檔案 / 直接拖放(瀏覽器內解析,不上傳)。
   格式不符或檔案壞掉會直接顯示原因。

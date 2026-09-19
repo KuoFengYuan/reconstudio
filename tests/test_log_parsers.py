@@ -301,6 +301,60 @@ def test_mesh_full_sequence():
     assert job.current_stage == "done"
 
 
+def test_texture_paths_land_in_meta():
+    job = _job("mesh")
+    _feed(_parse_mesh, job, [
+        "[texture] obj: /out/textured/mesh.obj",
+        "[texture] atlas: /out/textured/texture/mesh_atlas.jpg  (7.2 MB)",
+        "[texture] glb: /out/textured/mesh.glb",
+    ])
+    assert job.meta["texture_obj"] == "/out/textured/mesh.obj"
+    assert job.meta["texture_glb"] == "/out/textured/mesh.glb"
+    assert job.meta["texture_atlas"] == ["/out/textured/texture/mesh_atlas.jpg"]
+
+
+def test_texture_scaled_paths_do_not_overwrite_the_unscaled_ones():
+    # "[texture] scaled obj:" must not also match "[texture] obj:" — the viewer
+    # offers both versions and would otherwise show the mm one under 「貼圖」.
+    job = _job("mesh")
+    _feed(_parse_mesh, job, [
+        "[texture] obj: /out/textured/mesh.obj",
+        "[texture] glb: /out/textured/mesh.glb",
+        "[texture] scaled obj: /out/textured/mm/mesh.obj",
+        "[texture] scaled glb: /out/textured/mm/mesh.glb",
+    ])
+    assert job.meta["texture_obj"] == "/out/textured/mesh.obj"
+    assert job.meta["texture_glb"] == "/out/textured/mesh.glb"
+    assert job.meta["texture_obj_mm"] == "/out/textured/mm/mesh.obj"
+    assert job.meta["texture_glb_mm"] == "/out/textured/mm/mesh.glb"
+
+
+def test_texture_atlas_lines_accumulate():
+    job = _job("mesh")
+    _feed(_parse_mesh, job, ["[texture] atlas: /a.png", "[texture] atlas: /b.png"])
+    assert job.meta["texture_atlas"] == ["/a.png", "/b.png"]
+
+
+def test_texrecon_steps_drive_the_phase_chip():
+    job = _job("mesh")
+    _parse_mesh(job, "Building adjacency graph: ")
+    assert job.meta["phase"] == "貼圖:建立鄰接圖"
+    _parse_mesh(job, "Building objmodel:")
+    assert job.meta["phase"] == "貼圖:輸出模型"
+
+
+def test_mesh_done_banner_marks_done_after_texturing():
+    # [mesh] result: fires BEFORE the texture stage now, so the job must not be
+    # left at whatever stage texturing set — the closing banner re-marks it.
+    job = _job("mesh")
+    _feed(_parse_mesh, job, [
+        "[mesh] result: /out/raw.ply",
+        "Building adjacency graph: ",
+        "=== [12:34:56] mesh done. model=/out ===",
+    ])
+    assert job.current_stage == "done"
+
+
 # --------------------------------------------------------------------------- #
 # _parse_gcs
 # --------------------------------------------------------------------------- #

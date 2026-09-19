@@ -120,3 +120,100 @@ def test_trained_output_accepts_an_exported_sog(tmp_path):
     assert _trained_output(tmp_path) is None
     (tmp_path / "proj.sog").write_bytes(b"splat")
     assert _trained_output(tmp_path) == tmp_path / "proj.sog"
+
+
+# --- texture bake: staying inside the machine's memory ---------------------- #
+# The bake is the one stage that can take the whole box down (OpenMP over every
+# core, each worker holding a decoded photo), so the plan it computes is pinned
+# here rather than trusted to a comment.
+
+def test_texture_plan_uses_every_core_when_memory_is_plentiful():
+    from pipeline.train import _texture_plan
+    threads, side = _texture_plan(px=3_000_000, cores=72, budget=400 * 10**9)
+    assert threads == 72
+    assert side is None          # native resolution — the point of the pipeline
+
+
+def test_texture_plan_caps_threads_before_touching_resolution():
+    from pipeline.train import _texture_plan
+    # 24 MP photos, 8 GB budget: ~28 workers fit, so shrink the pool, not the photos.
+    threads, side = _texture_plan(px=24_000_000, cores=72, budget=8 * 10**9)
+    assert 1 < threads < 72
+    assert side is None
+
+
+def test_texture_plan_downscales_only_when_even_a_few_workers_dont_fit():
+    from pipeline.train import _TEX_MIN_SIDE, _TEX_MIN_THREADS, _texture_plan
+    threads, side = _texture_plan(px=100_000_000, cores=72, budget=2 * 10**9)
+    assert threads == _TEX_MIN_THREADS
+    assert side is not None and side >= _TEX_MIN_SIDE
+
+
+def test_texture_plan_never_shrinks_below_the_floor():
+    from pipeline.train import _TEX_MIN_SIDE, _texture_plan
+    _, side = _texture_plan(px=100_000_000, cores=8, budget=10 * 10**6)
+    assert side == _TEX_MIN_SIDE
+
+
+def test_texture_plan_survives_an_unreadable_meminfo():
+    from pipeline.train import _texture_plan
+    # budget 0 = we could not measure; fall back to a bounded pool, no downscale.
+    threads, side = _texture_plan(px=0, cores=72, budget=0)
+    assert (threads, side) == (16, None)
+
+
+def _atlases(tmp_path, n, side):
+    # Pillow is an optional runtime dep (see pyproject) — CI installs it via the
+    # dev extra so these actually run, but the suite still has to pass without it.
+    Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
+    files = []
+    for i in range(n):
+        f = tmp_path / f"a{i}_{side}.png"
+        if not f.exists():
+            Image.new("RGB", (side, side)).save(f)
+        files.append(f)
+    return files
+
+
+# --- _atlas_plan: the merged atlas size is decided, not asked ---------------- #
+
+def test_atlas_plan_picks_the_smallest_square_that_fits(tmp_path):
+    from pipeline.train import _atlas_plan
+    # 3 × 1024² = 3.1 Mpx (+ packing slack): a 2048² canvas holds it, and a 16384
+    # one would be 99% black.
+    assert _atlas_plan(_atlases(tmp_path, 3, 1024), budget=512 * 10**9) == (2048, 1)
+    # 8 × 2048² = 34 Mpx -> needs 8192² (4096² is 17 Mpx, too small).
+    assert _atlas_plan(_atlases(tmp_path, 8, 2048), budget=512 * 10**9) == (8192, 1)
+
+
+def test_atlas_plan_never_goes_past_the_hardware_limit(tmp_path):
+    from pipeline.train import _atlas_plan
+    # 24 × 4096² = 402 Mpx. 16384² is the ceiling, so the content shrinks instead —
+    # the alternative (a canvas that grows past 16384) can't be bound as a texture.
+    px, down = _atlas_plan(_atlases(tmp_path, 24, 4096), budget=512 * 10**9)
+    assert px == 16384
+    assert down == 2
+
+
+def test_atlas_plan_respects_a_memory_budget(tmp_path):
+    from pipeline.train import _atlas_plan
+    # A 16384² RGB canvas needs ~4.8 GB with the sources and the encoder; under a
+    # 200 MB budget only the small canvases are affordable.
+    px, down = _atlas_plan(_atlases(tmp_path, 24, 4096), budget=200 * 10**6)
+    assert px <= 4096
+    assert down > 1
+
+
+def test_atlas_plan_honours_an_explicit_size(tmp_path):
+    from pipeline.train import _atlas_plan
+    # A caller that pins the size gets it, with the shrink recomputed to fit.
+    assert _atlas_plan(_atlases(tmp_path, 3, 1024), budget=512 * 10**9, user_px=8192) == (8192, 1)
+    px, down = _atlas_plan(_atlases(tmp_path, 24, 4096), budget=512 * 10**9, user_px=4096)
+    assert (px, down) == (4096, 8)
+
+
+def test_atlas_plan_survives_unreadable_atlases(tmp_path):
+    from pipeline.train import _atlas_plan
+    missing = [tmp_path / "gone.png"]
+    px, down = _atlas_plan(missing, budget=512 * 10**9)
+    assert down == 1 and px in (2048, 4096, 8192, 16384)

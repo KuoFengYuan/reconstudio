@@ -194,3 +194,56 @@ def test_log_download_stops_at_snapshot_size_when_file_grows(tmp_path):
     with path.open("ab") as stream:
         stream.write(b"new live output")
     assert first + b"".join(chunks) == b"a" * 70000
+
+
+# --- log pane seed ---------------------------------------------------------- #
+# A running job whose WebSocket can't deliver used to show an empty black box.
+# The pane is now rendered with the log's tail already in it.
+
+def _seed_job(tmp_path, text):
+    import jobs as jobs_mod
+    job = jobs_mod.Job(id="seedtest", kind="mesh", title="t", subtitle="s")
+    job.dir.mkdir(parents=True, exist_ok=True)
+    job.log_path.write_text(text)
+    jobs_mod.manager.jobs[job.id] = job
+    return job
+
+
+def test_job_log_tail_returns_the_end_of_the_log(tmp_path):
+    from web.routers.jobs import job_log_tail
+    job = _seed_job(tmp_path, "one\ntwo\nthree\n")
+    try:
+        assert job_log_tail(job.id).splitlines() == ["one", "two", "three"]
+    finally:
+        import jobs as jobs_mod
+        jobs_mod.manager.jobs.pop(job.id, None)
+
+
+def test_job_log_tail_collapses_progress_bars(tmp_path):
+    from web.routers.jobs import job_log_tail
+    job = _seed_job(tmp_path, "start\n" + "".join(
+        f"[>] Rendering: {i}%|## | {i}/100 [00:01<00:02, 3.6it/s]\n" for i in range(50)) + "done\n")
+    try:
+        got = job_log_tail(job.id).splitlines()
+        # 50 near-identical tqdm refreshes must not eat the 300-line budget.
+        assert got[0] == "start" and got[-1] == "done"
+        assert len(got) == 3
+    finally:
+        import jobs as jobs_mod
+        jobs_mod.manager.jobs.pop(job.id, None)
+
+
+def test_job_log_tail_is_bounded(tmp_path):
+    from web.routers.jobs import job_log_tail
+    job = _seed_job(tmp_path, "".join(f"line {i}\n" for i in range(1000)))
+    try:
+        got = job_log_tail(job.id, max_lines=10).splitlines()
+        assert got == [f"line {i}" for i in range(990, 1000)]
+    finally:
+        import jobs as jobs_mod
+        jobs_mod.manager.jobs.pop(job.id, None)
+
+
+def test_job_log_tail_is_empty_for_an_unknown_job():
+    from web.routers.jobs import job_log_tail
+    assert job_log_tail("nosuchjob") == ""

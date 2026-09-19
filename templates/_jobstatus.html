@@ -56,6 +56,7 @@
       <span class="chip accent">{{ job.meta.get('phase') or job.current_stage or 'render' }}</span>
       {% if job.meta.get('vertices') %}<span class="chip">{{ "{:,}".format(job.meta.vertices) }} 頂點</span>{% endif %}
       {% if job.meta.get('mm_per_unit') %}<span class="chip">尺度 1 unit = {{ '%.3f'|format(job.meta.mm_per_unit) }} mm</span>{% endif %}
+      {% if job.meta.get('texture_atlas') %}<span class="chip ok">貼圖 {{ job.meta.texture_atlas|length }} 張</span>{% endif %}
       <span class="hint">backend: {{ job.meta.get('backend','') }}</span>
     </div>
     {% if job.status == 'done' %}
@@ -65,6 +66,15 @@
       <a class="dl" href="/api/jobs/{{ job.id }}/mesh.ply" download>⬇ 非實際尺寸 mesh</a>
       {% if job.meta.get('mesh_scaled_path') %}
       <a class="dl primary" href="/api/jobs/{{ job.id }}/mesh_scaled.ply" download>⬇ 實際尺寸 mesh (mm)</a>{% endif %}
+      {% if job.meta.get('texture_obj') %}
+      {# OBJ+MTL+貼圖 三個檔互相引用,單獨下載 .obj 會是沒有貼圖的 mesh -> 一律打包成 zip #}
+      <a class="dl" href="/api/jobs/{{ job.id }}/mesh_textured.zip" download>⬇ 貼圖 mesh (OBJ+貼圖 zip)</a>{% endif %}
+      {% if job.meta.get('texture_obj_mm') %}
+      <a class="dl primary" href="/api/jobs/{{ job.id }}/mesh_textured.zip?mm=1" download>⬇ 貼圖 mesh · 實際尺寸 (mm)</a>{% endif %}
+      {% if job.meta.get('texture_glb') %}
+      <a class="dl" href="/api/jobs/{{ job.id }}/mesh_textured.glb" download>⬇ 貼圖 mesh (.glb 單檔)</a>{% endif %}
+      {% if job.meta.get('texture_glb_mm') %}
+      <a class="dl" href="/api/jobs/{{ job.id }}/mesh_textured.glb?mm=1" download>⬇ 貼圖 mesh (.glb · mm)</a>{% endif %}
     </div>
     {% endif %}
 

@@ -282,3 +282,106 @@ def test_prior_std_accepts_auto_and_numbers():
 def test_prior_std_still_rejects_nonsense():
     with pytest.raises(ValueError, match="prior_std_x"):
         _build({"PRIOR_STD_X": "loose"})
+
+
+# --- parse_texture -------------------------------------------------------
+
+def _tex_spec():
+    return {"texture_script": "scripts/bake_texture_texrecon.py"}
+
+
+def _tex(**form):
+    from web.services.forms import parse_texture
+    return parse_texture({"texture_enable": "1", **form}, _tex_spec())
+
+
+def test_parse_texture_off_returns_none():
+    from web.services.forms import parse_texture
+    # None, not {"enable": False} — run_mesh's guard and an old job.json agree.
+    # texture_form marks the post as coming from a current page (see the stale-form
+    # test below); without it an absent checkbox is ambiguous.
+    assert parse_texture({"texture_form": "1"}, _tex_spec()) is None
+    assert parse_texture({"texture_form": "1", "texture_enable": ""}, _tex_spec()) is None
+
+
+def test_parse_texture_requires_a_backend_that_declares_the_script():
+    from web.services.forms import parse_texture
+    with pytest.raises(ValueError, match="texture_script"):
+        parse_texture({"texture_enable": "1"}, {})
+
+
+def test_parse_texture_defaults():
+    got = _tex()
+    assert got["enable"] is True
+    assert (got["data_term"], got["outlier_removal"]) == ("area", "gauss_clamping")
+    # atlas_px 0 = decided by the pipeline from the bake's own output; the form
+    # doesn't ask, because the answer isn't knowable before texturing runs.
+    assert (got["atlas_px"], got["jpg_quality"]) == (0, 95)
+    # Unchecked checkboxes are absent from a POST body, so these read False.
+    assert (got["merge"], got["glb"], got["keep_unseen"]) == (False, False, False)
+
+
+def test_parse_texture_checkboxes():
+    got = _tex(texture_merge="1", texture_glb="1", texture_keep_unseen="1")
+    assert (got["merge"], got["glb"], got["keep_unseen"]) == (True, True, True)
+
+
+def test_parse_texture_rejects_unknown_enums():
+    with pytest.raises(ValueError, match="data_term"):
+        _tex(texture_data_term="sharpness")
+    with pytest.raises(ValueError, match="outlier_removal"):
+        _tex(texture_outlier="median")
+
+
+def test_parse_texture_atlas_size_can_still_be_pinned_by_a_caller():
+    # Not in the form any more, but a script may pin it — and it is still checked.
+    with pytest.raises(ValueError, match="2 的次方"):
+        _tex(texture_atlas_px="5000")
+    assert _tex(texture_atlas_px="4096")["atlas_px"] == 4096
+
+
+def test_parse_texture_rejects_out_of_range_numbers():
+    with pytest.raises(ValueError, match="texture_atlas_px"):
+        _tex(texture_atlas_px="32768")
+    with pytest.raises(ValueError, match="texture_jpg_quality"):
+        _tex(texture_jpg_quality="101")
+    # 0 is meaningful: PNG instead of JPG.
+    assert _tex(texture_jpg_quality="0")["jpg_quality"] == 0
+
+
+def test_parse_texture_rejects_missing_mask_dir():
+    with pytest.raises(ValueError, match="遮罩資料夾"):
+        _tex(texture_mask_dir="/nope/does/not/exist")
+
+
+def test_parse_texture_keep_raw_defaults_off():
+    # The merge-time intermediate doubles the output size, so it is opt-in.
+    assert _tex()["keep_raw"] is False
+    assert _tex(texture_keep_raw="1")["keep_raw"] is True
+
+
+def test_parse_texture_memory_knobs_default_to_auto():
+    # 0 = "let the pipeline measure RAM and decide", not "no threads / 0 px".
+    got = _tex()
+    assert (got["max_image_px"], got["threads"], got["low_memory"]) == (0, 0, False)
+
+
+def test_parse_texture_memory_knobs_are_range_checked():
+    with pytest.raises(ValueError, match="texture_max_image_px"):
+        _tex(texture_max_image_px="10")
+    with pytest.raises(ValueError, match="texture_threads"):
+        _tex(texture_threads="999")
+    got = _tex(texture_max_image_px="4000", texture_threads="8", texture_low_memory="1")
+    assert (got["max_image_px"], got["threads"], got["low_memory"]) == (4000, 8, True)
+
+
+def test_parse_texture_rejects_a_stale_form_instead_of_skipping_silently():
+    from web.services.forms import parse_texture
+    # No texture_enable AND no texture_form, on a backend that can texture: the
+    # page was loaded before this feature existed.
+    with pytest.raises(ValueError, match="重新整理"):
+        parse_texture({"model_path": "/x"}, _tex_spec())
+    # With the marker, an unticked box means exactly that — off, no error.
+    assert parse_texture({"texture_form": "1"}, _tex_spec()) is None
+    # A backend without texture support never sees the check at all.
+    assert parse_texture({"model_path": "/x"}, {}) is None

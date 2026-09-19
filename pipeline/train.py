@@ -16,11 +16,14 @@ is the single most common way this integration goes wrong.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .backends import binary_exec, env_python, get_backend, repo_path
+from .backends import binary_exec, env_python, get_backend, repo_path, texrecon_bin
 from .model import read_cameras
 from .runner import Cancelled, PipelineError, Runner
 
@@ -33,6 +36,7 @@ PANEL_BASE = Path(__file__).resolve().parent.parent
 # in the backend's env (they need cv2/open3d/plyfile, which the trainer env has).
 TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 MARKER_SCRIPT, SCALE_SCRIPT = "estimate_marker_scale.py", "scale_mesh.py"
+GLB_SCRIPT = "obj_to_glb.py"
 
 _MODEL_STEMS = ("cameras", "images", "points3D")
 _PINHOLE = {"PINHOLE", "SIMPLE_PINHOLE"}
@@ -315,7 +319,484 @@ def _scene_from_model(out: Path) -> Path:
     return out.parent / f"{out.name}_scene"
 
 
-def _run_marker_scale(p: dict, r: Runner, py: Path, mesh_ply: Path) -> None:
+# --------------------------------------------------------------------------- #
+# Texture baking (texrecon) — photo texture instead of per-vertex colour
+# --------------------------------------------------------------------------- #
+# TSDF gives one colour per VERTEX, so its resolution is the triangle count: a
+# 1 M-face mesh carries ~1 M colour samples no matter how sharp the photos were.
+# texrecon instead projects the original undistorted images onto the faces and
+# writes real texture atlases, which decouples appearance from tessellation.
+#
+# It emits as many atlases as it needs (a 1.9 M-face mesh from 543 views came out
+# as 21 images), and almost nothing downstream — viewers, slicers, Blender
+# imports — wants 21 materials, so merge_atlases.py repacks them into ONE. That
+# repack is lossless: each source atlas is pasted at an integer pixel offset and
+# every `vt` is rescaled into its sub-rectangle, so no texel is resampled.
+
+# --- keeping the bake inside the machine's memory -------------------------- #
+# texrecon undistorts and scores every view with OpenMP across ALL cores, and each
+# worker holds a decoded image plus a float gradient image of the same size. On a
+# 72-core box with 24 MP photos that is ~20 GB of *transient* peak before a single
+# texture patch exists — the classic way this stage dies is the OOM killer, which
+# takes the panel with it rather than failing the job cleanly.
+#
+# So the panel budgets the run instead of hoping: cap the thread count to what
+# fits, and only if even a few threads don't fit, downscale the images. Downscaling
+# is safe without touching the intrinsics because mvs-texturing normalises the NVM
+# focal by the *loaded image's* longest side (generate_texture_views.cpp:196) —
+# a uniform resize cancels out exactly.
+_TEX_BYTES_PER_PX = 12          # decoded RGB + float gradient + undistort copy
+_TEX_MIN_THREADS = 4            # below this the bake gets painfully slow
+_TEX_MIN_SIDE = 1600            # never downscale past this; it's photo texture
+_TEX_BUDGET = 0.55              # of MemAvailable, leaving room for everything else
+
+
+def _pillow():
+    """The Pillow `Image` module, or None when it isn't installed.
+
+    Pillow is deliberately NOT a runtime dependency of this panel (pyproject keeps
+    the install pure-Python), so every use of it here needs an answer for "it
+    isn't there". Measuring degrades to a safe default; the one path that really
+    needs it — rewriting images before the bake — says so instead of raising an
+    ImportError from three frames down."""
+    try:
+        from PIL import Image
+        return Image
+    except ImportError:
+        return None
+
+
+def _mem_available() -> int:
+    """Bytes of memory the kernel thinks we can take without swapping. MemAvailable,
+    not MemFree: page cache is reclaimable and this box runs with most of RAM in it."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return 0
+
+
+def _texture_plan(px: int, cores: int, budget: int) -> tuple[int, int | None]:
+    """(threads, max_side) for a bake of `px`-pixel images under `budget` bytes.
+
+    max_side is None when the images can be used at native resolution — which is
+    the normal case and the one worth protecting: this pipeline exists to keep
+    full-resolution detail, so shrinking is the last resort, not the default.
+    """
+    if px <= 0 or budget <= 0:
+        return (min(cores, 16), None)
+    per_thread = px * _TEX_BYTES_PER_PX
+    threads = max(1, min(cores, int(budget / per_thread)))
+    if threads >= _TEX_MIN_THREADS:
+        return (threads, None)
+    # Even a handful of workers doesn't fit: shrink the images until they do.
+    fit_px = max(1, int(budget / (_TEX_MIN_THREADS * _TEX_BYTES_PER_PX)))
+    side = max(_TEX_MIN_SIDE, int(fit_px ** 0.5))
+    return (_TEX_MIN_THREADS, side)
+
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+
+
+def _image_pixels(images_dir: Path) -> tuple[int, int, tuple[int, int]]:
+    """(count, pixels of the largest image, its (w, h)). One PIL open per file
+    header — no decoding, so this is cheap even for a few thousand photos.
+
+    Without Pillow the pixel count comes back 0, which _texture_plan reads as
+    "couldn't measure" and answers with a conservative thread count."""
+    Image = _pillow()
+    n, best, size = 0, 0, (0, 0)
+    if Image is None:
+        return (sum(1 for f in images_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in _IMAGE_EXTS), 0, (0, 0))
+    for f in sorted(images_dir.iterdir()):
+        if not f.is_file() or f.suffix.lower() not in _IMAGE_EXTS:
+            continue
+        n += 1
+        try:
+            with Image.open(f) as im:
+                w, h = im.size
+        except Exception:                                        # noqa: BLE001
+            continue
+        if w * h > best:
+            best, size = w * h, (w, h)
+    return n, best, size
+
+
+def _stage_one(src: str, dst: str, mask: str | None, max_side: int | None) -> None:
+    Image = _pillow()
+    if Image is None:
+        raise RuntimeError(
+            "貼圖前要處理影像（套遮罩或縮圖）需要 Pillow,但這個環境沒裝:"
+            " `pip install pillow`,或不要填遮罩資料夾 / 影像上限（原尺寸不需要前處理）。")
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        if mask:
+            with Image.open(mask) as mk:
+                mk = mk.convert("L").point(lambda v: 255 if v > 128 else 0)
+                if mk.size != im.size:
+                    raise ValueError(f"遮罩與影像尺寸不符: {mask} {mk.size} vs {im.size}")
+                # Background to black so texrecon's outlier removal rejects the
+                # views that see backdrop on a face, instead of smearing the fake
+                # background onto the object's silhouette.
+                im = Image.composite(im, Image.new("RGB", im.size, (0, 0, 0)), mk)
+        if max_side and max(im.size) > max_side:
+            f = max_side / max(im.size)
+            im = im.resize((max(1, round(im.width * f)), max(1, round(im.height * f))),
+                           Image.Resampling.LANCZOS)
+        # Keep the original extension: the NVM refers to images by name, and mve
+        # picks its decoder from that extension.
+        if Path(dst).suffix.lower() in (".jpg", ".jpeg"):
+            im.save(dst, quality=95)
+        else:
+            im.save(dst)
+
+
+def _stage_texture_scene(scene: Path, dest: Path, max_side: int | None,
+                         mask_dir: str, r: Runner) -> Path:
+    """Materialize the COLMAP dir the bake reads from: `sparse` symlinked, `images`
+    either symlinked (native resolution, no masks — the common case) or rewritten.
+
+    Staging happens even when nothing is rewritten, because the bake writes its
+    model.nvm *next to the images* — into the user's dataset otherwise, where two
+    texture jobs on one scene would overwrite each other's file mid-run.
+    """
+    src_images = scene / "images"
+    shutil.rmtree(dest, ignore_errors=True)
+    (dest / "images").mkdir(parents=True)
+    sparse = scene / "sparse"
+    (dest / "sparse").symlink_to(sparse.resolve())
+
+    files = [f for f in sorted(src_images.iterdir())
+             if f.is_file() and f.suffix.lower() in _IMAGE_EXTS]
+    if not files:
+        raise FileNotFoundError(f"{src_images} 底下沒有影像。")
+    if not max_side and not mask_dir:
+        for f in files:
+            (dest / "images" / f.name).symlink_to(f.resolve())
+        return dest
+
+    jobs = []
+    for f in files:
+        mask = None
+        if mask_dir:
+            mask = Path(mask_dir) / f"{f.stem}.png"
+            if not mask.is_file():
+                raise FileNotFoundError(f"缺少 {f.name} 的遮罩: {mask}")
+            mask = str(mask)
+        jobs.append((str(f), str(dest / "images" / f.name), mask, max_side))
+    what = "去背+縮圖" if mask_dir and max_side else ("去背" if mask_dir else "縮圖")
+    r.log(f"[texture] 前處理 {len(jobs)} 張影像({what}"
+          + (f",最長邊 {max_side}px" if max_side else "") + ")…")
+    # Few workers on purpose: this staging is itself a decode-and-resize, so it has
+    # the same per-worker footprint the whole plan is trying to bound.
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1)) as ex:
+        for _ in ex.map(lambda a: _stage_one(*a), jobs):
+            r.check_cancel()
+    return dest
+
+
+TEX_DIR = "textured"            # under the mesh dir: <...>/mesh/textured/
+TEX_RAW = "raw"                 # texrecon's own multi-atlas output
+TEX_MM = "mm"                   # the marker-scaled (millimetre) copy
+TEX_PREFIX = "mesh"             # <prefix>.obj / .mtl / texture/<prefix>_atlas.*
+
+
+def _atlas_files(obj: Path) -> list[Path]:
+    """Texture images the OBJ's .mtl references, in file order."""
+    mtl = obj.with_suffix(".mtl")
+    if not mtl.is_file():
+        return []
+    out = []
+    for line in mtl.read_text().splitlines():
+        if line.strip().startswith("map_Kd "):
+            rel = line.split(None, 1)[1].strip()
+            f = (mtl.parent / rel).resolve()
+            if f.is_file():
+                out.append(f)
+    return out
+
+
+# Shelf packing leaves gaps between differently-sized atlases; assume the merged
+# canvas needs a bit more area than the sum of its parts.
+_PACK_SLACK = 1.15
+_MAX_DOWNSCALE = 8
+# Square canvases the merge may choose from. 16384 is the ceiling on purpose: it
+# is the largest texture essentially every GPU (and every viewer) accepts, and an
+# atlas nothing can bind is not an atlas.
+_ATLAS_SIZES = (2048, 4096, 8192, 16384)
+
+
+def _atlas_area(atlases: list[Path]) -> int:
+    """Total pixels across the source atlases; 0 when they can't be measured."""
+    Image = _pillow()
+    if Image is None:
+        return 0
+    Image.MAX_IMAGE_PIXELS = None          # we are the ones writing these; not a bomb
+    area = 0
+    for a in atlases:
+        try:
+            with Image.open(a) as im:
+                area += im.width * im.height
+        except Exception:                                         # noqa: BLE001
+            continue
+    return area
+
+
+def _atlas_plan(atlases: list[Path], budget: int, user_px: int = 0) -> tuple[int, int]:
+    """(canvas size, shrink factor) for merging `atlases` into ONE texture.
+
+    Chosen from the atlases themselves rather than asked of the user, because the
+    right answer is a property of the bake — how much texture texrecon actually
+    produced — and nobody can know it before the bake runs. The rule:
+
+    * take the SMALLEST square that holds every source atlas at full resolution,
+      so a small object doesn't get a 16k canvas that is mostly black;
+    * never exceed 16384, the practical hardware limit for one texture;
+    * if the content doesn't fit even there, shrink by the smallest power of two
+      that makes it fit — losing some texel density is the price of "one texture",
+      and it beats the alternative: an 8192×44800 strip that GPUs refuse to bind
+      and Pillow refuses to open, which is how a good bake became a white model.
+
+    `user_px` (blank in the form, an explicit override elsewhere) pins the canvas
+    size; the shrink is still computed so the result stays inside it.
+    """
+    area = _atlas_area(atlases)
+    if area <= 0:
+        # Nothing measurable (no Pillow, or unreadable files): take the widest
+        # canvas, which is the one that keeps the packed height smallest, and let
+        # the merge — which runs in the backend env, where Pillow exists — pack it.
+        return (user_px or _ATLAS_SIZES[-1], 1)
+    need = area * _PACK_SLACK
+    # Canvas RGB buffer + the source images + the encoder's own copy.
+    sizes = [user_px] if user_px else [
+        px for px in _ATLAS_SIZES if not budget or px * px * 6 <= budget] or [_ATLAS_SIZES[0]]
+    for px in sizes:
+        if need <= px * px:
+            return (px, 1)
+    px = sizes[-1]
+    down = 1
+    while down < _MAX_DOWNSCALE and need / (down * down) > px * px:
+        down *= 2
+    return (px, down)
+
+
+def _atlas_dims(path: Path) -> str:
+    """', 8192×8192' for a log line, or '' if the size can't be read."""
+    Image = _pillow()
+    if Image is None:
+        return ""
+    try:
+        Image.MAX_IMAGE_PIXELS = None
+        with Image.open(path) as im:
+            return f", {im.width}×{im.height}"
+    except Exception:                                             # noqa: BLE001
+        return ""
+
+
+def _run_glb(r: Runner, py: Path, obj: Path, glb: Path, scale: float = 1.0) -> Path | None:
+    """Re-export a textured OBJ as a single self-contained .glb (the only textured
+    format the panel's one-file viewer endpoint can actually show). Never fatal —
+    the OBJ is the deliverable; the GLB is the preview."""
+    script = TOOLS_DIR / GLB_SCRIPT
+    if not script.is_file():
+        r.log(f"[texture] 略過 GLB: 找不到 {script}")
+        return None
+    # trimesh parses the whole OBJ into arrays and then builds the GLB in memory —
+    # roughly 8× the file on disk. The GLB is only the preview, so a mesh too big
+    # to convert safely is a skipped step, not a killed machine.
+    need = obj.stat().st_size * 8
+    avail = _mem_available()
+    if avail and need > avail * _TEX_BUDGET:
+        r.log(f"[texture] 略過 GLB:轉檔約需 {need / 1e9:.1f} GB,目前可用 {avail / 1e9:.1f} GB。"
+              " OBJ + 貼圖仍然完整,用外部軟體開即可。")
+        return None
+    cmd = [str(py), "-u", str(script), "--in", str(obj), "--out", str(glb)]
+    if scale != 1.0:
+        cmd += ["--scale", f"{scale:.8f}"]
+    r.log("glb: " + " ".join(cmd))
+    rc = r.run(cmd, cwd=str(TOOLS_DIR), env={"PYTHONUNBUFFERED": "1"}, check=False)
+    if rc != 0 or not glb.is_file():
+        r.log(f"[texture] warning: GLB 轉檔失敗 (rc={rc}),OBJ 仍可用。")
+        return None
+    return glb
+
+
+def _run_texture(p: dict, r: Runner, py: Path, repo: Path, spec: dict, mesh_ply: Path) -> Path | None:
+    """Bake photo texture onto `mesh_ply` and return the final textured OBJ.
+
+    Deliberately runs BEFORE marker scaling: texrecon needs the mesh in the SAME
+    coordinate frame as the COLMAP cameras, and a rescaled mesh silently textures
+    to ~nothing (almost every face reported unseen, then hole-filled). Scaling the
+    already-textured OBJ afterwards is exact — a similarity transform moves
+    vertices and leaves UVs and atlases untouched.
+    """
+    cfg = p.get("texture") or {}
+    script = spec.get("texture_script")
+    if not script or not (repo / script).is_file():
+        raise FileNotFoundError(f"找不到貼圖腳本: {repo / (script or '')}")
+    texrecon = texrecon_bin(spec)
+    if not texrecon:
+        raise FileNotFoundError(
+            "找不到 texrecon 執行檔(mvs-texturing)。請先建置,或在 backends.json 設 "
+            '"texrecon" 絕對路徑;開 /doctor 可確認。')
+
+    out = Path(p["model_path"])
+    scene = _scene_from_model(out)
+    if not (scene / "images").exists():
+        raise FileNotFoundError(
+            f"找不到訓練場景的 images/（{scene}）。貼圖需要原始的去畸變影像 —— "
+            "此模型可能不是用本面板訓練的,或場景已被移動。")
+
+    tex_dir = mesh_ply.parent / TEX_DIR
+    raw_dir = tex_dir / TEX_RAW
+    env = {"PYTHONUNBUFFERED": "1"}
+
+    mask_dir = str(cfg.get("mask_dir") or "").strip()
+    if mask_dir and not Path(mask_dir).is_dir():
+        raise FileNotFoundError(f"遮罩資料夾不存在: {mask_dir}")
+
+    # --- memory plan ------------------------------------------------------- #
+    n_img, px, (iw, ih) = _image_pixels(scene / "images")
+    cores = os.cpu_count() or 1
+    avail = _mem_available()
+    budget = int(avail * _TEX_BUDGET)
+    threads, auto_side = _texture_plan(px, cores, budget)
+    # An explicit cap from the form always applies; auto only ever tightens it.
+    user_side = int(cfg.get("max_image_px") or 0)
+    max_side = min([v for v in (user_side or None, auto_side) if v], default=None)
+    user_threads = int(cfg.get("threads") or 0)
+    if user_threads:
+        threads = max(1, min(user_threads, cores))
+    r.log(f"[texture] {n_img} 張影像 · 最大 {iw}×{ih} · 可用記憶體 {avail / 1e9:.0f} GB "
+          f"→ 執行緒 {threads}/{cores}"
+          + (f" · 影像縮到最長邊 {max_side}px" if max_side else " · 影像原尺寸"))
+    if auto_side:
+        r.log(f"[texture] 記憶體不足以用原尺寸貼圖,已自動縮圖到 {auto_side}px 以避免 OOM。"
+              " 想保留原尺寸請加大記憶體或分批處理。")
+
+    staged = _stage_texture_scene(scene, tex_dir / "scene", max_side, mask_dir, r)
+
+    bake = [str(py), "-u", str(repo / script), "-s", str(staged),
+            "--mesh", str(mesh_ply), "-o", str(raw_dir), "--prefix", TEX_PREFIX,
+            "--texrecon", str(texrecon), "--num-threads", str(threads),
+            f"--data-term={cfg.get('data_term', 'area')}",
+            f"--outlier-removal={cfg.get('outlier_removal', 'gauss_clamping')}"]
+    if cfg.get("keep_unseen"):
+        bake.append("--keep-unseen-faces")
+    if cfg.get("low_memory"):
+        # The global seam leveling builds one sparse system over every patch
+        # vertex; it is the single biggest allocation after the views, and the
+        # local (Poisson) leveling still hides most seams without it.
+        bake += ["--", "--skip_global_seam_leveling"]
+
+    r.banner("texture | 把照片投影到 mesh 上")
+    r.log("bake: " + " ".join(bake))
+    try:
+        r.run(bake, cwd=str(repo), env=env)
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
+
+    raw_obj = raw_dir / f"{TEX_PREFIX}.obj"
+    if not raw_obj.is_file():
+        raise PipelineError(f"貼圖沒有產出 OBJ: {raw_obj}(原因請看上面的輸出)")
+    n_atlas = len(_atlas_files(raw_obj))
+    r.log(f"[texture] 產出 {n_atlas} 張貼圖")
+
+    final = raw_obj
+    merge_script = spec.get("atlas_script")
+    if cfg.get("merge", True) and n_atlas > 1:
+        if not merge_script or not (repo / merge_script).is_file():
+            r.log(f"[texture] warning: 找不到合併腳本 {repo / (merge_script or '')},保留 {n_atlas} 張貼圖。")
+        else:
+            r.banner(f"texture | 把 {n_atlas} 張貼圖合併成 1 張")
+            # Size and shrink are decided from the bake's own output, not asked
+            # of the user — see _atlas_plan.
+            canvas_px, down = _atlas_plan(_atlas_files(raw_obj), budget,
+                                          int(cfg.get("atlas_px") or 0))
+            merge = [str(py), "-u", str(repo / merge_script), "--obj", str(raw_obj),
+                     "-o", str(tex_dir), "--prefix", TEX_PREFIX,
+                     "--canvas-width", str(canvas_px)]
+            q = int(cfg.get("jpg_quality", 95) or 0)
+            if q > 0:
+                merge += ["--jpg-quality", str(q)]
+            if down > 1:
+                merge += ["--downscale", str(down)]
+                r.log(f"[texture] 貼圖總量超過單張 {canvas_px}×{canvas_px} 的上限,"
+                      f"合併時縮 {down}×（{canvas_px} 已是單張貼圖的硬體上限;"
+                      "要保留全解析度就取消「合併成單張貼圖」）。")
+            else:
+                r.log(f"[texture] 單張貼圖尺寸自動選用 {canvas_px}（原解析度,不縮圖）。")
+            r.log("merge: " + " ".join(merge))
+            r.run(merge, cwd=str(repo), env=env)
+            merged = tex_dir / f"{TEX_PREFIX}.obj"
+            if merged.is_file():
+                final = merged
+                # raw/ is a full second copy of the OBJ plus every source atlas —
+                # on a 2 M-face mesh that is ~200 MB of exact duplicate. It is a
+                # reproducible intermediate, so it goes unless asked for.
+                if not cfg.get("keep_raw"):
+                    mb = sum(f.stat().st_size for f in raw_dir.rglob("*") if f.is_file()) / 1e6
+                    shutil.rmtree(raw_dir, ignore_errors=True)
+                    r.log(f"[texture] 已刪除合併前的中間檔 raw/（省下 {mb:.0f} MB）")
+            else:
+                r.log("[texture] warning: 合併沒有產出 OBJ,改用未合併的版本。")
+    elif n_atlas == 1:
+        # Nothing to merge, but the output should still land where a merged one
+        # would — every download path and the viewer look in textured/, not raw/.
+        r.log("[texture] 本來就只有 1 張貼圖,跳過合併。")
+        for item in (f"{TEX_PREFIX}.obj", f"{TEX_PREFIX}.mtl", "texture"):
+            src = raw_dir / item
+            if src.exists():
+                dst = tex_dir / item
+                if dst.is_dir():
+                    shutil.rmtree(dst, ignore_errors=True)
+                elif dst.exists():
+                    dst.unlink()
+                shutil.move(str(src), str(dst))
+        final = tex_dir / f"{TEX_PREFIX}.obj"
+        if not cfg.get("keep_raw"):
+            shutil.rmtree(raw_dir, ignore_errors=True)
+
+    r.log(f"[texture] obj: {final}")
+    for a in _atlas_files(final):
+        r.log(f"[texture] atlas: {a}  ({a.stat().st_size / 1e6:.1f} MB{_atlas_dims(a)})")
+    if cfg.get("glb", True):
+        glb = _run_glb(r, py, final, tex_dir / f"{TEX_PREFIX}.glb")
+        if glb:
+            r.log(f"[texture] glb: {glb}")
+    r.banner(f"texture done. {final}")
+    return final
+
+
+def _scale_textured_obj(obj: Path, dest_dir: Path, mult: float) -> Path:
+    """Copy a textured OBJ package into `dest_dir` with vertex positions multiplied
+    by `mult`. Only `v` lines change — `vt`/`vn`/`f` and the atlas are identical,
+    because scaling is a similarity transform and UVs don't live in world space."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / obj.name
+    with obj.open() as fin, dest.open("w") as fout:
+        for line in fin:
+            if line.startswith("v "):
+                parts = line.split()
+                x, y, z = (float(v) * mult for v in parts[1:4])
+                fout.write(f"v {x:.6f} {y:.6f} {z:.6f}{''.join(' ' + t for t in parts[4:])}\n")
+            else:
+                fout.write(line)
+    mtl = obj.with_suffix(".mtl")
+    if mtl.is_file():
+        shutil.copy2(mtl, dest_dir / mtl.name)
+    for a in _atlas_files(obj):
+        rel = a.relative_to(obj.parent) if obj.parent in a.parents else Path(a.name)
+        (dest_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(a, dest_dir / rel)
+    return dest
+
+
+def _run_marker_scale(p: dict, r: Runner, py: Path, mesh_ply: Path,
+                      textured: Path | None = None) -> None:
     """If a ChArUco marker board was captured, estimate the recon→mm scale from it
     and write a physically-scaled copy of the mesh (in millimetres) next to it.
 
@@ -363,6 +844,17 @@ def _run_marker_scale(p: dict, r: Runner, py: Path, mesh_ply: Path) -> None:
     else:
         r.log("[mesh] warning: 縮放後的 mesh 沒產出,請檢查上面的輸出。")
 
+    # The textured OBJ gets the same factor. No re-bake and no texel resampling:
+    # only `v` lines are rewritten, so the atlas and every UV stay byte-identical.
+    if textured is not None and textured.is_file():
+        mm_dir = textured.parent / TEX_MM if textured.parent.name != TEX_RAW \
+            else textured.parent.parent / TEX_MM
+        scaled_obj = _scale_textured_obj(textured, mm_dir, mm_per_unit)
+        r.log(f"[texture] scaled obj: {scaled_obj}")
+        glb = _run_glb(r, py, scaled_obj, mm_dir / f"{TEX_PREFIX}.glb")
+        if glb:
+            r.log(f"[texture] scaled glb: {glb}")
+
 
 def run_mesh(p: dict, r: Runner) -> None:
     """Extract a triangle mesh from a trained model. Backend-specific: only runs
@@ -407,9 +899,21 @@ def run_mesh(p: dict, r: Runner) -> None:
     if found:
         mesh_ply = found[-1]
         r.log(f"[mesh] result: {mesh_ply}")
+        # Texture first, marker scale second — see _run_texture's docstring: texrecon
+        # needs the mesh in the cameras' own frame, and scaling a textured OBJ after
+        # the fact is exact.
+        textured = None
+        if (p.get("texture") or {}).get("enable"):
+            try:
+                textured = _run_texture(p, r, py, repo, spec, mesh_ply)
+            except Cancelled:
+                raise
+            except Exception as exc:   # the vertex-coloured mesh is still valid output
+                r.banner("貼圖失敗 — 保留未貼圖的 mesh")
+                r.log(f"[texture] 失敗: {exc}")
         if (p.get("marker") or {}).get("enable"):
             try:
-                _run_marker_scale(p, r, py, mesh_ply)
+                _run_marker_scale(p, r, py, mesh_ply, textured)
             except Cancelled:
                 raise
             except Exception as exc:   # keep the (valid) unscaled mesh; just flag scaling
