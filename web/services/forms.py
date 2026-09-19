@@ -49,6 +49,80 @@ def parse_marker(form: dict, spec: dict) -> dict | None:
             "dict": str(pick("dict") or "DICT_5X5_100").strip()}
 
 
+TEXTURE_DATA_TERMS = ("area", "gmi")
+TEXTURE_OUTLIER = ("gauss_clamping", "gauss_damping", "none")
+
+
+def parse_texture(form: dict, spec: dict) -> dict | None:
+    """Build the texture-baking config for the Mesh form, or None when it's off.
+
+    Returns None (rather than {"enable": False}) so run_mesh's `if texture:` guard
+    reads the same as the marker one, and an old job.json without the key behaves
+    exactly like「不貼圖」."""
+    if not form.get("texture_enable"):
+        # An unticked checkbox and a form that predates the texture stage look
+        # identical in a POST body (both just absent), and the difference costs a
+        # whole mesh run to discover. The live form always posts `texture_form`, so
+        # a backend that CAN texture plus a body without that marker means the page
+        # in the browser is stale — say so instead of silently skipping.
+        if spec.get("texture_script") and not form.get("texture_form"):
+            raise ValueError(
+                "這個頁面是貼圖功能上線前載入的舊版表單,送出的內容裡沒有貼圖選項。"
+                "請重新整理頁面（Ctrl+Shift+R）再送一次。"
+                "（程式化呼叫請帶 texture_form=1,並用 texture_enable 決定要不要貼圖。）")
+        return None
+    if not spec.get("texture_script"):
+        raise ValueError("此 backend 未設定貼圖腳本 (texture_script);無法產生貼圖。")
+
+    data_term = (form.get("texture_data_term") or "area").strip()
+    outlier = (form.get("texture_outlier") or "gauss_clamping").strip()
+    if data_term not in TEXTURE_DATA_TERMS:
+        raise ValueError(f"貼圖 data_term 需為 {'/'.join(TEXTURE_DATA_TERMS)}")
+    if outlier not in TEXTURE_OUTLIER:
+        raise ValueError(f"貼圖 outlier_removal 需為 {'/'.join(TEXTURE_OUTLIER)}")
+
+    def num(key: str, default: int, lo: int, hi: int) -> int:
+        v = (form.get(key) or "").strip()
+        if not v:
+            return default
+        if not v.isdigit() or not lo <= int(v) <= hi:
+            raise ValueError(f"{key} 需為 {lo}–{hi} 的整數")
+        return int(v)
+
+    # 0 = decide from the bake's own output (pipeline.train._atlas_plan). The form
+    # no longer asks: the right size depends on how much texture texrecon produced,
+    # which nobody knows before it runs. Still honoured when posted explicitly, so
+    # a script can pin it. Powers of two only — merge_atlases packs pow2 sub-atlases
+    # side by side and a non-pow2 canvas wastes the last column.
+    atlas_px = num("texture_atlas_px", 0, 1024, 16384) if \
+        (form.get("texture_atlas_px") or "").strip() else 0
+    if atlas_px and atlas_px & (atlas_px - 1):
+        raise ValueError("單張貼圖尺寸需為 2 的次方（1024 / 2048 / 4096 / 8192 / 16384）。")
+    # 0 = PNG (lossless, several times larger); 1–100 = JPG at that quality.
+    quality = num("texture_jpg_quality", 95, 0, 100)
+
+    # Memory controls. Blank = auto: the pipeline measures the images and the free
+    # RAM and picks the largest setting that fits (see pipeline.train._texture_plan).
+    max_image_px = num("texture_max_image_px", 0, 512, 20000) if \
+        (form.get("texture_max_image_px") or "").strip() else 0
+    threads = num("texture_threads", 0, 1, 256) if \
+        (form.get("texture_threads") or "").strip() else 0
+
+    mask_dir = (form.get("texture_mask_dir") or "").strip()
+    if mask_dir and not Path(mask_dir).is_dir():
+        raise ValueError(f"遮罩資料夾不存在: {mask_dir}")
+
+    return {"enable": True, "data_term": data_term, "outlier_removal": outlier,
+            "merge": bool(form.get("texture_merge")),
+            "atlas_px": atlas_px, "jpg_quality": quality,
+            "glb": bool(form.get("texture_glb")),
+            "keep_unseen": bool(form.get("texture_keep_unseen")),
+            "keep_raw": bool(form.get("texture_keep_raw")),
+            "max_image_px": max_image_px, "threads": threads,
+            "low_memory": bool(form.get("texture_low_memory")),
+            "mask_dir": mask_dir}
+
+
 def build_blocksplit_params(source: str, out_dir: str, form: dict) -> dict:
     """Validate the 分塊 (block-split) form. Numbers stay strings (house style:
     the pipeline converts); `tile` is the one real bool."""

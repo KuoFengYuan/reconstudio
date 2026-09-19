@@ -60,10 +60,20 @@
     <div class="stat"><span>尺寸</span><b id="s-dim">…</b></div>
     <div class="stat"><span>對角線</span><b id="s-diag">…</b></div>
 
-    {% if has_scaled %}
+    {# Once a textured build exists it IS the model — same geometry, real colour —
+       so the vertex-coloured versions are not offered beside it; the 貼圖 switch
+       below turns the texture off when you want to look at the mesh itself. #}
+    {% if has_textured and has_textured_mm %}
     <div class="ctl"><label>顯示版本</label>
       <div class="seg" id="src">
-        <button data-src="scaled" class="on">實際尺寸 (mm)</button>
+        <button data-src="textured_mm">實際尺寸 (mm)</button>
+        <button data-src="textured">原始比例 (recon)</button>
+      </div>
+    </div>
+    {% elif not has_textured and has_scaled %}
+    <div class="ctl"><label>顯示版本</label>
+      <div class="seg" id="src">
+        <button data-src="scaled">實際尺寸 (mm)</button>
         <button data-src="raw">原始 (recon)</button>
       </div>
     </div>
@@ -74,8 +84,8 @@
 
     <div class="ctl"><label>顯示 / 對齊</label>
       <div class="rowbtn">
+        <label><input id="tex" type="checkbox" checked> <span id="tex-label">貼圖</span></label>
         <label><input id="wire" type="checkbox"> 線框</label>
-        <label><input id="vcol" type="checkbox" checked> 頂點色</label>
         <label><input id="whitebg" type="checkbox"> 白底</label>
       </div>
       <div class="rowbtn">
@@ -107,19 +117,27 @@
 <script type="module">
 import * as THREE from 'three';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
 
 const JOB = "{{ job.id }}";
 const HAS_SCALED = {{ has_scaled | tojson }};
+const HAS_TEXTURED = {{ has_textured | tojson }};
+const HAS_TEXTURED_MM = {{ has_textured_mm | tojson }};
 // Each version shows its file's NATIVE units: scaled = real mm, raw = arbitrary
 // COLMAP/recon units (NOT converted) — so the two genuinely differ.
+// The textured versions are .glb, not .ply: an .obj served through one URL loses
+// its .mtl and its atlas, i.e. it arrives untextured. glb carries all three.
 const SOURCES = {
-  raw:    { url: `/api/jobs/${JOB}/mesh.ply`,        unit: 'units' },
-  scaled: { url: `/api/jobs/${JOB}/mesh_scaled.ply`, unit: 'mm' },
+  raw:         { url: `/api/jobs/${JOB}/mesh.ply`,              unit: 'units' },
+  scaled:      { url: `/api/jobs/${JOB}/mesh_scaled.ply`,       unit: 'mm' },
+  textured:    { url: `/api/jobs/${JOB}/mesh_textured.glb`,     unit: 'units', glb: true },
+  textured_mm: { url: `/api/jobs/${JOB}/mesh_textured.glb?mm=1`, unit: 'mm',   glb: true },
 };
-let curSrc = HAS_SCALED ? 'scaled' : 'raw';
+let curSrc = HAS_TEXTURED_MM ? 'textured_mm' : (HAS_TEXTURED ? 'textured'
+                                                : (HAS_SCALED ? 'scaled' : 'raw'));
 const unit = () => SOURCES[curSrc].unit;
 
 const renderer = new THREE.WebGLRenderer({canvas: document.getElementById('c'), antialias:true});
@@ -127,14 +145,16 @@ renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth, innerHeig
 renderer.autoClear = false;
 const scene = new THREE.Scene(); scene.background = new THREE.Color(0x0b0d11);
 
-// Lighting: ambient + sky/ground + a headlight that follows the camera. A lit
-// mesh would otherwise look muddy vs. the unlit point cloud, so this is fairly
-// bright and the 亮度 slider scales all three together.
-const ambient = new THREE.AmbientLight(0xffffff, 0.55); scene.add(ambient);
-const hemi = new THREE.HemisphereLight(0xffffff, 0x666c77, 1.3); scene.add(hemi);
-const head = new THREE.DirectionalLight(0xffffff, 1.7); scene.add(head);
-const BASE_LIT = { a: 0.55, h: 1.3, d: 1.7 };
-function setBrightness(m){ ambient.intensity = BASE_LIT.a*m; hemi.intensity = BASE_LIT.h*m; head.intensity = BASE_LIT.d*m; }
+// NO scene lights, on purpose. Every colour this viewer shows is already lit:
+// the atlas is pixels out of the photographs, and the vertex colours are sampled
+// from renders of those same photographs. Shading them again multiplies the
+// lighting in twice, which is exactly what made a correct bake look muddy and
+// dark next to its own texture file. So the material is unlit and the 亮度
+// slider scales its colour multiplier instead of any light.
+function setBrightness(m){
+  if (material && material.color)
+    material.color.setHex(material.userData.base ?? 0xffffff).multiplyScalar(m);
+}
 
 // obj -> flip(180° about X: COLMAP Y-down -> three Y-up) -> inner(-centre) -> mesh
 const obj = new THREE.Group();   scene.add(obj);
@@ -193,38 +213,66 @@ function fitView(geo){
   controls.update();
 }
 
-function applyColorMode(){
-  if (!material || !mesh) return;
-  const on = document.getElementById('vcol').checked && !!mesh.geometry.attributes.color;
-  material.vertexColors = on;
-  material.color.setHex(on ? 0xffffff : 0xb8c0cc);   // white = don't tint/darken vertex colours
-  material.needsUpdate = true;
-}
-function buildMesh(geo){
+let textured = false;                      // current source carries a baked atlas
+
+// Colour off = show the surface itself. A flat grey would be unreadable without
+// lights, so the fallback is MeshNormalMaterial: it shades by surface direction,
+// needs no light, and is the clearest way to judge the mesh under the texture.
+function buildMesh(geo, baked){
   if (mesh){ inner.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
   if (!geo.attributes.normal) geo.computeVertexNormals();
   const hasColor = !!geo.attributes.color;
-  material = new THREE.MeshStandardMaterial({
-    color: 0xffffff, metalness: 0.0, roughness: 0.8, side: THREE.DoubleSide,
-    wireframe: document.getElementById('wire').checked, flatShading: false });
+  textured = !!(baked && baked.map);
+  const box = document.getElementById('tex');
+  document.getElementById('tex-label').textContent = textured ? '貼圖' : '頂點色';
+  box.disabled = !(textured || hasColor);
+  const wire = document.getElementById('wire').checked;
+  const showColor = box.checked && (textured || hasColor);
+  if (showColor){
+    material = new THREE.MeshBasicMaterial({
+      color: 0xffffff, map: textured ? baked.map : null, vertexColors: !textured && hasColor,
+      side: THREE.DoubleSide, wireframe: wire });
+    material.userData.base = 0xffffff;
+  } else {
+    material = new THREE.MeshNormalMaterial({ side: THREE.DoubleSide, wireframe: wire });
+  }
   mesh = new THREE.Mesh(geo, material); inner.add(mesh);
-  document.getElementById('vcol').disabled = !hasColor;
-  applyColorMode();
+  setBrightness(+document.getElementById('lit').value);
   setStats(geo);
   clearMeasure();
 }
 
+function loadFail(url){
+  document.getElementById('loading').style.display = 'none';
+  const e = document.getElementById('err'); e.style.display = 'flex';
+  e.textContent = `載入失敗:${url}`;
+}
+
 function load(src){
   curSrc = src;
+  document.getElementById('err').style.display = 'none';
   document.getElementById('loading').style.display = 'flex';
-  const done = geo => { document.getElementById('loading').style.display = 'none'; buildMesh(geo); fitView(geo); };
+  const done = c => { document.getElementById('loading').style.display = 'none';
+                      buildMesh(c.geo, c.mat); fitView(c.geo); };
   if (geoCache[src]) { done(geoCache[src]); return; }
-  new PLYLoader().load(SOURCES[src].url,
-    geo => { geoCache[src] = geo; done(geo); },
-    undefined,
-    () => { document.getElementById('loading').style.display = 'none';
-            const e = document.getElementById('err'); e.style.display = 'flex';
-            e.textContent = `載入失敗:${SOURCES[src].url}`; });
+  const url = SOURCES[src].url;
+  if (SOURCES[src].glb){
+    new GLTFLoader().load(url, gltf => {
+      let found = null;
+      gltf.scene.traverse(o => { if (!found && o.isMesh) found = o; });
+      if (!found) { loadFail(url); return; }
+      // The atlas is colour data, not linear — three r152+ needs this told, or the
+      // whole model comes back washed out compared to the vertex-coloured version.
+      if (found.material && found.material.map)
+        found.material.map.colorSpace = THREE.SRGBColorSpace;
+      geoCache[src] = { geo: found.geometry, mat: found.material };
+      done(geoCache[src]);
+    }, undefined, () => loadFail(url));
+    return;
+  }
+  new PLYLoader().load(url,
+    geo => { geoCache[src] = { geo, mat: null }; done(geoCache[src]); },
+    undefined, () => loadFail(url));
 }
 
 // ---- measure tool (ruler) ------------------------------------------------- //
@@ -283,14 +331,22 @@ renderer.domElement.addEventListener('pointerup', e => {
 });
 
 // ---- UI wiring ------------------------------------------------------------ //
-{% if has_scaled %}
-document.querySelectorAll('#src button').forEach(b => b.onclick = () => {
-  document.querySelectorAll('#src button').forEach(x => x.classList.remove('on'));
-  b.classList.add('on'); load(b.dataset.src);
+{% if has_scaled or has_textured %}
+document.querySelectorAll('#src button').forEach(b => {
+  if (b.dataset.src === curSrc) b.classList.add('on');
+  b.onclick = () => {
+    document.querySelectorAll('#src button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on'); load(b.dataset.src);
+  };
 });
 {% endif %}
 document.getElementById('wire').onchange = e => { if (material) material.wireframe = e.target.checked; };
-document.getElementById('vcol').onchange = applyColorMode;
+// Rebuild in place (no fitView): toggling the texture must not throw away the
+// view you lined up.
+document.getElementById('tex').onchange = () => {
+  const c = geoCache[curSrc];
+  if (c) buildMesh(c.geo, c.mat);
+};
 document.getElementById('lit').oninput = e => {
   setBrightness(+e.target.value); document.getElementById('lit-v').textContent = (+e.target.value).toFixed(1); };
 document.getElementById('whitebg').onchange = e => {
@@ -309,7 +365,6 @@ const clock = new THREE.Clock();
 const mid = new THREE.Vector3();
 (function loop(){
   requestAnimationFrame(loop);
-  head.position.copy(camera.position);                // headlight follows camera
   if (viewHelper.animating) viewHelper.update(clock.getDelta()); else clock.getDelta();
   controls.update();
   updateMarkerScales();                               // constant on-screen marker size

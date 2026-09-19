@@ -141,11 +141,29 @@ _ME_SCALED = re.compile(r"\[mesh\] scaled result:\s*(\S+)")
 _ME_SCALE = re.compile(r"mm_per_unit=([0-9.]+)")
 _ME_VERT = re.compile(r"Num vertices post:\s*(\d+)")
 _ME_EXTRACT = re.compile(r"Extracting mesh from TSDF")
+_ME_DONE = re.compile(r"^=== \[\d\d:\d\d:\d\d\] mesh done\.")
+# Texture baking (texrecon + atlas merge). Paths are a contract with viz.py's
+# download endpoints and the viewer's「貼圖」source, like [mesh] result: is.
+_TX_OBJ = re.compile(r"\[texture\] obj:\s*(\S+)")
+_TX_ATLAS = re.compile(r"\[texture\] atlas:\s*(\S+)")
+_TX_GLB = re.compile(r"\[texture\] glb:\s*(\S+)")
+_TX_OBJ_MM = re.compile(r"\[texture\] scaled obj:\s*(\S+)")
+_TX_GLB_MM = re.compile(r"\[texture\] scaled glb:\s*(\S+)")
 _ME_PHASES = [
     (re.compile(r"Found \d+ cameras"), "載入相機"),
     (re.compile(r"Estimated voxel|Voxel_size|TSDF config"), "估計體素 / 融合"),
     (re.compile(r"Extracting mesh"), "抽取 mesh"),
     (re.compile(r"Post processing|Post-processed"), "後處理"),
+    # texrecon's own step banners — its run is long enough that a static
+    # "貼圖中" would look hung for tens of minutes on a big mesh.
+    (re.compile(r"pre-mask"), "貼圖:去背影像"),
+    (re.compile(r"Generating texture views|wrote NVM"), "貼圖:載入視角"),
+    (re.compile(r"Building adjacency graph"), "貼圖:建立鄰接圖"),
+    (re.compile(r"View selection|Optimizing"), "貼圖:選視角"),
+    (re.compile(r"Generating texture patches|Running global seam|"
+                r"Local seam leveling|Generating texture atlases"), "貼圖:縫合/打包"),
+    (re.compile(r"Building objmodel|Saving model"), "貼圖:輸出模型"),
+    (re.compile(r"^paste|pass \d/2"), "合併貼圖"),
 ]
 
 
@@ -287,6 +305,17 @@ def _parse_mesh(job: Job, line: str) -> None:
     m = _ME_RESULT.search(line)
     if m:
         job.meta["mesh_path"] = m.group(1)
+        job.current_stage = "done"
+    for rx, key in ((_TX_OBJ_MM, "texture_obj_mm"), (_TX_GLB_MM, "texture_glb_mm"),
+                    (_TX_OBJ, "texture_obj"), (_TX_GLB, "texture_glb")):
+        m = rx.search(line)
+        if m:
+            job.meta[key] = m.group(1)
+            break
+    m = _TX_ATLAS.search(line)
+    if m:
+        job.meta.setdefault("texture_atlas", []).append(m.group(1))
+    if _ME_DONE.search(line):
         job.current_stage = "done"
     m = _ME_SCALE.search(line)
     if m:

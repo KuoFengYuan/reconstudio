@@ -232,16 +232,23 @@ function applyColorMode(){
   material.color.setHex(on ? 0xffffff : 0xb8c0cc);   // white = don't tint/darken vertex colours
   material.needsUpdate = true;
 }
-function buildMesh(geo){
+function buildMesh(geo, map){
   if (mesh){ inner.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
   if (!geo.attributes.normal) geo.computeVertexNormals();
   const hasColor = !!geo.attributes.color;
-  material = new THREE.MeshStandardMaterial({
-    color: 0xffffff, metalness: 0.0, roughness: 0.8, side: THREE.DoubleSide,
-    wireframe: document.getElementById('wire').checked, flatShading: false });
+  // A baked photo atlas already contains the lighting it was shot under, so it is
+  // shown UNLIT — shading it again with the scene lights is what made a correctly
+  // textured model look muddy and dark. Geometry-only meshes still get the lit
+  // material, which is the only thing that shows their shape at all.
+  material = map
+    ? new THREE.MeshBasicMaterial({ color: 0xffffff, map, side: THREE.DoubleSide,
+        wireframe: document.getElementById('wire').checked })
+    : new THREE.MeshStandardMaterial({
+        color: 0xffffff, metalness: 0.0, roughness: 0.8, side: THREE.DoubleSide,
+        wireframe: document.getElementById('wire').checked, flatShading: false });
   mesh = new THREE.Mesh(geo, material); inner.add(mesh);
-  document.getElementById('vcol').disabled = !hasColor;
-  applyColorMode();
+  document.getElementById('vcol').disabled = !!map || !hasColor;
+  if (!map) applyColorMode();
   setStats(geo);
   clearMeasure();
 }
@@ -250,8 +257,10 @@ function buildMesh(geo){
 // Everything is normalised to ONE BufferGeometry so the whole toolset (stats,
 // ruler raycast, wireframe, vertex colours) works identically per format. For
 // multi-mesh containers (.obj groups, .glb scenes) the node transforms are baked
-// in and the parts merged; materials/textures are NOT kept — this is a geometry
-// inspector, not a lookdev viewer.
+// in and the parts merged; materials are NOT kept — this is a geometry inspector,
+// not a lookdev viewer. The one exception is a .glb that IS a single textured
+// mesh, which is exactly what this panel's own 貼圖 output is: dropping its atlas
+// there would show a white model and look like a failed bake.
 function collectGeometries(root){
   const geos = [];
   root.updateMatrixWorld(true);
@@ -262,6 +271,14 @@ function collectGeometries(root){
     }
   });
   return geos;
+}
+function soleTexture(root){
+  // The base-colour map of a scene holding exactly ONE textured mesh. Anything
+  // more and the merged geometry can't say which texel belongs to which part, so
+  // we go back to geometry-only rather than show a wrong texture.
+  const maps = [];
+  root.traverse(o => { if (o.isMesh && o.material && o.material.map) maps.push(o.material.map); });
+  return maps.length === 1 ? maps[0] : null;
 }
 function mergeAsOne(geos){
   if (!geos.length) throw new Error('檔案裡沒有任何 mesh 幾何');
@@ -306,7 +323,8 @@ function parseBuffer(buf, ext, ok, fail){
       ok(mergeAsOne(collectGeometries(new OBJLoader().parse(new TextDecoder().decode(buf)))));
     else if (ext === '.glb')
       new GLTFLoader().parse(buf, '',
-        g => { try { ok(mergeAsOne(collectGeometries(g.scene))); } catch (e) { fail(e.message); } },
+        g => { try { ok(mergeAsOne(collectGeometries(g.scene)), soleTexture(g.scene)); }
+               catch (e) { fail(e.message); } },
         e => fail(e.message || 'glb 解析失敗'));
     else fail(`不支援的格式「${ext || '(無副檔名)'}」,支援:${SUPPORTED.join(' / ')}`);
   } catch (e) {
@@ -317,7 +335,7 @@ function parseBuffer(buf, ext, ok, fail){
 function applyBuffer(buf, name, pathText){
   const ext = extOf(name);
   parseBuffer(buf, ext,
-    geo => {
+    (geo, map) => {
       // loaders don't always throw on garbage (PLYLoader parses junk into an
       // EMPTY geometry) — an empty result is a failed load, not a blank model.
       if (!geo.attributes.position || !geo.attributes.position.count)
@@ -328,7 +346,7 @@ function applyBuffer(buf, name, pathText){
       const f = flipDefault(ext);
       document.getElementById('flipy').checked = f; setFlip(f);
       setHeader(name, pathText);
-      buildMesh(geo); fitView(geo);
+      buildMesh(geo, map); fitView(geo);
     },
     msg => showOverlay(`載入「${name}」失敗:${msg}`));
 }

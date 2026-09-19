@@ -1725,6 +1725,90 @@
       </details>
       {% endif %}
 
+      {% if mesh_backends %}
+      {% set tex_backends = mesh_backends | selectattr('texture') | list %}
+      <details class="grp" {{ 'open' if tex_backends else '' }}>
+        <summary>🎨 照片貼圖（取代只有頂點色的 mesh）</summary>
+        <div class="gbody">
+          {% if not tex_backends %}
+          <div class="hint">目前沒有可用的貼圖環境(工具尚未在這台機器上建置)。
+            到 <a href="/doctor" target="_blank">/doctor</a> 看「貼圖」那一列的安裝說明。</div>
+          {% else %}
+          {# Posted by every NEW copy of this form. Its absence means the page in the
+             browser predates the texture stage, which would otherwise show up as a
+             job that quietly skipped貼圖 — see forms.parse_texture. #}
+          <input type="hidden" name="texture_form" value="1">
+          <label class="chk"><input type="checkbox" name="texture_enable" value="1" checked>
+            <span>抽完 mesh 後把原始照片投影成貼圖（產出 OBJ + 一張貼圖 + GLB）</span></label>
+          <div class="hint">不勾 = 只有 TSDF 的<b>頂點色</b>:顏色取樣數等於頂點數,面數不高時會糊。
+            勾選後會多跑一段貼圖(視影像張數與面數,數分鐘到數十分鐘),輸出寫在
+            <code>…/mesh/textured/</code>,原本的 <code>tsdf_post.ply</code> 不動。</div>
+          <label class="chk"><input type="checkbox" name="texture_merge" value="1" checked>
+            <span>合併成單張貼圖(建議)</span></label>
+          <div class="hint">貼圖會依需要切成很多張(幾十張都有可能),多數軟體只想吃一張。
+            合併是<b>無損重排</b>:只把每張貼圖整數像素貼進大圖、同步改寫 UV,不重新取樣。</div>
+          <div class="hint">貼圖尺寸<b>自動決定</b>:要貼完才知道總共產出多少貼圖,面板會挑「放得下、
+            又不浪費」的最小正方形(上限 16384 —— 再大顯卡就不能當貼圖用了);真的放不下才降解析度。
+            log 會寫明選了多少。</div>
+          <label class="chk"><input type="checkbox" name="texture_glb" value="1" checked>
+            <span>另存單檔 GLB（面板檢視器要靠它才看得到貼圖）</span></label>
+          <details class="grp" style="margin-top:8px">
+            <summary>進階:遮罩與貼圖參數</summary>
+            <div class="gbody">
+              <label>前景遮罩資料夾（選填）</label>
+              <div class="row">
+                <input name="texture_mask_dir" id="texture_mask_dir" placeholder="去背產生的 no_bg/masks">
+                <button type="button" class="ghost" onclick="openPicker('texture_mask_dir')">瀏覽</button>
+              </div>
+              <div class="hint">物件重建、背景又被去掉時建議填:先把背景塗黑再貼圖,離群值剔除
+                才會把「拍到背景」的視角從那些面上剔掉,否則物件邊緣會沾到背景色。
+                檔名要和影像同名（<code>IMG_1234.png</code>）。</div>
+              <div class="row">
+                <div style="flex:1"><label>挑選視角的依據</label>
+                  <select name="texture_data_term">
+                    <option value="area" selected>投影面積（預設,快）</option>
+                    <option value="gmi">影像清晰度（較慢,較準）</option>
+                  </select></div>
+                <div style="flex:1"><label>離群值剔除</label>
+                  <select name="texture_outlier">
+                    <option value="gauss_clamping" selected>嚴格（預設）</option>
+                    <option value="gauss_damping">寬鬆</option>
+                    <option value="none">不剔除</option>
+                  </select></div>
+              </div>
+              <div class="row">
+                <div style="flex:1"><label>影像最長邊上限 (px)</label>
+                  <input name="texture_max_image_px" placeholder="自動（留空 = 原尺寸）"></div>
+                <div style="flex:1"><label>執行緒</label>
+                  <input name="texture_threads" placeholder="自動"></div>
+              </div>
+              <div class="hint">兩個都留空就好:貼圖會先量影像張數、尺寸和目前可用記憶體,
+                自己決定同時開幾個執行緒;<b>只有在原尺寸怎麼算都放不下時才會自動縮圖</b>,
+                並在 log 寫明縮到多少。記憶體真的很緊(或已經被 OOM 砍過)時,
+                可以手動填一個上限,例如 4000。</div>
+              <label class="chk"><input type="checkbox" name="texture_low_memory" value="1">
+                <span>省記憶體模式（跳過全域接縫平滑)</span></label>
+              <div class="hint">全域接縫平滑會對所有貼圖頂點解一個大型稀疏方程式,是視角之外
+                最吃記憶體的一步。跳過後仍有局部接縫平滑,接縫多半看不出來;
+                面數很大(千萬級)又爆記憶體時才需要。</div>
+              <label>JPG 品質（0 = 存 PNG）</label>
+              <input name="texture_jpg_quality" value="95" placeholder="95">
+              <div class="hint">貼圖存成 JPG 的品質。PNG 無損但檔案通常大好幾倍。</div>
+              <label class="chk"><input type="checkbox" name="texture_keep_raw" value="1">
+                <span>保留合併前的原始輸出（<code>textured/raw/</code>）</span></label>
+              <div class="hint">那是一份完整的 OBJ 複本加上每張原始貼圖,大約會讓輸出大一倍
+                (2M 面的 mesh ≈ 多 200 MB)。合併成功後預設刪掉;想自己比對或改用多張貼圖才勾。</div>
+              <label class="chk"><input type="checkbox" name="texture_keep_unseen" value="1">
+                <span>保留沒被任何照片看到的面</span></label>
+              <div class="hint">預設會丟掉完全沒拍到的面(底部、內凹處)。要保留完整幾何就勾起來,
+                那些面會用鄰接處內插補色。</div>
+            </div>
+          </details>
+          {% endif %}
+        </div>
+      </details>
+      {% endif %}
+
       {% for b in mesh_backends %}
       <div class="bp" data-backend="{{ b.name }}" {{ '' if loop.first else 'style=display:none' }}>
         <fieldset>
@@ -1822,7 +1906,8 @@
           <input id="viewer_path" placeholder="{{ browse_root }}/…/tsdf_post_scaled_mm.ply">
           <button type="button" class="ghost" onclick="openFilePicker('viewer_path')">瀏覽</button>
         </div>
-        <div class="hint">「瀏覽」從 <code>{{ browse_root }}</code> 起逐層挑檔(只列 mesh 檔),也可直接貼完整路徑。<b>留空直接按開啟</b>:檢視器裡選這台電腦的檔案或直接拖放(瀏覽器內解析,不上傳)。格式不符或檔案壞掉會顯示原因。.obj/.glb 會把多個子 mesh 合併顯示(不含材質貼圖)。</div>
+        <div class="hint">「瀏覽」從 <code>{{ browse_root }}</code> 起逐層挑檔(只列 mesh 檔),也可直接貼完整路徑。<b>留空直接按開啟</b>:檢視器裡選這台電腦的檔案或直接拖放(瀏覽器內解析,不上傳)。格式不符或檔案壞掉會顯示原因。.obj/.glb 會把多個子 mesh 合併顯示(不含材質);
+          <b>單一 mesh 的 .glb(例如本面板貼圖輸出的 <code>mesh.glb</code>)會保留貼圖</b>,並以不打光的方式顯示 —— 貼圖本身已經含有拍攝當下的光線。</div>
       </fieldset>
       <button class="submit" type="submit">👁 開啟 Viewer</button>
     </form>
@@ -2859,12 +2944,16 @@
     window._logJobId = jobId;
     var pre = document.getElementById('log');
     if (!pre) return;
-    pre.textContent = '';
+    // Do NOT clear: the server already rendered the log tail into this pane
+    // (job_log_tail), which is what the user reads if the WebSocket never
+    // connects. Adopt it as our starting buffer; the WS sends log_reset before
+    // replaying, so a healthy connection replaces it rather than appending.
     // Keep the log text in memory and write the DOM once per message. Reading +
     // rewriting the whole pre.textContent for *every* line was O(n²): replaying a
     // finished job's multi-MB log froze the tab ("Page Unresponsive").
-    var lines = [];
-    var lastProg = false;
+    var lines = pre.textContent ? pre.textContent.replace(/\n$/, '').split('\n') : [];
+    var lastProg = lines.length ? /\d+%\||it\/s/.test(lines[lines.length - 1]) : false;
+    pre.scrollTop = pre.scrollHeight;
     var MAX_LINES = 5000;     // keep only the recent tail in the DOM; a 4–5k-image
                               // run emits tens of thousands of lines and froze the tab
     // Log lines arrive over the shared WebSocket (window.rsBus, in joblist.js) — no

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
@@ -10,9 +11,56 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 
 from jobs import COLMAP_STAGES, MAX_JOBS, manager
 from web.services.job_history import history_context
-from web.shared import _page
+from web.shared import _page, templates
 
 router = APIRouter()
+
+
+# --- log pane seed --------------------------------------------------------- #
+# The log <pre> used to be rendered EMPTY and filled only by the WebSocket, so
+# anything that kept the socket from delivering — a proxy that dropped the
+# upgrade, a tab restored from bfcache, a page opened while the panel was
+# restarting — showed a running job with a permanently blank black box and no
+# hint why. Seeding the pane server-side means the log is never blank: the WS
+# replays the same tail over it as soon as it connects (log_reset clears first,
+# so nothing is duplicated), and if it never connects the seed is still there.
+_SEED_TAIL_BYTES = 64 * 1024
+_SEED_MAX_LINES = 300
+# tqdm rewrites one bar with \r; collapse runs of those to one line, the same way
+# the browser's pushLogLine does, so the seed isn't 300 near-identical bars.
+_PROGRESS_RE = re.compile(r"\d+%\||it/s")
+
+
+def job_log_tail(job_id: str, max_lines: int = _SEED_MAX_LINES) -> str:
+    """The end of a job's console log as text, for rendering into the log pane.
+
+    Registered as a Jinja global (below) rather than passed by each of the dozen
+    routes that render _jobview.html — every one of them would have to remember,
+    and the one that forgot would be a blank log again.
+    """
+    job = manager.get(job_id)
+    if not job or not job.log_path.is_file():
+        return ""
+    try:
+        with job.log_path.open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - _SEED_TAIL_BYTES))
+            data = fh.read()
+    except OSError:
+        return ""
+    lines = data.decode("utf-8", "replace").splitlines()
+    if size > _SEED_TAIL_BYTES and lines:
+        lines = lines[1:]                        # started mid-line
+    out: list[str] = []
+    for line in lines:
+        if _PROGRESS_RE.search(line) and out and _PROGRESS_RE.search(out[-1]):
+            out[-1] = line
+        else:
+            out.append(line)
+    return "\n".join(out[-max_lines:])
+
+
+templates.env.globals["job_log_tail"] = job_log_tail
 
 
 @router.get("/ui/joblist", response_class=HTMLResponse)
