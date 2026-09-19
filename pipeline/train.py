@@ -351,6 +351,21 @@ _TEX_MIN_SIDE = 1600            # never downscale past this; it's photo texture
 _TEX_BUDGET = 0.55              # of MemAvailable, leaving room for everything else
 
 
+def _pillow():
+    """The Pillow `Image` module, or None when it isn't installed.
+
+    Pillow is deliberately NOT a runtime dependency of this panel (pyproject keeps
+    the install pure-Python), so every use of it here needs an answer for "it
+    isn't there". Measuring degrades to a safe default; the one path that really
+    needs it — rewriting images before the bake — says so instead of raising an
+    ImportError from three frames down."""
+    try:
+        from PIL import Image
+        return Image
+    except ImportError:
+        return None
+
+
 def _mem_available() -> int:
     """Bytes of memory the kernel thinks we can take without swapping. MemAvailable,
     not MemFree: page cache is reclaimable and this box runs with most of RAM in it."""
@@ -387,9 +402,15 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 def _image_pixels(images_dir: Path) -> tuple[int, int, tuple[int, int]]:
     """(count, pixels of the largest image, its (w, h)). One PIL open per file
-    header — no decoding, so this is cheap even for a few thousand photos."""
-    from PIL import Image
+    header — no decoding, so this is cheap even for a few thousand photos.
+
+    Without Pillow the pixel count comes back 0, which _texture_plan reads as
+    "couldn't measure" and answers with a conservative thread count."""
+    Image = _pillow()
     n, best, size = 0, 0, (0, 0)
+    if Image is None:
+        return (sum(1 for f in images_dir.iterdir()
+                    if f.is_file() and f.suffix.lower() in _IMAGE_EXTS), 0, (0, 0))
     for f in sorted(images_dir.iterdir()):
         if not f.is_file() or f.suffix.lower() not in _IMAGE_EXTS:
             continue
@@ -405,7 +426,11 @@ def _image_pixels(images_dir: Path) -> tuple[int, int, tuple[int, int]]:
 
 
 def _stage_one(src: str, dst: str, mask: str | None, max_side: int | None) -> None:
-    from PIL import Image
+    Image = _pillow()
+    if Image is None:
+        raise RuntimeError(
+            "貼圖前要處理影像（套遮罩或縮圖）需要 Pillow,但這個環境沒裝:"
+            " `pip install pillow`,或不要填遮罩資料夾 / 影像上限（原尺寸不需要前處理）。")
     with Image.open(src) as im:
         im = im.convert("RGB")
         if mask:
@@ -505,7 +530,10 @@ _ATLAS_SIZES = (2048, 4096, 8192, 16384)
 
 
 def _atlas_area(atlases: list[Path]) -> int:
-    from PIL import Image
+    """Total pixels across the source atlases; 0 when they can't be measured."""
+    Image = _pillow()
+    if Image is None:
+        return 0
     Image.MAX_IMAGE_PIXELS = None          # we are the ones writing these; not a bomb
     area = 0
     for a in atlases:
@@ -537,6 +565,9 @@ def _atlas_plan(atlases: list[Path], budget: int, user_px: int = 0) -> tuple[int
     """
     area = _atlas_area(atlases)
     if area <= 0:
+        # Nothing measurable (no Pillow, or unreadable files): take the widest
+        # canvas, which is the one that keeps the packed height smallest, and let
+        # the merge — which runs in the backend env, where Pillow exists — pack it.
         return (user_px or _ATLAS_SIZES[-1], 1)
     need = area * _PACK_SLACK
     # Canvas RGB buffer + the source images + the encoder's own copy.
@@ -554,8 +585,10 @@ def _atlas_plan(atlases: list[Path], budget: int, user_px: int = 0) -> tuple[int
 
 def _atlas_dims(path: Path) -> str:
     """', 8192×8192' for a log line, or '' if the size can't be read."""
+    Image = _pillow()
+    if Image is None:
+        return ""
     try:
-        from PIL import Image
         Image.MAX_IMAGE_PIXELS = None
         with Image.open(path) as im:
             return f", {im.width}×{im.height}"

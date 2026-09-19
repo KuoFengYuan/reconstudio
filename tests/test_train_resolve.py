@@ -163,7 +163,9 @@ def test_texture_plan_survives_an_unreadable_meminfo():
 
 
 def _atlases(tmp_path, n, side):
-    from PIL import Image
+    # Pillow is an optional runtime dep (see pyproject) — CI installs it via the
+    # dev extra so these actually run, but the suite still has to pass without it.
+    Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
     files = []
     for i in range(n):
         f = tmp_path / f"a{i}_{side}.png"
