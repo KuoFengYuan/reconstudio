@@ -5,13 +5,18 @@ must not reject a text-only (cameras.txt) model — it used to require cameras.b
 """
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from pipeline.train import (
+    _assert_image_sizes,
     _assert_pinhole,
     _build_scene,
+    _check_masks,
     _model_ext,
     _resolve_dense,
+    _stage_texture_scene,
 )
 
 _CAMERAS_TXT = "# comment line\n1 PINHOLE 1920 1440 1366.9 1366.9 960.0 720.0\n"
@@ -20,6 +25,9 @@ _CAMERAS_TXT_DISTORTED = "1 OPENCV 1920 1440 1 1 1 1 0 0 0 0\n"
 
 class _R:
     def log(self, _msg):  # Runner stub: _assert_pinhole / _build_scene only log
+        pass
+
+    def check_cancel(self):
         pass
 
 
@@ -217,3 +225,111 @@ def test_atlas_plan_survives_unreadable_atlases(tmp_path):
     missing = [tmp_path / "gone.png"]
     px, down = _atlas_plan(missing, budget=512 * 10**9)
     assert down == 1 and px in (2048, 4096, 8192, 16384)
+
+
+def _write_bin_model(sd, w, h, names):
+    """Minimal PINHOLE cameras.bin + images.bin (no 2D points) for `names`."""
+    sd.mkdir(parents=True, exist_ok=True)
+    (sd / "cameras.bin").write_bytes(
+        struct.pack("<Q", 1) + struct.pack("<IiQQ", 1, 1, w, h) + struct.pack("<4d", 1, 1, w / 2, h / 2))
+    body = struct.pack("<Q", len(names))
+    for i, n in enumerate(names, 1):
+        body += struct.pack("<I4d3dI", i, 1, 0, 0, 0, 0, 0, 0, 1) + n.encode() + b"\0" + struct.pack("<Q", 0)
+    (sd / "images.bin").write_bytes(body)
+    (sd / "points3D.bin").write_bytes(struct.pack("<Q", 0))
+
+
+def _png(path, w, h):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", w, h))
+
+
+def _masked_dense(tmp_path):
+    """<dense>/sparse + images/ + undistorted masks/ in per-camera subfolders, and
+    a pre-undistort mask folder at the (smaller) original photo size."""
+    dense = tmp_path / "ws" / "x_mapper"
+    names = ["camA/IMG_1.JPG", "camB/IMG_2.JPG"]
+    _write_bin_model(dense / "sparse", 120, 80, names)
+    (dense / "images").mkdir()
+    for n in names:
+        _png(dense / "masks" / n.replace(".JPG", ".png"), 120, 80)
+        _png(tmp_path / "raw_masks" / n.replace(".JPG", ".png"), 100, 70)
+    return dense
+
+
+def test_build_scene_links_the_undistorted_masks(tmp_path):
+    dense = _masked_dense(tmp_path)
+    scene = tmp_path / "scene"
+    _build_scene(scene, dense / "sparse", dense / "images", False, _R())
+    assert (scene / "masks").resolve() == (dense / "masks").resolve()
+
+
+def test_check_masks_accepts_subfolder_masks_matching_the_model(tmp_path):
+    dense = _masked_dense(tmp_path)
+    scene = tmp_path / "scene"
+    _build_scene(scene, dense / "sparse", dense / "images", False, _R())
+    assert _check_masks("-r 1 --masks masks", scene, dense / "sparse", dense / "images", _R()) \
+        == "-r 1 --masks masks"
+
+
+def test_check_masks_swaps_pre_undistort_masks_for_the_undistorted_ones(tmp_path):
+    dense = _masked_dense(tmp_path)
+    raw = tmp_path / "raw_masks"
+    got = _check_masks(f"-r 1 --masks={raw}", tmp_path / "scene", dense / "sparse", dense / "images", _R())
+    assert got == f"-r 1 --masks={dense / 'masks'}"
+
+
+def test_check_masks_fails_fast_when_nothing_fits(tmp_path):
+    dense = _masked_dense(tmp_path)
+    for f in (dense / "masks").rglob("*.png"):
+        f.unlink()
+    with pytest.raises(ValueError, match="尺寸不符 2"):
+        _check_masks(f"--masks {tmp_path / 'raw_masks'}", tmp_path / "scene",
+                     dense / "sparse", dense / "images", _R())
+
+
+def test_check_masks_ignores_runs_without_masks(tmp_path):
+    dense = _masked_dense(tmp_path)
+    assert _check_masks("-r 1", tmp_path / "scene", dense / "sparse", dense / "images", _R()) == "-r 1"
+
+
+def _jpg(path, w, h):
+    Image = pytest.importorskip("PIL.Image", reason="the size check reads image headers")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (w, h)).save(path)
+
+
+def test_image_sizes_reject_one_re_exported_image(tmp_path):
+    dense = _masked_dense(tmp_path)
+    _jpg(dense / "images" / "camA" / "IMG_1.JPG", 120, 80)
+    _jpg(dense / "images" / "camB" / "IMG_2.JPG", 70, 46)       # cropped on re-export
+    with pytest.raises(ValueError, match="1 張影像尺寸與相機模型不符"):
+        _assert_image_sizes(dense / "sparse", dense / "images", _R())
+
+
+def test_image_sizes_accept_a_uniformly_resized_camera(tmp_path):
+    dense = _masked_dense(tmp_path)
+    for n in ("camA/IMG_1.jpg", "camB/IMG_2.jpg"):               # case differs from images.bin
+        _jpg(dense / "images" / n, 60, 40)
+    _assert_image_sizes(dense / "sparse", dense / "images", _R())
+
+
+def test_texture_staging_keeps_camera_subfolders(tmp_path):
+    dense = _masked_dense(tmp_path)
+    for n in ("camA/IMG_1.JPG", "camB/IMG_2.JPG"):               # symlinked as-is: no decode
+        (dense / "images" / n).parent.mkdir(parents=True, exist_ok=True)
+        (dense / "images" / n).write_bytes(b"")
+    staged = _stage_texture_scene(dense, tmp_path / "stage", None, "", _R())
+    assert (staged / "images" / "camA" / "IMG_1.JPG").is_file()
+    assert (staged / "images" / "camB" / "IMG_2.JPG").is_file()
+
+
+def test_texture_staging_masks_subfolder_images(tmp_path):
+    dense = _masked_dense(tmp_path)
+    for n in ("camA/IMG_1.JPG", "camB/IMG_2.JPG"):
+        _jpg(dense / "images" / n, 120, 80)
+    Image = pytest.importorskip("PIL.Image")
+    for f in (dense / "masks").rglob("*.png"):                     # real PNGs for compositing
+        Image.new("L", (120, 80), 255).save(f)
+    staged = _stage_texture_scene(dense, tmp_path / "stage", None, str(dense / "masks"), _R())
+    assert (staged / "images" / "camB" / "IMG_2.JPG").is_file()

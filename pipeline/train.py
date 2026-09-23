@@ -20,11 +20,12 @@ import os
 import re
 import shlex
 import shutil
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .backends import binary_exec, env_python, get_backend, repo_path, texrecon_bin
-from .model import read_cameras
+from .model import read_cameras, read_images
 from .runner import Cancelled, PipelineError, Runner
 
 TRAIN_DEFAULTS = {"backend": "lichtfeld-mrnf", "gpu": "0", "extra": "", "force": False}
@@ -102,6 +103,59 @@ def _assert_pinhole(sparse_dir: Path, r: Runner) -> None:
     r.log(f"camera model OK: {sorted(models)} ({ncam} cam)")
 
 
+def _find_image(images_dir: Path, name: str) -> Path | None:
+    """`images_dir/name`, or its case-insensitive match (the trainers do the same)."""
+    f = images_dir / name
+    if f.is_file():
+        return f
+    if f.parent.is_dir():
+        for g in f.parent.iterdir():
+            if g.name.lower() == f.name.lower():
+                return g
+    return None
+
+
+def _assert_image_sizes(sparse_dir: Path, images_dir: Path, r: Runner) -> None:
+    """Every image on disk must be the size its camera was calibrated at. One
+    re-exported (cropped/resized) file among a thousand trains wrong silently or
+    crashes GS-2M's multi-view loss minutes in (a 'shape ... is invalid' reshape),
+    so check the headers up front. A camera whose images are *all* uniformly
+    resized is fine — the trainers derive focal from FoV — and is only noted."""
+    Image = _pillow()
+    if Image is None or _model_ext(sparse_dir) != ".bin":
+        return
+    cams = read_cameras(sparse_dir / "cameras.bin")
+    sizes: dict[int, dict[tuple[int, int], list[str]]] = {}
+    missing: list[str] = []
+    for im in read_images(sparse_dir / "images.bin"):
+        f = _find_image(images_dir, im["name"])
+        if f is None:
+            missing.append(im["name"])
+            continue
+        try:
+            with Image.open(f) as pic:
+                sz = pic.size
+        except Exception:                                        # noqa: BLE001
+            missing.append(im["name"])
+            continue
+        sizes.setdefault(im["camera_id"], {}).setdefault(sz, []).append(im["name"])
+    bad: list[str] = []
+    for cid, by_size in sizes.items():
+        want = (cams[cid]["width"], cams[cid]["height"])
+        odd = {sz: names for sz, names in by_size.items() if sz != want}
+        if odd and len(by_size) == 1:
+            r.log(f"[note] 相機 {cid} 的影像全部是 {next(iter(odd))}(模型 {want}),視為整批縮放")
+            continue
+        bad += [f"{n} {sz}≠{want}" for sz, names in odd.items() for n in names]
+    if missing or bad:
+        ex = "; ".join((missing and [f"{n}: 找不到/讀不到" for n in missing[:3]]) + bad[:5])
+        og = images_dir.parent / f"{images_dir.name}_og"
+        raise ValueError(
+            f"{len(bad)} 張影像尺寸與相機模型不符、{len(missing)} 張找不到（例: {ex}）。"
+            " 這通常是影像在 undistort 後被重新匯出（調色/裁切）時改了尺寸。"
+            + (f" {og} 有原始檔，可用它替換這幾張。" if og.is_dir() else ""))
+
+
 def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
                  force: bool, r: Runner) -> None:
     """Materialize a GS-2M scene dir of symlinks into the COLMAP output.
@@ -123,7 +177,91 @@ def _build_scene(scene: Path, sparse_dir: Path, images_dir: Path,
         img.unlink()
     if not (img.is_symlink() or img.exists()):
         img.symlink_to(images_dir.resolve())
+    # COLMAP's undistort stage writes masks undistorted with the same cameras next to
+    # images/; expose them so `--masks masks` (relative to the scene) just works
+    dense_masks = images_dir.parent / "masks"
+    msk = scene / "masks"
+    if dense_masks.is_dir():
+        if force and msk.is_symlink():
+            msk.unlink()
+        if not (msk.is_symlink() or msk.exists()):
+            msk.symlink_to(dense_masks.resolve())
     r.log(f"scene ready: {scene}  (sparse/0 + images → {sparse_dir.parent})")
+
+
+def _png_size(path: Path) -> tuple[int, int] | None:
+    """(width, height) from a PNG's IHDR chunk — the panel env has no PIL."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return struct.unpack(">II", head[16:24])
+
+
+def _mask_for(mask_dir: Path, image_name: str) -> Path | None:
+    """The mask GS-2M will load for `image_name` (mirrors its resolveAuxPath):
+    the same subfolder as the image first, then a flat `<stem>.png`."""
+    rel = Path(image_name)
+    for cand in (mask_dir / rel.parent / f"{rel.stem}.png", mask_dir / f"{rel.stem}.png"):
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _mask_problems(mask_dir: Path, sparse_dir: Path) -> tuple[int, int, list[str]]:
+    """(n_missing, n_wrong_size, examples) for every registered image. GS-2M
+    resizes a wrong-size mask to the image without complaint, so a mask made on the
+    *distorted* photos trains silently misaligned — catch it here instead."""
+    cams = read_cameras(sparse_dir / "cameras.bin")
+    missing = wrong = 0
+    examples: list[str] = []
+    for im in read_images(sparse_dir / "images.bin"):
+        m = _mask_for(mask_dir, im["name"])
+        cam = cams.get(im["camera_id"], {})
+        want = (cam.get("width"), cam.get("height"))
+        if m is None:
+            missing += 1
+            if len(examples) < 3:
+                examples.append(f"{im['name']}: 無遮罩")
+        elif (got := _png_size(m)) != want:
+            wrong += 1
+            if len(examples) < 3:
+                examples.append(f"{m.name}: {got} ≠ 影像 {want}")
+    return missing, wrong, examples
+
+
+def _check_masks(args: str, scene: Path, sparse_dir: Path, images_dir: Path, r: Runner) -> str:
+    """Validate the `--masks` dir in `args` against the model before a long run.
+    If it doesn't fit but the undistorted masks beside images/ do (the usual slip:
+    pointing at the pre-COLMAP mask folder), switch to those; else fail fast."""
+    toks = shlex.split(args)
+    idx = val = None
+    for i, t in enumerate(toks):
+        if t == "--masks" and i + 1 < len(toks):
+            idx, val = i + 1, toks[i + 1]
+        elif t.startswith("--masks="):
+            idx, val = i, t.split("=", 1)[1]
+    if not val or _model_ext(sparse_dir) != ".bin":   # read_images is .bin-only
+        return args
+    mask_dir = Path(val) if Path(val).is_absolute() else scene / val
+    missing, wrong, ex = _mask_problems(mask_dir, sparse_dir)
+    if not (missing or wrong):
+        r.log(f"masks OK: {mask_dir}")
+        return args
+    dense_masks = images_dir.parent / "masks"
+    if dense_masks.is_dir() and dense_masks.resolve() != mask_dir.resolve() \
+            and _mask_problems(dense_masks, sparse_dir)[:2] == (0, 0):
+        r.log(f"[fix] --masks {mask_dir} 不對應去畸變影像（缺 {missing}、尺寸不符 {wrong}；"
+              f"例: {'; '.join(ex)}）→ 改用 undistort 產生的 {dense_masks}")
+        toks[idx] = str(dense_masks) if toks[idx] == val else f"--masks={dense_masks}"
+        return shlex.join(toks)
+    raise ValueError(
+        f"--masks {mask_dir} 與模型影像對不上：缺 {missing}、尺寸不符 {wrong}（例: {'; '.join(ex)}）。"
+        " GS-2M 要的是「去畸變後」的遮罩：在 COLMAP 階段填 MASKS_DIR 跑 undistort，"
+        " 它會輸出到 <workspace>/*_mapper/masks，訓練時 --masks 填 masks 即可。")
 
 
 def _trained_ply(out: Path) -> Path | None:
@@ -197,6 +335,7 @@ def _run_train_binary(p: dict, spec: dict, r: Runner) -> None:
 
     sparse_dir, images_dir = _resolve_dense(src)
     _assert_pinhole(sparse_dir, r)
+    _assert_image_sizes(sparse_dir, images_dir, r)
     data_dir = images_dir.parent              # dir holding sparse/ + images/
 
     config = (spec.get("config") or "").strip()
@@ -282,10 +421,12 @@ def run_train(p: dict, r: Runner) -> None:
 
     sparse_dir, images_dir = _resolve_dense(src)
     _assert_pinhole(sparse_dir, r)
+    _assert_image_sizes(sparse_dir, images_dir, r)
     scene = out.parent / f"{out.name}_scene"
     _build_scene(scene, sparse_dir, images_dir, bool(p.get("force")), r)
 
     args = (p.get("args") or "").strip()        # tunable params (assembled in app)
+    args = _check_masks(args, scene, sparse_dir, images_dir, r)
     extra = (p.get("extra") or "").strip()       # free escape-hatch flags
     cmd = spec.get("train_args", "-s {scene} -m {out} {args} {extra}").format(
         scene=str(scene), out=str(out), args=args, extra=extra)
@@ -400,6 +541,17 @@ def _texture_plan(px: int, cores: int, budget: int) -> tuple[int, int | None]:
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
 
+def _image_files(images_dir: Path) -> list[Path]:
+    """Every image under `images_dir`, sorted, recursing into the per-camera
+    subfolders COLMAP keeps (images.bin names them `cam/IMG_1.JPG`). Symlinked
+    group folders — the fusion layout — are followed."""
+    out: list[Path] = []
+    for root, dirs, files in os.walk(images_dir, followlinks=True):
+        dirs.sort()
+        out += [Path(root) / f for f in sorted(files) if Path(f).suffix.lower() in _IMAGE_EXTS]
+    return out
+
+
 def _image_pixels(images_dir: Path) -> tuple[int, int, tuple[int, int]]:
     """(count, pixels of the largest image, its (w, h)). One PIL open per file
     header — no decoding, so this is cheap even for a few thousand photos.
@@ -408,12 +560,10 @@ def _image_pixels(images_dir: Path) -> tuple[int, int, tuple[int, int]]:
     "couldn't measure" and answers with a conservative thread count."""
     Image = _pillow()
     n, best, size = 0, 0, (0, 0)
+    files = _image_files(images_dir)
     if Image is None:
-        return (sum(1 for f in images_dir.iterdir()
-                    if f.is_file() and f.suffix.lower() in _IMAGE_EXTS), 0, (0, 0))
-    for f in sorted(images_dir.iterdir()):
-        if not f.is_file() or f.suffix.lower() not in _IMAGE_EXTS:
-            continue
+        return len(files), 0, (0, 0)
+    for f in files:
         n += 1
         try:
             with Image.open(f) as im:
@@ -469,24 +619,27 @@ def _stage_texture_scene(scene: Path, dest: Path, max_side: int | None,
     sparse = scene / "sparse"
     (dest / "sparse").symlink_to(sparse.resolve())
 
-    files = [f for f in sorted(src_images.iterdir())
-             if f.is_file() and f.suffix.lower() in _IMAGE_EXTS]
-    if not files:
-        raise FileNotFoundError(f"{src_images} 底下沒有影像。")
+    # keep the subfolder layout: the bake resolves images by their images.bin name
+    rels = [f.relative_to(src_images) for f in _image_files(src_images)]
+    if not rels:
+        raise FileNotFoundError(f"{src_images} 底下(含子資料夾)沒有影像。")
+    for d in {rel.parent for rel in rels}:
+        (dest / "images" / d).mkdir(parents=True, exist_ok=True)
     if not max_side and not mask_dir:
-        for f in files:
-            (dest / "images" / f.name).symlink_to(f.resolve())
+        for rel in rels:
+            (dest / "images" / rel).symlink_to((src_images / rel).resolve())
         return dest
 
     jobs = []
-    for f in files:
+    for rel in rels:
         mask = None
         if mask_dir:
-            mask = Path(mask_dir) / f"{f.stem}.png"
-            if not mask.is_file():
-                raise FileNotFoundError(f"缺少 {f.name} 的遮罩: {mask}")
-            mask = str(mask)
-        jobs.append((str(f), str(dest / "images" / f.name), mask, max_side))
+            m = _mask_for(Path(mask_dir), rel.as_posix())
+            if m is None:
+                raise FileNotFoundError(
+                    f"缺少 {rel} 的遮罩: {Path(mask_dir) / rel.with_suffix('.png')}")
+            mask = str(m)
+        jobs.append((str(src_images / rel), str(dest / "images" / rel), mask, max_side))
     what = "去背+縮圖" if mask_dir and max_side else ("去背" if mask_dir else "縮圖")
     r.log(f"[texture] 前處理 {len(jobs)} 張影像({what}"
           + (f",最長邊 {max_side}px" if max_side else "") + ")…")
