@@ -96,7 +96,7 @@ BUILTIN_BACKENDS: dict[str, dict] = {
             # --- group: 前景遮罩（物件去背重建） ---
             {"key": "masks", "flag": "--masks", "type": "str", "default": "",
              "group": "前景遮罩（物件去背）", "label": "前景遮罩目錄 (--masks)", "placeholder": "masks 或絕對路徑",
-             "hint": "物件去背重建用。填放遮罩 PNG 的資料夾名（相對 source，例如 masks）或絕對路徑;可先用 scripts/mask.py 產生。留空 = 不使用。"},
+             "hint": "物件去背重建用。必須是「去畸變後」的遮罩:COLMAP 階段有填 MASKS_DIR 的話,undistort 已輸出一份,這裡填 masks 即可。填原始(未去畸變)遮罩會在開訓前被擋下或自動換成去畸變版。留空 = 不使用。"},
             {"key": "mask_gt", "flag": "--mask_gt", "type": "bool", "default": False,
              "group": "前景遮罩（物件去背）", "label": "遮罩 GT 影像 (--mask_gt)",
              "hint": "搭配 --masks 使用。把背景從 GT 影像挖掉、只擬合前景物件;背景雜亂、要乾淨單一物件 mesh 時很有用。"},
