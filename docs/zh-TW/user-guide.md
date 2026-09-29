@@ -1,0 +1,1107 @@
+[文件首頁](README.md) · [開發／部署／使用流程](workflows.md) · [元件索引](context-router.md) · [English quick start](../en/README.md)
+
+# Recon Studio
+
+把**影片或照片變成 3D 模型**的本機網頁面板,一條龍跑完:
+
+```
+影片 ──抽幀──► 清晰照片 ──COLMAP──► 相機位姿+點雲 ──訓練──► 3DGS 模型 ──Mesh──► 三角網格(.ply / 貼圖 OBJ)
+```
+
+打開瀏覽器就能操作:每一步都有表單、即時 log、可取消、跑完有「接著跑下一步」按鈕自動帶路徑。
+也內建瀏覽器 3D 檢視器(點雲 / Mesh / 量尺)、去背編輯器、GCS 雲端搬檔。
+
+**讀這份文件的方式**:
+
+| 你是誰 | 看哪裡 |
+|--------|--------|
+| 第一次裝機 | [一、安裝](#一安裝第一次部署) |
+| 每天操作的人 | [二、使用](#二使用) |
+| 要調效能 / 接雲端 / 用 GPS 航拍 | [三、進階](#三進階) |
+| 要改 code | [四、開發者](#四開發者) |
+
+## 每天怎麼啟動
+
+以下 `8078`／網域為此工作站的設定範例，預設連接埠是 `8077`；請以啟動輸出為準。
+
+裝好之後日常就這一行 —— 在**這台機器上**(ssh / VS Code 終端機都可以):
+
+```bash
+cd ~/repo/reconstudio && ./run.sh
+```
+
+它會自己讀 `local.env`、解 conda 環境、順手更新 SuperSplat 最新穩定版本與整合修補(背景跑,不擋啟動),
+然後印出**真正連得到的網址**:
+
+```
+Recon Studio  (env=rec, ffmpeg=ffmpeg, colmap=/home/will/repo/colmap/build/…)
+  本機          http://127.0.0.1:8078
+  區網(nginx)   https://recon.venraas.tw/   ← 給同事的就是這個(要帳密)
+```
+
+- **自己用** → `http://127.0.0.1:8078`(VS Code 會自動幫你轉發這個 port)
+- **給同事** → `https://recon.venraas.tw/` + 帳密。這條走 nginx,nginx 是系統服務、
+  開機就在,所以你只要負責把面板本身跑起來。
+
+視窗關掉面板就會停。要讓它一直活著(同事隨時連得到、重開機也自動起來),裝那個選用的
+user service —— 見 [讓同事連得到(區網)](#讓同事連得到區網)。
+
+**停止**:前景跑的按 `Ctrl+C`;裝成服務的用 `systemctl --user stop reconstudio`。
+
+**改完程式碼**:改 `templates/` 或 `static/js/`、`static/css/` 後重新整理頁面；
+改 `.py` 要重啟面板（`Ctrl+C` 再 `./run.sh`，或 `systemctl --user restart reconstudio`）。
+SuperSplat 原始碼修補需先[重新建置編輯器](#supersplat-自動更新)，再重新整理並開啟模型。
+
+**連不上的時候**先跑這個,它會直接告訴你是綁錯位址、代理指錯 port、還是 nginx 沒起來:
+
+```bash
+./run.sh --doctor
+```
+
+---
+
+# 一、安裝(第一次部署)
+
+> 面板本身很輕(純 Python、不含 torch);重的是 GPU 訓練環境。任何時候都可以用
+> **`./run.sh --doctor`**(終端機)或 **`/doctor`** 頁面逐項檢查,紅燈變綠燈再開始用。
+
+**下面的節次就是執行順序**,由快到慢:
+
+| # | 做什麼 | 大概要多久 |
+|---|--------|-----------|
+| [0](#0-系統前置) | 系統前置:git / conda / NVIDIA 驅動 | 10 分鐘 |
+| [1](#1-外部工具) | 外部工具:colmap + ffmpeg | 5 分鐘(apt)~ 1 小時(自己編) |
+| [2](#2-面板本體) | 面板本體:`./setup.sh` | 2~3 分鐘,**全自動** |
+| [3](#3-訓練後端需要-gpu每台機器各自編譯) | 訓練後端(每台機器各自編譯) | 20 分鐘 ~ 數小時 ← **最花時間** |
+| [4](#4-選用元件) · [5](#5-這台機器的設定) | 選用元件、微調設定 | 看需求 |
+| [6](#6-環境檢查) · [7](#7-啟動) | 健檢 + 啟動 | 1 分鐘 |
+
+> 第 2 步的 `setup.sh` 結尾會跑一次健檢。那時第 1、3 步還沒做完,**紅燈是正常的**
+> ——它就是在告訴你還缺什麼。
+
+## 0. 系統前置
+
+```bash
+sudo apt install -y git build-essential
+nvidia-smi                       # 驅動要先裝好,看得到卡才有得訓練
+```
+
+還沒有 conda 的話裝一個(`setup.sh` 找不到 conda 會直接停下來):
+
+```bash
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh
+```
+
+## 1. 外部工具
+
+| 工具 | 用途 | 注意 |
+|------|------|------|
+| **colmap**(3.x / 4.x) | 重建核心 | 不在 `PATH` 就在 `local.env` 設 `COLMAP_BIN` |
+| **ffmpeg** | 抽幀去模糊、縮圖 | **必須含 `blurdetect` filter**;有 NVDEC build 可 GPU 解碼 |
+| **exiftool**(選用) | undistort 前消毒 Canon 空字串 EXIF | 沒裝也能跑,只是踩到才知道(見下) |
+
+多數情況 apt 版就夠:
+
+```bash
+sudo apt install -y colmap ffmpeg libimage-exiftool-perl
+ffmpeg -hide_banner -filters | grep blurdetect   # 必須有這行,否則抽幀會失敗
+```
+
+> **exiftool 是做什麼的**:Canon 機身沒設定版權資訊時,仍會把 `Artist`/`Copyright`
+> 寫成空字串(而不是完全不寫)。COLMAP 的 `image_undistorter` 重新編碼這種影像時,
+> OpenImageIO 2.4.17 的 IPTC 編碼器會 assert 崩潰(`SIGABRT`),整個 undistort 階段
+> 直接失敗。裝了 exiftool,pipeline 會在每次 undistort 前自動清掉這兩個空字串欄位
+> (只在欄位是空字串時才動手,對其他相機是完全無感的 no-op,而且只改 metadata、
+> 像素不變)。沒裝 exiftool 不影響大多數素材,只是 Canon 拍的資料集有機率在
+> undistort 卡死,`./run.sh --doctor` 會提醒。
+
+> **什麼時候需要自己編 colmap**:要用 Caspar BA(`MAPPER=global-caspar` 後端)、或
+> 要讀航拍大圖的 IPTC/大小寫副檔名時,apt 版不夠 —— 得從源碼編。編完把路徑寫進
+> `local.env` 的 `COLMAP_BIN`(或 `sudo cmake --install build` 裝到 `PATH`)。
+
+## 2. 面板本體
+
+```bash
+git clone https://github.com/KuoFengYuan/reconstudio.git
+cd reconstudio
+./setup.sh          # 建 conda env + 裝依賴 + 產生 local.env + 跑環境檢查
+```
+
+`setup.sh` 會偵測這台機器的 conda 位置、最大的非 root 磁碟、有沒有 NVDEC 版 ffmpeg,
+產生 `local.env`,最後印出環境檢查告訴你還缺什麼。**通常不需要再手改。**
+可重複執行:env 已存在就只更新套件,`local.env` 已存在**絕不覆蓋**(偵測結果會另存成
+`local.env.detected` 讓你自己比對)。
+
+> 產生的 `local.env` 裡,磁碟/ffmpeg 那幾行是**註解掉的**——這是刻意的。`run.sh` 每次啟動
+> 都會重跑同一份偵測,把值寫死反而會**遮蔽偵測**:之後裝了 NVDEC ffmpeg、換了資料磁碟,
+> run.sh 都不會發現。要固定某一項就把該行的 `#` 拿掉。(`CONDA_ROOT` 是例外,寫死可以
+> 省下每次啟動一次 `conda info --base`,約 0.5 秒。)
+
+<details><summary>不想用腳本 / 想自己一步步來</summary>
+
+```bash
+conda create -n rec python=3.10 -y
+conda run -n rec pip install -r requirements.txt
+cp local.env.example local.env    # 再自己填路徑
+./run.sh --doctor                 # 確認缺什麼
+```
+
+`--env NAME` 換 env 名、`--skip-env` 只重新產生設定不碰 conda。
+</details>
+
+## 3. 訓練後端(需要 GPU,每台機器各自編譯)
+
+後端是「設定」不是「程式」:加一個訓練器 = 改 `backends.json`,不用改 code。內建預設 GS-2M。
+
+**GS-2M(預設,訓練 + mesh 都有)** — 放在面板的兄弟目錄 `../GS-2M`、conda env 名 `gs2m`,
+名字路徑都對就零設定:
+
+```bash
+cd ..                                    # 面板 repo 的上一層
+git clone https://github.com/ndming/GS-2M.git
+cd GS-2M
+conda env create --file environment.yml  # 建 env "gs2m"
+conda activate gs2m
+pip install -r requirements.txt          # 編 CUDA submodule(依顯卡,要跑一陣子)
+```
+
+> 要量**實際尺寸 (mm)** 再補:`conda run -n gs2m pip install opencv-contrib-python plyfile`
+
+> 要 **照片貼圖**(Mesh 表單的 🎨,見下面 Mesh 章節)再補 GS-2M 內附的 mvs-texturing:
+> ```bash
+> cd ../GS-2M && git submodule update --init --recursive third_party/mvs-texturing
+> cmake -B third_party/mvs-texturing/build -S third_party/mvs-texturing -DCMAKE_BUILD_TYPE=Release
+> cmake --build third_party/mvs-texturing/build -j                 # 產出 apps/texrecon/texrecon
+> ```
+> 面板會自己在 `<repo>/third_party/mvs-texturing/build/apps/texrecon/texrecon`、PATH、
+> `~/.local/bin` 依序找;裝在別處就在 `backends.json` 設 `"texrecon": "/絕對/路徑"`。
+> `./run.sh --doctor` 的 gs2m 底下會多一列「貼圖 (texrecon)」,綠了才會在表單裡開放。
+> 轉單檔 `.glb` 另外需要 `conda run -n gs2m pip install trimesh`(多數 GS-2M env 已經有)。
+
+> **新顯卡(Blackwell 等)注意**:GS-2M 的 `environment.yml` 釘的 torch 版本可能沒有
+> 你這張卡的 CUDA arch。裝完先確認 `./run.sh --doctor` 的 gs2m 那項 torch/CUDA 是綠的
+> ——它會真的在 gs2m env 裡 import 編譯出來的 CUDA submodule,這是「換機器後最常壞掉」
+> 的地方(extension 是為別張卡的 arch 編的)。需要時改用對應的 cu12x wheel 重編。
+
+**LichtFeld Studio(選用,只訓練、不 mesh)** — C++/CUDA binary,需 CUDA 12.8+ 與 vcpkg:
+
+```bash
+sudo apt install -y libcudnn9-cuda-12   # onnxruntime 的 CUDA provider 需要,缺了會跑到一半才爆
+cd .. && git clone https://github.com/MrNeRF/LichtFeld-Studio.git && cd LichtFeld-Studio
+cmake -B build && cmake --build build -j"$(nproc)"
+```
+
+> `libcudnn9` 同時也是 🌊 深度 工具(共用同一份 binary)的必要條件。裝在非標準位置時
+> 用 `local.env` 的 `LD_LIBRARY_PATH` 指過去;`./run.sh --doctor` 有專門一項在檢查它。
+
+LichtFeld 的 backend(MR-NF)已內建在 `pipeline/backends.py`,只要
+`LichtFeld-Studio` 跟 `reconstudio` 同一層(就是上面 `cd ..` clone 的位置),完全不用
+碰 `backends.json`,程式會自動找到 `build/LichtFeld-Studio`。只有這台機器的 build
+放在別的地方(不同硬碟、NFS 路徑…)時,才需要在**這台機器自己的** `backends.json` 補一個
+`"exec"` 覆蓋(範本見 `backends.example.json`)——其餘參數仍吃內建預設,以後新增參數只要
+`git pull` 就全機器同步,不用手動改 JSON。
+
+## 4. 選用元件
+
+- **☁️ GCS 雲端搬檔**:需 Google Cloud SDK + 登入,見[三、進階 — GCS 設定](#gcs-設定一次性)。
+- **🧹 SuperSplat(去背 + 點雲檢視)**:**免裝** — `run.sh` 啟動時自動同步最新穩定版本與整合修補
+  (背景跑、不擋啟動;離線就沿用現有版本)。詳見[三、進階](#supersplat-自動更新)。
+- **🌊 深度/法向量(選用)** — 為照片產生深度圖和/或法向量圖,給 LichtFeld 訓練做深度/法向量
+  監督。有**兩種引擎**,寫出的 `depth/`、`normals/` 完全同格式,下游訓練不需要知道是哪一個
+  產生的,可以混用或彼此覆蓋重跑:
+
+  | 引擎 | 需要裝什麼 | 速度(1600px) | 特性 |
+  |---|---|---|---|
+  | **LichtFeld preprocess(MoGe-2)**(預設) | 免裝,共用訓練 backend 的 binary | ~40 ms/張 | 內建 MoGe-2 ViT-B,第一次執行自動下載權重,不需 torch |
+  | **MoGe-3(PyTorch)** | 需 `moge3` conda env(見下) | ~0.5 s/張 | 細節明顯較佳,法向量差距最明顯 |
+
+  MoGe-2 這條**免額外裝 conda env** — 直接跑 LichtFeld-Studio 自己編譯出來的 `preprocess`
+  子指令(跟 lichtfeld-mrnf 訓練 backend 共用同一份 binary)。只要 `../LichtFeld-Studio`
+  建置好(見上面「3. 訓練後端」),開 `/doctor` 就會看到「深度/法向量生成」變綠燈。
+
+  **MoGe-3 引擎安裝**(選用;想要更銳利的法向量再裝):
+
+  ```bash
+  conda create -y -n moge3 python=3.11
+  conda run -n moge3 pip install torch "git+https://github.com/microsoft/MoGe.git"
+  # 驗證:應印出 True 和 OK
+  conda run -n moge3 python -c \
+    "import torch; print(torch.cuda.is_available()); \
+     from moge.model.v3 import MoGeModel; print('OK')"
+  ```
+
+  幾個要點:
+
+  - **env 名字要正好是 `moge3`** — 面板用 `conda_env: "moge3"` 找它(跟訓練 backend 同一套
+    解析邏輯)。裝在別處就在 `backends.json` 覆寫 `python`。
+  - **要獨立的 env,不要塞進訓練 env** — MoGe 會固定自己的 torch 版本,而面板本體的 env
+    根本沒有 torch。
+  - 上面刻意**不指定 torch 的 CUDA 版本**,讓 pip 自己解。若你的網路有 SSL 攔截,
+    `download.pytorch.org` 那個 index 可能因為憑證鏈被拒,走預設 PyPI 反而會過。
+  - 權重(預設 `Ruicheng/moge-3-vitl`,370M)第一次執行時從 HuggingFace 自動下載。
+  - **需要 CUDA**;沒有可用 GPU 時這條引擎直接報錯結束,不會退回 CPU 慢跑。
+  - LichtFeld **無法**載入 MoGe-3:它是把 MoGe-2 的架構手刻成 C++/CUDA(沒有 ONNX
+    runtime),`--model` 只換權重不換架構,所以 MoGe-3 只能走這條獨立的 PyTorch 路徑。
+
+  裝好後面板「深度/法線生成」的**引擎**選單就會出現 MoGe-3。用法見
+  [二、使用 — 🌊 深度](#-深度影像--深度圖法向量圖--訓練深度法向量監督)。
+
+- **✂️ 影像去背(選用)** — SAM 前景遮罩,需要 `sam` conda env:
+
+  ```bash
+  conda create -y -n sam python=3.11
+  # 新一代顯卡(sm_120,如 RTX 50 系)要 CUDA 12.8 的 wheel
+  conda run -n sam pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+  conda run -n sam pip install opencv-python-headless
+  conda run -n sam pip install "git+https://github.com/facebookresearch/sam2.git"
+  # SAM 3 / 文字提示(Grounding DINO):
+  conda run -n sam pip install -U transformers accelerate
+  # SAM 3 的權重要先在網站上申請,核准後登入一次:
+  conda run -n sam hf auth login
+  # 驗證:應印出 True
+  conda run -n sam python -c "import torch; print(torch.cuda.is_available())"
+  ```
+
+  - **env 名字要正好是 `sam`**(跟訓練 backend 同一套 `conda_env` 解析邏輯)。
+  - 跟 `moge3` 一樣要**獨立的 env**:SAM 會固定自己的 torch 版本,面板本體沒有 torch。
+  - 權重第一次執行時從 HuggingFace 自動下載。`facebook/sam2.1-hiera-large`(SAM 2.1)和
+    `IDEA-Research/grounding-dino-base` 都是公開的;**`facebook/sam3` 是 gated**,要先到
+    <https://huggingface.co/facebook/sam3> 申請並等核准。
+  - **需要 CUDA**;沒有可用 GPU 會直接報錯,不退回 CPU。
+
+### 從舊機器搬過來可以省的
+
+已經有一台裝好的機器時,這兩樣**直接複製比重建快**:
+
+```bash
+# SuperSplat bundle:省掉第一次啟動的背景建置,新機器也就不需要 node/npm
+rsync -a 舊機器:~/repo/reconstudio/static/supersplat/ static/supersplat/
+```
+
+`local.env` **不要整份複製** —— 路徑、磁碟、port 都是機器專屬的。跑 `./setup.sh` 讓它重新
+偵測,只把真正跨機器通用的那幾行搬過去(例如 `CLOUDSDK_CORE_PROJECT`)。
+
+## 5. 這台機器的設定
+
+`setup.sh` 已經產生 `local.env`(路徑 / port / binary 位置),要調再開它——每個選項的
+完整說明在 `local.env.example`。
+
+`backends.json` **通常不用建**:內建預設已涵蓋「兄弟目錄 + 標準 env 名」的情況。只有這台
+機器的 repo/build 放在別處才需要,而且只寫要覆蓋的那幾個 key(範本見 `backends.example.json`)。
+
+> `local.env` 裡打錯字或留著失效的舊變數**不會報錯**——`Settings` 會靜默忽略它、改用預設值。
+> `./run.sh --doctor` 的「local.env 變數」一項專門抓這個。
+
+**`setup.sh` 猜不到、要你自己判斷的一項**:`COLMAP_PANEL_RESIZE_WORKERS`(COLMAP FullHD
+縮圖的平行 ffmpeg 數)取決於**來源檔放在哪種磁碟**,不是 CPU 核數。單顆 HDD 上開太多
+worker 會讓磁碟一直隨機尋軌、CPU 空等而更慢(大檔如 102MP 航拍 TIFF 的甜蜜點約 4~6);
+放 SSD/NVMe 就可以往上加。預設是 CPU 核數(上限 32),對 HDD 來說通常太高。
+
+## 6. 環境檢查
+
+```bash
+./run.sh --doctor          # 終端機版:colmap / ffmpeg / exiftool / 磁碟 / cudnn / 後端 / GPU 全部逐項
+./run.sh --doctor --fast   # 跳過每個後端的 torch/CUDA 探測(快)
+./run.sh --doctor --json   # 給腳本吃的 JSON
+```
+
+必要條件全通過就 **exit 0**,可以直接串在部署腳本後面。它檢查的不只是「檔案在不在」,還包括
+幾個典型的**靜默失敗**:ffmpeg 有沒有編進 `blurdetect` filter、設定的 hwaccel 這個 build
+到底支不支援、資料/暫存磁碟是真的可寫還是唯讀掛載、`libcudnn.so.9` 解析得到嗎
+(LichtFeld 的 onnxruntime 在跑到一半才會爆)。
+
+`WARN` 代表「某個**選用**功能不能用」,不算部署失敗;`FAIL` 才是一定會出問題。
+同一份報告的網頁版在 `/doctor`。
+
+## 7. 啟動
+
+```bash
+./run.sh        # → 開瀏覽器 http://127.0.0.1:8077
+```
+
+日常啟動的簡版在最前面的 [每天怎麼啟動](#每天怎麼啟動)。這裡是細節。
+
+啟動時會把**真正連得到的網址**印出來(本機、以及區網代理裝好之後的那一個),並且在
+port 已經被別的行程佔住時直接拒絕啟動 —— 不然活下來的是舊的那個面板,跑的是舊的程式碼,
+而這跟「我的改動沒生效」長得一模一樣。
+
+`HOST` / `PORT` 優先順序為 `local.env` → `RECON_STUDIO_HOST` / `RECON_STUDIO_PORT`
+→ 符合位址／數字檢查的一般環境值 → 預設 `127.0.0.1:8077`。
+編譯器的 `HOST=x86_64-conda-linux-gnu` 會被忽略；`local.env` 已指定的值優先於環境覆蓋。
+部署時固定在 `local.env`，修改連接埠後同步更新 nginx；詳見[部署流程](workflows.md#2-部署或更新工作站)。
+
+自己遠端用:`ssh -L 8077:127.0.0.1:8077 user@host`。
+
+### 讓同事連得到(區網)
+
+**不要**改成 `HOST=0.0.0.0`:面板沒有任何登入機制,又能瀏覽 `RECON_STUDIO_BROWSE_ROOT`
+底下的檔案、還會開子行程。改用 nginx 反向代理,面板本身維持綁 `127.0.0.1`:
+
+```bash
+sudo scripts/deploy-nginx-lan.sh                       # 會問一組帳密
+sudo scripts/deploy-nginx-lan.sh --domain recon.example.tw   # 換網址
+sudo scripts/deploy-nginx-lan.sh --https-port 8443 --alt-port 8444   # 換 port
+sudo scripts/deploy-nginx-lan.sh --cert mkcert       # 強制用哪張憑證(預設 auto)
+```
+
+裝完會有**兩個入口**:
+
+| | 給誰 | |
+|---|---|---|
+| `https://recon.venraas.tw/` | 給同事的 | 不用記 port |
+| `https://<區網IP>:8443/` | 備援 | DNS 出問題時照樣進得去 |
+
+正式入口跟這台機器上其他站台**共用 443**(nginx 用 SNI / Host 分流)。所以 443 上這個
+vhost 的 `server_name` **只掛自己的網址** —— 裸 IP 和 `localhost` 是別的站台的名字,兩個
+server block 搶同一個 server_name 不會報錯,nginx 會自己選一個贏家,輸的那個就這樣不見了。
+IP 那組名字因此放在備援 port 上。安裝腳本會先掃過所有啟用中的站台,發現網址已經被別人
+佔走就直接拒絕安裝;`nginx -t` 沒過也會把 symlink 收回去、不 reload,不會把整台機器的站台
+一起帶走。
+
+網址名稱是 `RECON_STUDIO_LAN_DOMAIN`(`local.env`,預設 `recon.venraas.tw`),也可以用
+`--domain` 一次性覆蓋。**用專案自己的名字,不要借別的服務的** —— `claude.venraas.tw` 是
+同一台機器上的 LLM 聊天站,連過去會看到它的登入框(realm 是 `Sirocco`),帳密當然打不進去。
+分不清楚連到哪個站的時候問 nginx 就好:
+
+```bash
+curl -sk -o /dev/null -D- https://recon.venraas.tw/ | grep -i www-authenticate
+# 要看到 realm="Recon Studio";看到別的名字就是連錯站了
+```
+
+它會偵測本機區網 IP、**直接從 `local.env` 讀 `PORT`**、用 mkcert 簽一張同時涵蓋網址和 IP
+的憑證、設定 basic auth,然後 `nginx -t` + reload。給同事的是一個固定網址 —— 不會因為你
+關掉 VS Code 或斷線就失效,這正是 VS Code / `ssh -L` 轉發做不到的地方(那種轉發是每個人
+各自一份,而且網址不能轉給別人)。要綠鎖頭就順便把 `mkcert -CAROOT` 底下的 `rootCA.pem`
+給他們裝。
+
+**DNS**:`recon.venraas.tw` 需要一筆 A 記錄指到本機區網 IP。名稱還沒生效之前備援那條
+就能用,腳本也會把該下的 `gcloud dns record-sets create` 印出來。在公開 DNS 上放
+`192.168.*` 是刻意的,跟 `claude.venraas.tw` 同一招:到處都解析得到,但只有區網內路由
+得到,等於不用開防火牆就天然對外隱形。
+
+順帶一提,有些路由器/上游 DNS 會做 **DNS rebinding 保護**,把「公開網域回私有 IP」的答案
+擋掉並回 NXDOMAIN。這時直接問公用 DNS(`dig recon.venraas.tw @1.1.1.1`)會有答案、問區網
+DNS 卻沒有 —— 要嘛在該 resolver 上把這個網域加白名單,要嘛就用備援那條網址。
+
+憑證只涵蓋簽發時給的那些名字 —— **換過 `RECON_STUDIO_LAN_DOMAIN` 就要重跑一次腳本**,
+不然新名字會出現名稱不符的警告。
+
+### 網址列的紅色「不安全」
+
+這是**預期的**,而且跟連線有沒有加密無關。分清楚兩件事:
+
+```bash
+echo | openssl s_client -connect <區網IP>:443 -servername recon.venraas.tw 2>/dev/null \
+  | openssl x509 -noout -issuer -ext subjectAltName
+```
+
+- `subjectAltName` 裡有 `DNS:recon.venraas.tw` → **名字是對的**。沒有的話是設定問題
+  (多半是換過網址沒重跑腳本),重跑 `sudo scripts/deploy-nginx-lan.sh` 就好。
+- `issuer=O=mkcert development CA` → **這才是紅燈的原因**。TLS 有生效、流量有加密,
+  只是簽這張憑證的 CA 只存在於這台機器,別人的瀏覽器沒有理由相信它。
+
+要變綠鎖頭,兩條路:
+
+**A. 每台要連的機器裝一次 mkcert 的根憑證**(不動任何雲端設定)
+
+```bash
+mkcert -CAROOT          # 印出 rootCA.pem 在哪
+```
+
+把那個 `rootCA.pem` 傳給對方,匯入「受信任的根憑證授權單位」。注意 Chrome/Edge 吃**作業
+系統**的憑證庫、Firefox **有自己一套**、手機又是另一套,所以每台裝置、有時每個瀏覽器都要
+做一次。人少時最省事。
+
+**B. 換成 Let's Encrypt 的真憑證**(零客戶端設定,任何人打開就是綠的)—— **本機已採用**
+
+```bash
+sudo scripts/issue-letsencrypt-cert.sh --email you@example.org \
+     --gcloud-cli --project <GCP 專案> --zone <managed zone>
+# 先彩排不想動到用量上限:加 --staging
+```
+
+可行的關鍵是 **DNS-01 驗證不需要外面連得到這台機器** —— 它只要求你能在該網域寫一筆 TXT
+記錄,Let's Encrypt 從頭到尾不會來連你。所以「公開網域 + 私有 IP」完全沒問題。
+
+腳本做的事:確認網域在**公開 DNS** 上真的看得到(DNS-01 是 Let's Encrypt 自己的 resolver
+在驗,只有區網知道的名字會跑到一半才爆)→ 找出**真正在服務**的 managed zone → 簽發,並把
+`--deploy-hook "systemctl reload nginx"` 寫進續簽設定(**少了這個,自動續簽會寫出新憑證但
+nginx 永遠不重載,面板就一直送過期的那張**)→ 最後自動重跑 `deploy-nginx-lan.sh --cert
+letsencrypt` 把 nginx 指過去。之後 `certbot renew` 每天跑兩次、到期前 30 天自動換,不用管。
+
+**兩種驗證身分的方式**:
+
+- `--gcloud-cli`(預設,沒有金鑰時)—— certbot 的 manual hook
+  (`scripts/acme-gcloud-hook.sh`)直接用**你自己的 `gcloud` 身分**寫 TXT 記錄。
+  `roles/editor` 就夠了,不用建 service account、不用改任何 IAM。
+  代價:自動續簽依賴你個人的 OAuth token;被撤銷時續簽會失敗,Let's Encrypt 會寄信到
+  簽發時登記的信箱。
+- `--sa` —— 傳統的 service-account 金鑰 + `certbot-dns-google`。續簽最穩,但要有人用
+  **Owner** 權限把該帳號綁到 zone 上。`roles/editor` **設不了 IAM policy**,專案層級和
+  zone 層級都不行(兩個都試過,都是 `PERMISSION_DENIED`),所以這條路一定要找 Owner。
+
+**zone 要找對**:腳本不只比對名字,還會要求那個 zone 的 nameServers **真的出現在母網域的
+委派名單裡**。`venraas.tw` 活的那個是 `venraasitri` 專案的 `venraas-tw-zone`
+(NS `ns-cloud-c*`);`itri-w1-3d-project` 底下那兩個同名 zone 的 NS 是 `ns-cloud-b*` /
+`ns-cloud-e*`,是舊的、沒在服務 —— 寫進去的 TXT 沒有任何 resolver 看得到,驗證只會莫名其妙
+失敗。腳本會把跳過的原因印出來。
+
+代價先知道再決定:憑證會進公開的 Certificate Transparency log,等於公開
+「`recon.venraas.tw` 這個名字存在」。它解到 `192.168.90.146`、外面路由不到,但名字本身
+藏不住。
+
+換完之後 `https://recon.venraas.tw/` 是綠鎖頭、誰都不用裝 `rootCA.pem`;
+`https://<區網IP>:8443/` 那條**仍然是 mkcert**,因為公信 CA 不會簽裸 IP。兩個 vhost 各自
+帶各自的憑證,這也是 `ssl_certificate` 沒有放進共用 snippet 的原因。驗收:
+
+```bash
+openssl s_client -connect recon.venraas.tw:443 -servername recon.venraas.tw </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer          # 要看到 issuer=...Let's Encrypt...
+certbot renew --dry-run                  # 彩排續簽,含 nginx 重載
+```
+
+(Chrome 若出現「你已選擇關閉這個網站的安全性警告」,那是你之前按過「繼續前往」留下的
+per-site 設定,點旁邊的「開啟警告」就會還原。)
+
+改了 `PORT` 之後**重跑一次這個腳本**;忘了的話 `./run.sh` 的啟動訊息和 `/doctor` 的
+「區網代理 (nginx)」都會直接說代理指到哪個 port、面板綁的是哪個 —— 「port 明明有掛
+卻連不到」幾乎都是這一條。
+
+面板本身要**一直開著**代理才有東西可以轉。要讓它撐過登出/重開機,裝那個選用的 user
+service:`infra/systemd/reconstudio.service`(檔頭有指令)。
+
+移除:`sudo scripts/deploy-nginx-lan.sh --uninstall`。
+
+---
+
+# 二、使用
+
+## 介面總覽
+
+左側分三排:**功能**(重建流程的五站)、**工具**(獨立小工具,跟流程無關)、
+**檢視**(看檔案的檢視器)。各分頁互相獨立,**不強制照順序**——但每站跑完都有
+「接著跑下一步」按鈕幫你帶好路徑。
+
+| 排 | 分頁 | 做什麼 | 輸入 → 輸出 |
+|----|------|--------|------------|
+| 功能 | ☁️ 資料 | GCS 雲端 ⇄ 本機搬檔 | gs:// ⇄ 本機資料夾 |
+| 功能 | 抽幀 | 影片抽成清晰照片(去模糊) | 影片資料夾 → 每支影片一夾 .jpg |
+| 功能 | COLMAP | 照片算相機位姿 + 稀疏點雲 | 照片 → workspace(sparse + 去畸變 dense) |
+| 功能 | 訓練 | 3DGS 訓練(可開深度監督) | COLMAP workspace → 3DGS 模型 |
+| 功能 | Mesh | 模型抽三角網格,可貼圖、可量實際尺寸 | 3DGS 模型 → `tsdf_post.ply`(+貼圖 OBJ/GLB、+mm 版) |
+| 工具 | 🌊 深度 | 為照片產生深度/法向量圖(LichtFeld preprocess) | 影像夾 → `depth/`、`normals/`(同名同尺寸) |
+| 工具 | ✂️ 影像去背 | 匡選要保留的物體,整夾去背(可即時檢視 / 單張修圖) | 影像夾 → `no_bg/cutout/`(RGBA)、`no_bg/masks/` |
+| 工具 | 🧱 分塊 | 大場景切成可獨立訓練的子塊 | COLMAP workspace → 每塊一夾 |
+| 檢視 | 👁 Mesh Viewer | 看任意 mesh 檔(不綁 job) | `.ply/.obj/.stl/.glb`,server 或本機檔 |
+| 檢視 | ✨ SuperSplat | 看任意點雲 / 3DGS(不綁 job) | `.ply/.splat/.ksplat/.spz/.sog` |
+
+右側分成**工作區首頁、目前工作、任務紀錄**三個獨立分頁；標題與分頁固定在內容區外，只有下方內容捲動，避免蓋住搜尋、分類或模型工具列。開啟任務或 SuperSplat 時，內容會回到頂部。
+首頁提供素材入口，目前工作保留任務詳情／模型編輯器，任務紀錄用來搜尋、篩選與管理任務。
+
+- **隨時返回首頁**：開啟歷史任務後，按「工作區首頁」即可返回素材入口，不會清除目前工作、表單內容或任務搜尋條件。再按「目前工作」即可接續查看；返回首頁後重新整理也會留在首頁。
+- **載入不打斷導覽**：如果開啟任務後立刻返回首頁或任務紀錄，較慢的載入結果會留在「目前工作」，不會自動把畫面切回去。分頁支援方向鍵與 Home／End 鍵。
+
+- **返回同一個任務**：開啟任務後，網址會帶入 `?job=<id>`；重新整理仍會返回該任務，也可按「複製任務連結」保存。
+- **依用途找任務**：類別固定顯示「影片抽幀、照片重建（COLMAP）、模型訓練（3DGS）、網格模型（Mesh）、雲端傳輸、深度與法線、影像去背、大場景分塊」，搭配各自的向量圖示與簡短用途說明，任務列也使用相同圖示；大螢幕限制閱讀寬度，較窄的內容區自動改成兩欄。
+- **跨階段搜尋專案**：搜尋會比對任務名稱、ID、來源／輸出路徑與類別名稱；空白分隔的關鍵字需全部符合，例如「花瓶 訓練」或「COLMAP 失敗」。支援英文大小寫與全形字元正規化，中文輸入法選字時不刷新清單。
+- **組合篩選**：可再選類別與狀態；類別數量依搜尋與狀態更新，狀態數量依搜尋與類別更新，上方概況仍是全部任務總數。已套用條件可逐一移除，或按「清除篩選」重設；任務列顯示路徑方便區分同名紀錄。
+- **查看完整紀錄**：畫面保留最近紀錄（最多 5,000 行），「下載完整紀錄」可取得檔案。執行中的任務下載到開始讀取時的內容，後續新增的 log 留待下次下載。
+- **批次取消與刪除**：進行中的任務會先要求取消並保留紀錄，完成後可再次選取刪除。操作結果會分別顯示已刪除、已要求取消與未完成數量；未完成項目保持勾選。
+- **持續操作**：即時更新會保留搜尋與選取狀態、表格橫向位置；未查看任務紀錄時暫緩清單更新，返回時補上最新狀態。日誌斷線重連時會重新載入最近紀錄，避免重複顯示。
+
+
+## 抽幀(影片 → 清晰照片)
+
+選影片資料夾 → 設定輸出位置與每秒抽幾張 → **▶ 抽幀並移除模糊影格**。
+GPU 解碼自動啟用，失敗時退回 CPU；原始影片保留。
+
+| 篩選方式 | 行為 |
+|----------|------|
+| **雙重篩選（預設）** | 同時套用品質門檻與清晰度排名，不以模糊影格補足保留比例 |
+| 只用品質門檻 | 保留所有分數不高於上限的影格，不額外按比例淘汰 |
+| 只按比例 | 保留影片內相對清晰的影格；整段偏模糊時仍可能留下模糊影格 |
+
+預設每秒抽 **1 張**、模糊分數上限 **8**、最多保留有效評分影格的 **70%**。
+分數越低越清晰、門檻越低越嚴格；8 是調整起點，場景紋理與解析度不同時需查看結果調整。
+比例排序遇到同分時依檔名穩定選取，少量影格至少保留一個候選，但仍須通過品質門檻。
+想保留更多視角可提高比例或選「只用品質門檻」。這是篩除模糊影格，不會將模糊影像修復成清晰影像。
+
+```
+輸入  <root>/<group>/<video>.MOV          例  FY115/FY115_0518/A/IMG_3600.MOV
+輸出  <out>/<group>/frames_<video>/*.jpg  例  FY115/0518_colmap/A/frames_IMG_3600/*.jpg
+```
+
+- `blur_scores.csv`：每張影格的檔名、模糊分數與決策：`kept` 保留、`above_threshold` 超過門檻、`percentile` 排名淘汰、`invalid_score` 無有效分數。
+- `frame_quality.json`：抽取／保留／淘汰數量、各原因數量與本次篩選設定。
+- 保留 FFmpeg 每幀的分數紀錄，避免連續同分被日誌合併而錯位。無紋理等造成的 NaN／無限大分數會淘汰；分數筆數和影格不一致時直接停止，不會補上假清晰分數。
+- 重跑先在暫存目錄抽幀與篩選，再替換系統產生的 `frame_*.jpg`，避免舊影格混入；其他檔案保留。取消或替換失敗會回復原輸出。
+- 若完全沒有達標影格，任務會失敗並保留原輸出；本次原因另存 `rejected_frames.csv`、`rejected_quality.json`。多影片中有失敗項目時，任務也會標示失敗，請先確認再進行 COLMAP。
+- 不同影片若同名而會寫入同一輸出目錄，會在抽幀前攔下，請先重新命名。
+
+## COLMAP(照片 → 重建)
+
+設 `image_root`(照片)和 `workspace`(輸出)。兩個常用選項:
+
+- **影像解析度**:預設把每張縮成長邊 ≤1920 的實體副本(`workspace/images_1920/`)再跑整條
+  COLMAP——4K / 航拍原圖直接跑又慢又容易出問題。要高解析訓練圖可選 2560 / 4096;
+  「保持原樣」用原始檔。(Canon 空字串 EXIF 導致 undistort 崩潰的問題,現在不論選哪個
+  解析度都會在 undistort 前自動消毒,不用靠縮圖重編碼側面繞過——見[一、安裝 — 外部工具](#1-外部工具)的 exiftool 說明。)
+- **版面(layout)**:自動偵測;`single` = 一夾照片一台相機、`multi` = 每個子資料夾一台相機、
+  `nested` = 抽幀輸出的兩層結構。
+
+**▶ 啟動 COLMAP** → log 會顯示偵測到的 layout 和各階段進度。跑完按 **🧊 檢視 3D 結果**
+檢查品質,或 **🧠 接著訓練**。
+
+> 航拍 / RTK 有 GPS 的資料,展開「GPS 對齊 + 大場景」可以更快更穩,見
+> [三、進階 — GPS](#gps--大場景航拍-rtk)。
+
+## 訓練(重建 → 3DGS 模型)
+
+選 backend(環境沒裝好會灰掉,旁邊有 /doctor 連結)、`source`(COLMAP workspace)、
+`model_path`(輸出位置)、**GPU 編號**。參數依 backend 動態顯示,每個欄位都有說明。
+右側狀態列會顯示 `iter N/total` 和 loss。
+
+> 訓練只吃**去畸變(PINHOLE)**模型——接錯會在開跑前直接報錯,不會白跑。
+> 原 COLMAP workspace 完全不動(symlink 進去)。
+
+### 開啟深度/法向量監督(depth / normal loss)
+
+LichtFeld backend(MR-NF)的參數區有深度與法向量兩組選項,先用「🌊 深度」產生對應
+的圖後即可開啟:
+
+- **深度損失 (use-depth-loss)** — 勾選才啟用(預設關)。深度圖沒有自動生成,一定要先用
+  「🌊 深度」工具產生 `depth/`。
+- **深度損失模式** — `ssi`(**自動偵測,預設,建議**)、`ssi-disparity`、`ssi-depth`(強制指定
+  先驗是反深度或正深度)。
+- **深度損失權重** — 預設 `2.0`。
+- **法向量損失 (use-normal-loss)** — 勾選才啟用(預設關)。**這版起法向量圖不是必須預先生成**:
+  訓練時若 `normals/` 缺圖或尺寸不符,LichtFeld 會自動用內建 MoGe-2 即時補生成(`--no-normal-auto-generate`
+  可關掉這個行為)。「🌊 深度」工具仍然有用——可以用原始解析度先跑一次、重複利用、離線檢查——但不再是
+  開啟法向量損失的前提。
+- **法向量先驗權重** — 預設 `0.005`。
+- **深度-法向量一致性權重** — 預設 `0.001`。
+- **扁平化權重** — 預設 `0`(法向量監督期間讓高斯最短軸攤平;預設不啟用)。
+- **法向量先驗座標系** — `auto`(**自動偵測,建議**)、`camera-opencv`、`camera-opengl`、`world`。
+
+> 前提:`depth/`、`normals/` 要和**這次訓練實際用的 `images/` 同層、同名同尺寸**。LichtFeld 看到
+> `--use-depth-loss` / `--use-normal-loss` 會自動掃 `<資料夾>/depth`、`<資料夾>/normals` 對應
+> (不用手動指路徑)。
+
+### 開啟 16-bit 色彩訓練(HDR 素材)
+
+LichtFeld backend(MR-NF)參數區有 **16-bit 色彩訓練**(`--use-16bit`)勾選框,預設關。
+
+- 只在來源影像**本身就是 16-bit**(RAW 轉出的 TIFF/PNG、HDR 合成素材)才有意義——一般手機
+  /相機直出的 8-bit JPEG/PNG 開這個沒效果,因為動態範圍在源頭就已經被裁掉了。
+- 開啟後 LichtFeld 會自動用**無損 JPEG2000** 做磁碟快取(不用另外設定),換取更完整的亮部/
+  暗部細節,代價是快取檔案較大、稍慢。
+
+## 🌊 深度(影像 → 深度圖/法向量圖 → 訓練深度/法向量監督)
+
+為每張照片產生深度圖和/或法向量圖,輸出成 **LichtFeld 格式的 `depth/`、`normals/` 資料夾**
+(與來源**同名同尺寸**的 PNG),給訓練的[深度/法向量監督](#開啟深度法向量監督depth--normal-loss)
+讀取。兩種引擎可選,安裝需求見[一、安裝 — 選用元件](#4-選用元件)。
+
+1. **`images`** — 選照片資料夾(或含 `images/` 的 COLMAP workspace)。
+2. **引擎** — `LichtFeld preprocess(MoGe-2)`(**預設**,免裝、~40 ms/張)或
+   `MoGe-3(PyTorch)`(細節較佳、~0.5 s/張,需 `moge3` conda env)。
+3. **產生內容** — `both`(深度+法向量,**預設**)、`depth`(只有深度)、`normal`(只有法向量)。
+4. 輸出固定在資料集根目錄下的 `depth/`、`normals/`(不可自訂位置),跟 LichtFeld 自動掃描
+   的路徑一致。
+5. 進階(依所選引擎顯示不同欄位):
+   - 兩者共用:**bit-depth**(輸出 PNG 位元深度,留空用內建預設 16——8-bit 深度先驗量化
+     較明顯)、**覆蓋已存在**(預設略過、可續跑)。
+   - 只有 MoGe-2:**model**(自訂 ONNX 模型路徑,留空 = 自動下載官方 MoGe-2 ViT-B)、
+     **max-side**(推論最長邊,留空用內建預設 518)。
+   - 只有 MoGe-3:**MoGe-3 模型**(HuggingFace id 或本機 `.pt`,留空 = `Ruicheng/moge-3-vitl`;
+     `moge-3-vitg` 1.25B 更好但慢很多、吃更多顯存)。MoGe-3 自己會把輸出上採樣回原圖尺寸,
+     所以沒有 max-side。
+6. **▶ 產生深度/法向量圖** → 右側顯示進度(兩種引擎共用同一組進度解析)。
+
+**兩種引擎要選哪個**:兩者的深度整體排序幾乎一致(實測同一批空拍圖 Spearman +0.995),
+差別在細節 —— MoGe-3 能解出梯田邊界、屋頂、電塔等結構,MoGe-2 在這些地方偏糊,法向量圖
+的差距比深度圖明顯得多。整批照片量大又只需要深度時 MoGe-2 快得多;要吃法向量監督、或場景
+本身結構細碎時再換 MoGe-3。兩者輸出可互相覆蓋,所以可以先用 MoGe-2 全跑一遍,之後只對
+關鍵資料集用 MoGe-3 重跑(記得勾**覆蓋已存在**)。
+
+> ⚠️ **像素要對齊**:深度/法向量圖是逐像素對應影像的,所以 `images` 要指到**和訓練 source
+> 相同的影像**。若用 COLMAP 去畸變後的 workspace 訓練,就對那個去畸變的 `images/` 產生;
+> 若直接用原圖訓練,就對原圖產生。產生後同層會多 `depth/`、`normals/`,**原圖完全不動**。
+
+接著到[訓練](#訓練重建--3dgs-模型)勾「深度損失」/「法向量損失」即可。
+
+## ✂️ 影像去背(照片 → 前景遮罩 / RGBA)
+
+用 SAM 把**照片本身**去背:在一張照片上**匡選要保留的物體**,整個資料夾一起處理,輸出到
+**`no_bg/`** 底下的兩包:
+
+- `no_bg/cutout/` — 去背後的 **RGBA** PNG(alpha 就是遮罩)
+- `no_bg/masks/` — 單通道 0/255 遮罩
+
+**輸出永遠落在你選的那個資料夾裡面**:指到 COLMAP workspace 就放在 `images/` 旁邊,
+指到一般照片夾就放在該夾之內(不會像深度那樣往上一層寫 —— 照片夾的上層通常是「別的資料集」,
+兩次執行會共用同一個 `cutout/` 而互相覆蓋)。檔名維持同相對路徑,副檔名換成 `.png`。
+**原始照片不會被改動。**
+
+> 跟下面的「🧹 點雲去背」不是同一件事:那個是訓練**之後**在 SuperSplat 裡刪點雲;
+> 這個是訓練**之前**先把照片的背景遮掉,讓 COLMAP / 訓練只看前景物件。
+
+**用法**
+
+1. 工具列 **✂️ 影像去背** → 填 `images` → 按 **⬚ 匡選物體**(照片會開在右邊的「執行」面板)。
+2. 在照片上**拖曳**框出要保留的物體。一排並列的主體就一個一個框,
+   各自的遮罩會**聯集**成同一張 alpha,一次全部保留。
+3. **這樣就可以按 ▶ 開始去背了。** 用 ◀ ▶ 換影格再匡一次同一個物體會更準
+   (見下面「多影格錨點」),但**不是必要的**。
+
+> **只要框一張,整個資料夾都會照著切。** 這是第一次用最容易誤會的地方 —— 不用一張一張框,
+> 666 張的資料夾框 1 張就能跑。匡選畫面和表單都會直接寫出「其餘 N 張會自動跟著切」,
+> 就是在講這件事。多框幾張的用途是**提高準確度**(錨點),不是「讓那幾張才會被處理」。
+
+**框不夠時就補點**(匡選畫面直接操作,不用先跑一次再修):
+
+| 手勢 | 意思 |
+|---|---|
+| **拖曳** | 畫一個框 |
+| **點一下** | ＋ 這裡也是主體 |
+| **Shift + 點** | － 這裡不是主體 |
+| **點在標記上** | 刪掉那個框 / 那個點 |
+
+框給的是「範圍」,點給的是「這裡也算主體」—— 一整塊被漏掉(釉面瓶頸、金屬底座這種
+**部件 vs 整體**的歧義)時,補一兩點比一直重畫框有效得多。實測同一張:只點 53 點 →
+面積 0.30 但邊緣很雜;**一個框 + 6 點 → 0.31 且乾淨**。點很多下不會比較準。
+
+**點會歸給包含它的框**(在所有框外就歸最近的那個,巢狀時歸最小的那個),所以畫面裡有
+多個物體時,「點在誰身上就是在修誰」。這條規則在框選器和 pipeline 是**同一份程式**
+(`matte_encode.group_points_by_box`),不會兩邊各算各的。
+
+點也可以**單獨使用**(完全不畫框),SAM 靠點一樣切得出來;只有「範例提示」一定要框,
+因為 SAM 3 是拿框的形狀去比對整張圖,點沒有形狀可比。
+
+匡過的影格會列成一排可點的標籤,隨時知道自己在哪幾張上標過。框左上角的號碼就是**物體編號**,
+右上角 × 刪除單一框。下方的**影格下拉選單列出資料夾裡的每一張**(標了第幾張 / 共幾張),
+可以直接跳過去;只有超過 4000 張的資料夾才會改成均勻取樣列出(每次翻頁都要重送整份清單,
+4000 筆約 250 KB),但取樣涵蓋整段序列,不會有跳不到的區段。
+
+**第一次跑最常卡住的三件事**
+
+1. **沒畫框就按開始。** 這是最常見的一次。除了「自動偵測 / 整張當一個框」以外的模式,
+   SAM 完全靠那個框知道你要留什麼。表單現在會**把 ▶ 開始去背 鎖住**並直接寫出還差哪一步,
+   而不是讓你送出去之後才收到錯誤(那個錯誤會把整頁換掉,填好的東西要重來)。
+   反過來也一樣常見:**以為每張都要框**,結果對著幾百張照片一張一張畫。框一張就夠了。
+2. **換了資料夾,舊的框還留著。** 框是用「檔名」記的,換到別的資料夾就指到不存在的檔案。
+   改路徑時表單會自動把框清掉,重新匡一次即可。
+3. **模型選單變灰。** 選了「匡選 + 追蹤傳播」時它固定用 SAM 2.1 影片模式,選單刻意反灰,
+   不是壞掉。真的想用 SAM 3 就改選「範例提示」。
+
+跑完覺得切得不好,先按 **🖼 檢視去背結果** 找出壞掉的那幾張再點進去修 —— 修法見本節後面的
+「修不好的那幾張」。
+
+| 提示方式 | 適用 | 說明 |
+|---|---|---|
+| **匡選 + 追蹤傳播**(預設) | 相機會動的序列 | 匡選的影格當錨點,SAM 2 影片模式沿序列前後傳播;**框和點一起當種子** |
+| **匡選固定框** | 固定機位 / 轉盤 | 同一組框(**含提示點**)套用到每一張,最省算力 |
+| **文字提示** | 內容一致但構圖會變 | SAM 3 直接吃文字;SAM 2/1 會先用 Grounding DINO 把名詞變成框 |
+| **範例提示**(SAM 3) | 同類物件很多 | 框一個當範例,模型在每張裡找出所有同類 |
+| **自動偵測** | 棚拍 / 單純背景 | 不用模型,Otsu + 連通元件 |
+| **整張當一個框** | 單一主體滿版 | 不需匡選 |
+
+**追蹤模式的點提示特別值錢**:種子影格上的框如果本來就有歧義,那個歧義會沿著整段序列
+傳播下去 —— 在種子上補兩點把它修對,比事後逐張修划算得多。
+
+**多影格錨點(提高追蹤準確度)**:追蹤是從錨點影格用記憶注意力往外傳播,只有一個錨點時,
+遇到遮擋或視角大幅變化就會飄。**每多匡一張就多一個錨點**,兩個錨點之間的影格會被兩側一起修正
+—— 建議在序列的**頭、中、尾**各匡一次。框上的號碼就是物體編號:A 影格的第 1 框和 C 影格的第 1 框
+會被當成同一個物體,所以畫的順序有意義。
+
+**混合尺寸與 EXIF 方向**:影片模式吃的是「影片」,SAM 2 會把整段序列統一成第一張的幾何,
+所以這裡**依影像尺寸分組,每種尺寸各跑一次追蹤**。直式與橫式混在一起時,
+直式那組要自己也匡一張,否則會依 `--on-empty` 處理並在 log 明確警告(不會拿橫式的遮罩硬塞)。
+另外 `cv2` 會套用 EXIF 旋轉、SAM 2 的讀圖不會,所以帶旋轉標籤的 JPEG 會先烤成正確方向再送進追蹤
+—— 少了這步,遮罩會**看起來很合理但整個轉了 90°**,而且不會報錯。
+
+**模型**:預設 **SAM 3**(`facebook/sam3`)。要注意兩件事:
+
+- `facebook/sam3` 在 HuggingFace 是**需要人工審核的 gated repo**。先到
+  <https://huggingface.co/facebook/sam3> 同意條款,核准後在這台機器登入一次
+  (`conda run -n sam hf auth login`,或設 `HF_TOKEN`)。還沒核准就選 **SAM 2.1**——
+  它沒有 gating,框提示的品質一樣好。
+- **匡選 + 追蹤傳播**這個模式一律走 SAM 2.1 的影片模式(選這個模式時模型選單會**變灰**):
+  SAM 3 的影片工作階段會把整段序列一次載進記憶體(每張都放大到 1024²),幾百張 4K 會爆;
+  SAM 2 的是從磁碟逐張讀。想真的用 SAM 3 就選「**範例提示**」—— 它每張獨立推論,
+  不需要影片工作階段,也就是 SAM 3 官方示範的那個模式。
+
+**跑的時候即時看**:job 面板下方會出現一條**即時縮圖帶**,每 4 秒更新,最新完成的排在最前面
+(透明格底,一眼看得出有沒有去乾淨)。這是輪詢不是推播 —— 圖是子行程直接寫到磁碟的,
+沒有事件可以轉發。
+
+**看全部結果**:job 面板按 **🖼 檢視去背結果**(或表單裡的同名連結)開一個獨立頁面 ——
+透明格 / 白 / 黑 / 綠底可切換(白底看暗邊、黑底看亮邊、綠底是經典去背檢查),
+點縮圖放大,放大時**空白鍵**在「去背後 / 原圖」之間切換。頁首會標出有幾張照片沒有對應的
+cutout —— 提示詞中途對不上時,這個數字比翻 PNG 早得多。
+
+**修不好的那幾張**:縮圖右上角(或放大檢視左上角)按 **🖌 修**,開單張修圖頁:
+
+- 原圖上疊著目前的遮罩,可以隨時隱藏對照
+- **＋ 保留** / **－ 去除** 點一下就是一個提示點(<kbd>Shift</kbd>+點 = 去除),
+  <kbd>Alt</kbd>+拖曳可以重畫框
+- 按 **✔ 重新去背這一張** —— 只跑這一張(幾秒),完成後畫面就地換圖,不用重跑整批
+- 旁邊的**套用範圍**選「自訂範圍」會在下方開一條**影格條**,直接**拖拉**選要一起重跑的
+  區段(也可以選整個資料夾)。座標是按比例套過去的(不是追著物件跑),所以主體要在畫面裡
+  大致同一個位置 —— 轉盤序列通常成立。點在「整個主體都有的部位」上比點在邊緣可靠。
+- **整塊區域被漏掉時,先畫框再補點**:框給的是「範圍」、點給的是「這裡也算主體」。
+  實測同一張:只點 53 點 → 面積 0.30 但邊緣很雜;一個框 + 6 點 → 0.31 且乾淨。
+  點很多下不會比較準。
+
+為什麼是「點」而不是「再畫一次框」:當初就是那個框產生了這個壞結果,再框一次沒有帶進新資訊;
+點提示等於直接告訴模型「這個像素是主體 / 不是主體」,通常一兩點就修好。修圖固定用 SAM 2
+(SAM 3 的提示是概念,沒有 +/- 點)。
+
+**整組系統性錯掉的時候,不要逐張修**。最常見的原因是**部件 vs 整體**的歧義:主體上有一塊
+外觀差很多的區域(釉面瓶頸、金屬底座、貼標),SAM 就把它當成另一個物件,於是每一張都
+少同一塊。實測過的一個例子:666 張的釉面花瓶,只給點提示(沒有框)時遮罩面積 0.22、
+瓶頸和底圈整個被挖掉;**補一個涵蓋整支瓶的框**之後同一張變 0.38~0.47、洞補起來了。
+順序這樣走:
+
+1. 回**框選**畫一個**涵蓋整個主體**的框(含那些外觀不一樣的部件)—— 這是最強的單一訊號。
+2. 相機會動的序列用 **匡選 + 追蹤傳播**,並在序列前中後**各框一張**;每個標註影格都是
+   conditioning frame,兩個 seed 之間的影格會被兩邊一起修正。
+3. 還有零星幾張不對,才用修圖頁的點提示 + 套用範圍收尾。
+
+修圖的提示會寫到 `matte_repair.json`,**不會**覆蓋框選器的 `matte_boxes.json`
+(否則之後重跑整夾,就會拿最後一次單張修圖的提示去切全部)。
+
+**接到後面的流程**
+
+- COLMAP 的 `MASKS_DIR` 和訓練器的 `--masks` 都填 **`no_bg/masks/`**(單通道那包)。
+  填 `no_bg/cutout/` 也可以,會自動改用旁邊的 `masks/`;`cutout/` 是給人看、給別的工具用的。
+  (這台的 COLMAP 讀圖一律丟掉 alpha,所以 RGBA 的 cutout 在遮罩階段本來就傳不進去。)
+- 要讓**背景連特徵都不抽**(重建只由主體約束),再勾 COLMAP 的
+  **「遮罩也用在抽特徵」**(`--ImageReader.mask_path`)—— 見下面「單一物件:正擺 + 倒擺」。
+- COLMAP 跑完,去畸變好的遮罩會落在 **`<dataset>_*_mapper/masks/`**,跟旁邊的 `images/`
+  逐像素對齊。`images/` 預設**保留背景**(吃遮罩的訓練器要的就是這樣);想讓輸出的照片也去背,
+  勾 **「輸出的照片也去背」**(`CUTOUT_IMAGES`),會就地把 `images/` 的背景塗黑。
+
+### COLMAP 多模型輸出：自動使用最大模型
+
+當 mapper 產生多個 `sparse/N` 時，系統依**已註冊影像數**選擇最大的模型；張數相同時取 3D 點數較多者，再相同則取編號較小者。選中的完整模型會整理到 `sparse/0`，讓去畸變、簡化、GPS 對齊與後續訓練使用一致的結果；其他元件仍保留，不會自動合併。
+
+例如 `sparse/0` 有 4 張、`sparse/1` 有 269 張時，會交換兩個模型的位置，輸出 269 張影像的那一群。此規則適用 global、incremental、pose prior 與 hierarchical mapper，不需勾選 `GM_SINGLE_MODEL`；該選項僅控制 global mapper 的重建策略。
+
+舊工作區可保留 mapper 結果，只重跑 `undistort`（需要時一併選擇 `simplify`、`align`、`reorient`）。如果主模型改變，舊資料集與相關完成標記會移至工作區內的 `.model-backup-*`，避免續跑跳過重建或混入舊影像；原始照片不受影響。重新執行 mapper 也使用獨立暫存輸出，成功後才替換模型，避免把上次殘留的模型當成此次最大模型。
+
+### 單一物件:正擺 + 倒擺拍成一個模型
+
+一件東西立著拍一輪拍不到底面,所以翻過來再拍一輪。要把兩輪變成**一個**模型,關鍵不是
+對齊工具,而是**別讓背景參與解算**:物件被搬動過,房間跟物件之間就不是剛體關係,
+背景特徵只會給出錯誤的約束(甚至讓 mapper 去重建房間、把物件當成會動的東西)。
+
+1. 兩輪各自跑「✂️ 影像去背」,**解析度選同一個長邊**(例如 2560)。
+2. 開「功能 → 🔗 融合」,兩個輸入各填一輪的 `no_bg/`,按「整理並檢查」。它會用 symlink
+   做出一個共同的影像根目錄和一個**子路徑一樣**的遮罩根目錄:
+
+   ```
+   fusion/images/<每輪>  ->  .../images_2560
+   fusion/masks/<每輪>   ->  .../images_2560/no_bg/masks
+   fusion/colmap/        ->  COLMAP 結果
+   ```
+
+   (`images_2560/` 裡的 `no_bg/` 子目錄與 `matte_boxes.json` 會被影像掃描自動忽略。)
+3. 按「帶入 COLMAP 表單」—— 跑的是平常那張 COLMAP 表單,只有這幾項被強制填好:
+   `MASKS_DIR=fusion/masks`、勾**「遮罩也用在抽特徵」**、勾**「輸出的照片也去背」**、
+   **影像解析度=保持原樣**(已經縮好了;不設會撞上「遮罩和影像不同長邊」而直接報錯)、
+   `CAMERA_MODE=single`(同一顆鏡頭就該共用內參)。
+   rig 要**關**(rig 的前提是同一次曝光被所有相機覆蓋,兩輪序列拍攝必然中止)。
+4. 驗收看 log 那行 **`sparse/0 coverage: up …/584, down …/460`** —— 兩邊都大部分註冊
+   才是真的融合;某一邊趨近 0 就是沒縫起來(上面的 `mapper produced N models` 會一起說明)。
+   跑完 `fusion/colmap/training_dataset_global_mapper/` 底下就是去背好的 `images/`
+   加上對齊的 `masks/`,可以直接接訓練。
+
+**`MATCHER` 先用預設的 `vocab`**(快),裂掉再往上加。要知道為什麼可能裂:同一輪內的相似度
+比跨輪高一個數量級(實測同輪相鄰影格 133~1945 個驗證 inlier,跨輪掃 46 張候選挑最好的
+只有 28~67),所以檢索名額很可能全部被同輪鄰居吃掉,那少數幾對「把兩半縫起來」的配對
+根本不會被嘗試。補救順序:先把 `NUM_MATCHES` 調大(預設 50),再不行才換
+`exhaustive` —— 每一對都比、保證試過,但配對數是 n(n−1)/2(1000 張 ≈ 50 萬對)。
+
+融合失敗的話,**最有效的補救是補拍**:把物件側倬到中間角度繞一圈拍 15~30 張當橋樑,
+比任何事後對齊都可靠 —— 兩個獨立模型之間的 7-DoF(含尺度)對位在這種近似旋轉對稱、
+表面又是重複紋理的物件上很容易給出錯的解。
+
+**邊緣**:預設 `erode 1` + `feather 2`。先內縮再羽化,是因為去背的黑邊多半不是遮罩畫錯,
+而是邊緣那圈半透明像素的 RGB 其實還是**背景色**;內縮讓漸層落在前景像素上,再加上把前景
+顏色往外擴散的修正,黑邊就不會出現。
+
+**解析度**:表單有一個「解析度(去背前先縮小)」—— 原始 / 長邊 1920(FullHD)/ 2560 / 4096。
+選了就先把來源照片等比縮一份到 `images_<長邊>/`(跟 COLMAP 的縮圖同一套命名與同一支
+ffmpeg 程式碼),**去背結果也寫在那個資料夾底下的 `no_bg/`** —— 每個解析度各自一份,
+不會互相覆蓋,`MASKS_DIR` / `--masks` 就填那一份。之後 COLMAP 選同樣的長邊,遮罩就跟
+undistort 出來的影像對得起來。
+
+**速度**:瓶頸不在 GPU。在 3475×4633 的 iPhone 照片上實測,SAM 本身幾百 ms,寫檔卻要
+~5.3 s/張 —— 其中 4.3 s 是 `compose_rgba` 的顏色外擴(單執行緒 numpy)。所以:
+
+- 寫檔階段**平行化**(`--write-workers`,預設 = CPU 核數上限 8)。實測同一批 6 張
+  3475×4633:1 個 worker 248 s → 8 個 worker 72 s(兩者都含 ~25 s 模型載入),
+  寫檔本身約 **4.7×**。刻意不開到核數:cv2 的 decode/encode 自己已經是多執行緒的,
+  一核一個 worker 只會互相搶核心與記憶體頻寬。
+- **縮解析度**(上面那段)是另一個 6~8 倍:長邊 1920 時 `compose_rgba` 只要 0.52 s。
+- 逐張推論的模式(`json` / `full` / `auto`,sam2)會**一次編碼多張**
+  (`--image-batch`,預設 8;`1` 關掉)。追蹤傳播模式幫不上 —— SAM 2 的記憶注意力
+  本質上必須逐格循序。
+- 想要位元級可重現就 `--image-batch 1`:批次 ≥4 張時 bf16 的矩陣乘法歸約順序會變,
+  遮罩邊界會有約一個像素的差異(實測最差 IoU 0.97,且 >99% 的差異落在邊界 3 px 內,
+  過完 `feather 2` 之後平均 |Δalpha| ~0.001)。細節寫在 `Sam2Runner.masks_for_image_batch`
+  的 docstring 裡。
+
+## 🧹 點雲去背(選用)
+
+訓練完按 **🧹 在 SuperSplat 去背景** → 內嵌編輯器載入訓練好的點雲:
+
+1. 等待工具列顯示「已載入 … splats · 可以開始編輯」，「送回去背點雲」按鈕才會啟用。
+2. 框選物件 → **Ctrl+I** 反選 → **Delete** 刪背景（**Ctrl+Z** 還原）。
+3. 按 **送回去背點雲**。
+
+原模型不動。GS-2M 會衍生 `_edited_<時間>` 目錄並自動帶入 Mesh 表單(用乾淨點雲重抽 mesh);
+LichtFeld 則直接下載乾淨點雲。
+
+### 大場景載入與操作
+
+從任務開啟 PLY 模型時，工具列會顯示讀取、整理模型資料、建立 GPU 資料等階段。
+不需要反覆按開啟；重複開啟會取消前一次載入，避免同時載入多份模型。
+按「停止載入／關閉模型」會結束目前編輯器並返回任務；有修改時，先送回或匯出再關閉。
+
+| 編輯畫質 | 畫面像素上限 | 適用情況 |
+|----------|--------------|----------|
+| 流暢（大場景） | 約 100 萬 | 大場景或操作時卡頓 |
+| 均衡 | 約 200 萬 | 一般模型，兼顧清晰度與流暢度 |
+| 原始解析度 | 依視窗與螢幕像素比例 | 需要檢查畫面細節時 |
+
+模型 ≥100 MiB 或 ≥50 萬 splats 時預設「流暢」，其餘預設「均衡」。
+載入完成後可直接切換畫質，**不用重新下載或解析模型**。
+畫質設定只影響編輯畫面解析度，完整點數、球諧與幾何資料、匯出內容均保留，不會抽稀或改寫原模型。
+
+v2.32.5 的背景載入修補曾使用約 **221 MB、892,394 個 splats** 的模型驗證，優化前後的 64 個記憶體屬性陣列與
+7 份 GPU 紋理緩衝區逐位元組相同。背景處理與畫質上限用來減少介面阻塞及繪製負擔；
+本機測試的首次載入總時間仍相近，完整檔案傳輸、GPU 上傳與可用記憶體仍會影響開啟時間。
+
+更新編輯器後，重新整理頁面再開啟模型即可使用新版載入流程與畫質切換；
+後端的點數偵測與模型版本資訊需重啟面板才會套用。尚未重啟時，前端仍會依檔案大小選擇大模型畫質。
+
+## Mesh(模型 → 三角網格)
+
+選 `model_path`、GPU、TSDF 參數(預設值通常夠用)。要**實際尺寸 (mm)** 就勾「提供 marker」
+(拍攝時放 ChArUco 板,板規格已寫在 `backends.json`,免手填)。完成後可下載原始版和 mm 版,
+或 **🧊 檢視 Mesh**。
+
+### 🎨 照片貼圖(預設開啟)
+
+TSDF 只給**頂點色**:一個顏色對一個頂點,所以顏色的精細度等於面數——面不夠多時,
+再清楚的照片也會糊掉。勾「照片貼圖」後會多跑一段 `texrecon`(mvs-texturing),
+把**原始去畸變影像**投影回 mesh,產生真正的貼圖:
+
+```
+<model>/train/ours_<iter>/mesh/
+├── tsdf_post.ply                 原本的頂點色 mesh(照舊,不會被動到)
+└── textured/
+    ├── raw/mesh.obj              texrecon 原始輸出(可能幾十張貼圖)
+    ├── mesh.obj / mesh.mtl       合併後:一個材質、一張貼圖
+    ├── texture/mesh_atlas.jpg
+    ├── mesh.glb                  單檔版(檢視器/下載用)
+    └── mm/                       有 marker 時:同一份的實際尺寸 (mm) 版本
+```
+
+- **合併成一張**是無損重排:每張貼圖整數像素貼進大圖、UV 同步改寫,不重新取樣,
+  面與 `vt` 索引都不變(JPG 95,填 0 改存 PNG)。
+- **貼圖尺寸是自動決定的**,不問使用者:要貼完才知道 texrecon 總共產出多少貼圖面積。
+  規則是「放得下的最小正方形」(2048 / 4096 / 8192 / 16384),放不下才降解析度。
+  上限 16384 是硬體限制不是偏好 —— 原本固定寬度往下長,一個 800k 面的物件就長出
+  8192×44800 的貼圖:顯卡(上限多半 16384/邊)不能綁定,Pillow 也會當成 decompression
+  bomb 直接拒讀,而 **trimesh 會把那個拒讀吞掉**,於是 `.glb` 靜靜地變成沒有貼圖的白模型。
+  真的要全解析度就取消「合併成單張貼圖」,保留 texrecon 原本的多張。
+- **順序是先貼圖、後縮放**,不能反過來:texrecon 要求 mesh 與相機在**同一個座標系**,
+  對已縮放/加底板的 mesh 貼圖會「成功」但幾乎每個面都判定沒被看到,整片變成補洞內插。
+  縮放對 UV 和貼圖沒有影響,所以貼完再縮放是精確的。
+- **物件去背的場景建議填「前景遮罩資料夾」**(去背輸出的 `no_bg/masks`):先把背景塗黑,
+  texrecon 的離群值剔除才會把拍到背景的視角從那些面剔掉,否則邊緣會沾到背景色。
+- 下載一律是 **zip**(OBJ + MTL + 貼圖三個檔互相引用,單抓 `.obj` 會是沒有貼圖的 mesh),
+  另外給一個 `.glb` 單檔;面板檢視器的「貼圖」版本讀的就是這個 `.glb`。
+- 貼圖失敗不會讓整個 job 失敗——`tsdf_post.ply` 仍然是有效輸出,log 會標出原因。
+
+**記憶體(這一步最容易把機器打爆)**:`texrecon` 會用 OpenMP 開滿所有核心去畸變 / 評分每個
+視角,每個 worker 手上都有一張解碼後的照片加一張同尺寸的浮點梯度圖——72 核配 24 MP 照片就是
+二十幾 GB 的瞬間尖峰,被 OOM killer 砍掉時通常連面板一起帶走。所以面板會先**估算再決定**:
+
+1. 量影像張數、最大尺寸與 `MemAvailable`,**先砍執行緒數**(log 會印 `執行緒 n/總核數`);
+2. 連幾個執行緒都放不下時,**才**自動縮圖(最長邊,底線 1600px),並在 log 寫明縮到多少
+   ——原尺寸是這條流程的重點,縮圖是最後手段,不是預設;
+3. 合併貼圖時估算畫布大小,太大就先降倍率,不會在最後一步才 OOM;
+4. 轉 `.glb` 前估 OBJ 的記憶體需求,放不下就跳過(OBJ + 貼圖仍然完整)。
+
+表單的「影像最長邊上限 / 執行緒」留空就是上面的自動流程;真的很緊再手動壓。
+面數到千萬級還是爆的話,勾「省記憶體模式」跳過全域接縫平滑(最大的單一配置)。
+影像縮放不需要改內參——mvs-texturing 讀 NVM 時是用**實際載入的影像**最長邊去正規化焦距
+(`generate_texture_views.cpp:196`),等比例縮放剛好抵銷。
+
+貼圖讀的影像會先 stage 到 `textured/scene/`(原尺寸時只是 symlink),跑完就刪:
+`model.nvm` 因此寫在暫存區而不是你的資料集影像資料夾,同一個場景也可以同時跑兩個貼圖 job。
+
+## 檢視器
+
+- **🧊 3D 結果**(COLMAP 後):拖曳旋轉 · 滾輪縮放 · 右鍵平移 · WASD 飛行;雙擊相機看該張
+  影像與品質分數。可**框選壞相機移除**、**框選 / 筆刷刪雜點**(先標紅預覽再確認)——都是
+  非破壞性,寫到 `cleaned/<時間>/` 新資料夾,可直接拿去重新訓練。
+- **🧊 Mesh 檢視**(Mesh job 後):**不打光**顯示(貼圖與頂點色本身就含有拍攝時的光線,
+  再打一次光只會讓它變暗變糊)、**貼圖開關**(關掉會用法線著色顯示網格本身,看得到凹凸)、
+  線框 / 白底、**📏 量尺**點兩點量距離。有貼圖時就只顯示貼圖版本(幾何是同一份),
+  有 marker 縮放時可切 mm / 原始比例。
+- **👁 Mesh Viewer(工具)**:不綁 job,看任何 mesh 檔。填 server 路徑(「瀏覽」逐層挑檔),
+  或**留空直接開**,進去選這台電腦的檔案 / 直接拖放(瀏覽器內解析,不上傳)。
+  格式不符或檔案壞掉會直接顯示原因。
+- **✨ SuperSplat(工具)**:同樣兩種開法,專看點雲 / 3DGS(訓練輸出的 `point_cloud.ply`、
+  `.splat` 等)。看 mesh 用 Mesh Viewer,看點雲用這個。
+
+---
+
+# 三、進階
+
+## GPS / 大場景(航拍 RTK)
+
+輸入若**每張**都有 EXIF GPS(JPEG、TIFF 都支援;影片幀沒有 GPS),可解鎖:
+
+| 選項 | 作用 | 主要參數 |
+|------|------|---------|
+| `MATCHER=spatial` | 只比對 GPS 鄰近的影像,大場景快且穩 | `SPATIAL_MAX_NEIGHBORS` · `SPATIAL_MAX_DISTANCE`(m) |
+| `MAPPER=pose_prior` | GPS 先驗進 BA,抗漂移、輸出直接公制 | `PRIOR_STD_X/Y/Z`(GPS 精度 m;消費級 3~5、RTK ~0.02) |
+| `GPS_ALIGN` | 事後把模型對齊到 ENU 公尺座標 | `GPS_ALIGN_MAX_ERROR`(m) |
+
+- 勾任一 GPS 選項時,開跑前會檢查 **100% GPS 覆蓋**,不足直接中斷(缺 GPS 的那張無法定位)。
+- 縮圖不會弄丟 GPS:JPEG 會把 EXIF 接回縮圖;TIFF 的 GPS 由面板直接寫進 COLMAP 資料庫
+  (COLMAP 自己讀不到 TIFF GPS)。
+- **`REORIENT` × GPS**:沒開 GPS 時用 PCA 猜重力轉正 + 縮放;開了 GPS 則只做 Z-up→Y-up
+  軸轉、**保留公尺尺度**。要「真實公尺 + 檢視器裡正立」就 `GPS_ALIGN` 和 `REORIENT` 都勾。
+
+## 環境變數
+
+> **幾乎都有預設,留空即可。** 唯一必填的是用 GCS 時的 `CLOUDSDK_CORE_PROJECT`。
+> 全部寫在 `local.env`(`run.sh` 會載入並傳給 ffmpeg / colmap / gsutil)。
+
+| env | default | 什麼時候設 |
+|-----|---------|-----------|
+| `CLOUDSDK_CORE_PROJECT` | — | **用 GCS 必填**(GCP project id) |
+| `COLMAP_BIN` / `FFMPEG_BIN` / `GSUTIL_BIN` | PATH | binary 不在 PATH 時 |
+| `RECON_STUDIO_DATA` | `/mnt/ssd1/recon_studio/data` 或 `~/.recon_studio` | job 狀態 + log 的落地磁碟(建議放大碟) |
+| `RECON_STUDIO_BROWSE_ROOT` | `/mnt/ssd1` 或 `/` | 「瀏覽」按鈕的根目錄 |
+| `RECON_STUDIO_DEST_ROOT` | `/` | GCS 下載落地根目錄 |
+| `RECON_STUDIO_GCS_ROOT` | 空(列全部 bucket) | GCS 瀏覽器起始 `gs://` 前綴 |
+| `CONDA_ROOT` / `CONDA_ENV` | 自動偵測 / `rec` | conda 不在標準位置時 |
+| `FFMPEG_HWACCEL` | `cuda` | 設 `none` 強制 CPU 解碼 |
+| `COLMAP_PANEL_MAX_JOBS` | `4` | 同時跑幾個 job |
+| `COLMAP_PANEL_RESIZE_WORKERS` | CPU 數(≤32) | 縮圖並行 ffmpeg 數 |
+| `HOST` / `PORT` | `127.0.0.1` / `8077` | 綁定位址（`local.env` 優先，再依啟動腳本的環境值檢查） |
+| `RECON_STUDIO_HOST` / `_PORT` | 同上 | 要從環境變數一次性覆蓋時用這組 —— conda 會 export `HOST=x86_64-conda-linux-gnu`,裸的名字不能信 |
+| `RECON_STUDIO_LAN_DOMAIN` | `recon.venraas.tw` | 區網代理對外的網址名稱 |
+| `SUPERSPLAT_AUTOUPDATE` | `1` | 設 `0` 關掉 SuperSplat 啟動自動更新 |
+| `SUPERSPLAT_VER` | `latest` | 最新穩定標籤；可指定版本，例如 `v3.4.2` |
+
+## GCS 設定(一次性)
+
+```bash
+# 1) 裝 Google Cloud SDK:https://cloud.google.com/sdk/docs/install
+# 2) 登入(遠端無頭機加 --no-launch-browser;無人值守可用 service account)
+gcloud auth login
+# 3) 設定預設 project(不設的話列 bucket 會報錯)——二選一:
+gcloud config set project <YOUR_PROJECT_ID>
+#    或寫進 local.env:CLOUDSDK_CORE_PROJECT=<YOUR_PROJECT_ID>
+# 4) 驗證(應列出 buckets)
+gsutil ls
+```
+
+「☁️ 資料」分頁與重建流程**解耦**:下載用 `gsutil -m rsync`(可續傳、只補差異),
+上傳支援多選檔案 / 資料夾。搬完到其他分頁用「瀏覽」選那個資料夾即可。
+
+## SuperSplat 自動更新
+
+`run.sh` 每次啟動會在**背景**查詢上游最新穩定標籤（只選 `v主版.次版.修訂`，不選 alpha／beta／RC）；版本或整合修補有變才重建。啟動日誌先顯示 `checking latest`，完成後顯示實際版本與 `synced; requested latest`，不再將固定舊版本當成最新版本。
+
+- 重建在暫存目錄進行，不切換或清除相鄰 `supersplat` checkout 的修改；建置成功後才替換 bundle。
+- 離線、缺少建置工具、未知主版本或修補不相容時，保留現有 bundle，並顯示更新失敗；細節在 `$RECON_STUDIO_DATA/supersplat_build.log`。
+- 手動更新：`./tools/build_supersplat.sh`；強制重建：`FORCE=1 ./tools/build_supersplat.sh`。v3.4.2 的建置相依套件建議使用 Node.js 22 以上，另需 npm、git、flock。
+- 可在 `local.env` 設 `SUPERSPLAT_VER=v3.4.2` 固定版本；刪除設定或改成 `latest` 恢復自動追蹤。`SUPERSPLAT_AUTOUPDATE=0` 可關閉啟動更新。
+- **v3 使用 WebGPU**，需支援 WebGPU 的瀏覽器與 HTTPS／localhost。面板預設開啟目前部署的新版並顯示版本；高效能 GPU 不可用時會嘗試瀏覽器預設 GPU。若仍無法啟動，會顯示原因，讓使用者重試或自行選擇一同建置的 v2.32.5 WebGL 相容版，不會自動降級。若要只部署 v2，可明確固定 `SUPERSPLAT_VER=v2.32.5`。
+
+若出現 `No available WebGPU adapters`，表示瀏覽器沒有提供可用的 WebGPU 裝置。Chrome 使用者請在 `chrome://settings/system` 開啟圖形加速並重新啟動，接著在 `chrome://gpu` 確認 WebGPU 顯示 `Hardware accelerated`；若仍不可用，需檢查瀏覽器版本與 GPU 驅動。伺服器更新無法替另一台電腦啟用 WebGPU。參考 [Chrome 官方排解說明](https://developer.chrome.com/docs/web-platform/webgpu/troubleshooting-tips)。
+
+v3 使用 `tools/supersplat-v3.patch`，保留上游原生分塊載入與 WebGPU 渲染，銜接面板的載入進度、畫質切換與送回 PLY。v2 則使用 `tools/supersplat-reconstudio.patch`（送回點雲）與 `tools/supersplat-performance.patch`（背景載入與畫質控制）。兩版共用 `tools/supersplat-wheel.patch`，讓滾輪縮放步幅一致。v2 的記憶體／效能測試數據不代表 v3 的效能。
+建置會比對版本、建置腳本與適用修補的雜湊，避免漏套修補；新版仍保留完整模型資料，不以抽稀換取畫質切換。
+
+---
+
+# 四、開發者
+
+三層架構,依賴單向(`app → web/ → pipeline/`,無循環):
+
+```
+app.py        app factory:建 FastAPI、mount static、include routers(~30 行)
+└─ web/       HTTP 層
+   ├─ routers/  pages · browse · create · jobs · viz · viewer · doctor(APIRouter)
+   ├─ services/ models(job→路徑解析)· forms(表單→參數驗證)
+   └─ shared.py templates / _page / UI 常數
+jobs.py       JobManager:asyncio 佇列、N=MAX_JOBS workers、狀態存檔 + log 解析
+pipeline/     領域層(torch-free,shell out 到外部工具)
+   config.py    Settings:所有設定的單一來源(pydantic-settings)
+   runner.py    子行程執行 + 取消        backends.py  後端登錄 + 後端 preflight
+   preflight.py 系統層檢查(ffmpeg/磁碟/cudnn/…)  doctor_cli.py  終端機版報告
+   frames / colmap/ / train / gcs       model.py     解析 COLMAP 稀疏模型(讀取快取)
+```
+
+請求流程:`form ─POST /ui/*─► JobManager(asyncio 佇列)─► run_* 在 thread 內 shell out ─► log ─► 瀏覽器`。
+即時更新走每分頁一條 WebSocket(joblist 刷新 + log tail 多工)。job 狀態存
+`RECON_STUDIO_DATA/jobs/<id>/`;取消 = `SIGTERM` 子行程群組;COLMAP / 縮圖用 sentinel
+做 idempotent(勾 `FORCE` 重跑)。
+
+## 主要檔案
+
+| path | 角色 |
+|------|------|
+| `web/routers/` | `pages` · `browse`(資料夾/檔案 picker)· `create`(建 job)· `jobs`(查詢/取消/log)· `viz`(3D/mesh 檢視+下載+cull+去背)· `viewer`(獨立 mesh viewer)· `doctor` |
+| `web/services/` | `models.py`(job→路徑解析)· `forms.py`(表單→參數驗證) |
+| `jobs.py` | `JobManager`(佇列、workers、cancel/delete)+ log 解析 |
+| `pipeline/colmap/` | `_run`(orchestrator:stages、sentinels)· `_layout`(版面偵測)· `_resize`(並行縮圖)· `_gps`(EXIF GPS 讀取 JPEG+TIFF、pose prior 注入) |
+| `pipeline/frames.py` / `train.py` | 抽幀去模糊 / 訓練 + mesh(+ChArUco mm 縮放) |
+| `pipeline/depth.py` / `moge3.py` | 深度/法向量的兩種引擎:LichtFeld `preprocess`(MoGe-2)/ PyTorch MoGe-3;`jobs._run_depth_engine` 依 `engine` 參數分派 |
+| `pipeline/matte.py` / `tools/sam_matte.py` | ✂️ 影像去背:面板側(torch-free,解析 `sam` env + 組 argv)/ 在 `sam` env 裡跑的 SAM 批次推論(bbox 批次提示、遮罩聯集、RGBA 輸出);多加一種 SAM 變體 = 多一個 runner class |
+| `pipeline/matte_encode.py` | 去背的純 numpy 數學(框整理、聯集、形態學/羽化、前景顏色外擴);同樣刻意不含 torch/cv2,`sam` env 與 CI 都能載入 |
+| `web/routers/matte.py` | 匡選用的影格瀏覽 fragment(框以**相對比例**存進表單隱藏欄位) |
+| `pipeline/moge3_encode.py` | 兩引擎共用的 PNG 編碼(LichtFeld `build_depth_png`/`build_normals_png` 的移植);刻意不含 torch/cv2,好讓 `tools/moge3_preprocess.py` 在 `moge3` env 裡與測試在 CI 裡都能載入 |
+| `pipeline/backends.py` | 後端登錄、env/GPU 解析、CLI builder、`doctor()` 總報告 |
+| `pipeline/preflight.py` | 系統層檢查(ffmpeg + blurdetect / 磁碟可寫 / cudnn / gsutil / local.env 失效變數);每項回同一個 `{status, label, value, detail, hint}` 形狀,兩個 renderer 共用 |
+| `pipeline/doctor_cli.py` | `./run.sh --doctor`:同一份報告輸出到終端機,exit code 反映有無 FAIL |
+| `pipeline/model.py` | COLMAP 稀疏模型解析 + PLY 匯出(LRU 快取) |
+| `templates/` | `index.html`(表單)+ htmx partials + three.js 檢視器(`viz` / `mesh_viz` / `mesh_view`) |
+| `tools/` | `detect.sh`(conda/磁碟/ffmpeg 偵測,`run.sh` 與 `setup.sh` 共用)· `build_supersplat.sh`(自動更新也走這)· `moge3_preprocess.py`(在 `moge3` env 裡跑的 MoGe-3 產生器)· marker 量尺 / 縮放腳本 |
+| `tests/` | 離線單元測試(無需 colmap/ffmpeg/GPU/網路) |
+
+## 開發
+
+```bash
+pip install -e ".[dev]"   # 面板 + ruff / mypy / pytest
+pytest                    # 離線單元測試
+ruff check .              # lint
+mypy pipeline/config.py   # 型別檢查(目前嚴格守住 config.py)
+```
+
+CI 在 PR 與推送至 `main` 時跑 ruff + mypy + pytest，不會自動部署。**擴充慣例**:加 endpoint → `web/routers/` 加
+handler;加訓練後端 → 改 `backends.json`(不動 code);加設定 → `pipeline/config.py` 加欄位。
+
+> 改 `.py` 需重啟；改 `templates/`、`static/js/` 或 `static/css/` 後重整頁面即可。
+> 修改 SuperSplat 修補後需執行 `./tools/build_supersplat.sh`，再重整頁面並重新開啟模型。
+
+---
+
+# License
+
+Recon Studio 自身的 code 以**非商業、研究與評估用途**釋出([`LICENSE`](../../LICENSE)),與其核心訓練器
+依賴一致。整合的第三方工具各依其授權([`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md))——
+特別是 **GS-2M / 3D Gaussian Splatting(Inria,非商業)**、COLMAP(BSD)、FFmpeg(LGPL/GPL)。
+因此訓練與 mesh 階段為非商業用途;Gaussian-Splatting 技術的商業使用請洽 Inria。

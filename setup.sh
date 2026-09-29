@@ -10,7 +10,7 @@
 # suggestion instead, so a machine that's already tuned keeps its settings).
 #
 # What it does NOT do — these need a GPU and per-machine compilation, so they stay
-# manual (see README「一、安裝」):
+# manual (see docs/zh-TW/user-guide.md, section 一、安裝):
 #   * colmap / ffmpeg (system packages or source builds)
 #   * the trainer envs: GS-2M's CUDA submodules, LichtFeld-Studio's cmake build
 # `./run.sh --doctor` at the end tells you exactly which of those are still missing.
@@ -145,5 +145,5 @@ if ./run.sh --doctor; then
   printf '\n\033[1;32m設定完成 — ./run.sh 就可以啟動了。\033[0m\n'
 else
   printf '\n\033[1;33m面板本身裝好了,但上面 FAIL 的項目要先補齊。\033[0m\n'
-  printf '安裝步驟見 README「一、安裝」;補好後用 ./run.sh --doctor 再確認。\n'
+  printf '安裝步驟見 docs/zh-TW/user-guide.md「一、安裝」;補好後用 ./run.sh --doctor 再確認。\n'
 fi
