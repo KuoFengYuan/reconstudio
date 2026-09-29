@@ -9,6 +9,7 @@ A local web workspace for photo/video reconstruction: COLMAP → 3D Gaussian Spl
 | English | 繁體中文 |
 | :--- | :--- |
 | [Development, deployment, daily use](docs/en/workflows.md) | [開發、部署、日常使用](docs/zh-TW/workflows.md) |
+| [After-startup walkthrough](docs/en/usage.md) | [啟動後操作指南](docs/zh-TW/usage.md) |
 | [Quick start](docs/en/README.md) | [快速開始](docs/zh-TW/README.md) |
 | [Agent routing protocol](docs/en/agent-guide.md) | [Agent 檢索協議](docs/zh-TW/agent-guide.md) |
 | [Component context router](docs/en/context-router.md) | [實驗元件索引](docs/zh-TW/context-router.md) |

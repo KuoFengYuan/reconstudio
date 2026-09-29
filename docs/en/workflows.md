@@ -167,6 +167,9 @@ does not source `local.env`, so pass the intended version/environment explicitly
 
 ## 3. Use the deployed panel
 
+For button-by-button instructions and a first photo-to-model run, see the
+[after-startup walkthrough](usage.md).
+
 1. If the service is already running, open its URL; do not launch a duplicate
    `run.sh` on the same port. For an ad hoc session, run `./run.sh` and keep its
    terminal open. Use doctor when a required tool/backend is unavailable.
