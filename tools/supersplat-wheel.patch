@@ -1,0 +1,17 @@
+diff --git a/src/controllers.ts b/src/controllers.ts
+--- a/src/controllers.ts
++++ b/src/controllers.ts
+@@ -260,6 +260,11 @@ class PointerController {
+             // deltaX for that remapped case so horizontal-only scrolling
+             // (tilt wheel, horizontal trackpad swipe) is not treated as
+             // zoom / fly movement.
+-            const wheelDelta = event.shiftKey && deltaY === 0 ? deltaX : deltaY;
++            // Normalize line/page wheel events and cap one event before feeding
++            // the camera's existing damping. Large wheel steps used to jump or
++            // overshoot while small trackpad steps felt much slower.
++            const rawWheelDelta = event.shiftKey && deltaY === 0 ? deltaX : deltaY;
++            const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? target.clientHeight : 1;
++            const wheelDelta = Math.max(-120, Math.min(120, rawWheelDelta * unit));
+-
++
+             // Synthetic Ctrl (macOS/Magic Mouse pinch) or Cmd: fine zoom.

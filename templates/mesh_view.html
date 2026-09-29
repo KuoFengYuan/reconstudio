@@ -138,6 +138,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { ViewHelper } from 'three/addons/helpers/ViewHelper.js';
+import { createSmoothWheelZoom } from '/static/js/smooth-wheel-zoom.js';
 
 // Two sources, one pipeline: a server path (?path=), or a file picked/dropped right
 // here (local mode — parsed in the browser, nothing uploaded). Both converge on an
@@ -177,6 +178,7 @@ const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.001, 1e
 const controls = new TrackballControls(camera, renderer.domElement);
 controls.rotateSpeed = 3.0; controls.zoomSpeed = 1.3; controls.panSpeed = 0.9;
 controls.staticMoving = false; controls.dynamicDampingFactor = 0.15;
+const wheelZoom = createSmoothWheelZoom(renderer.domElement, camera, controls);
 
 const gizmo = new TransformControls(camera, renderer.domElement);
 gizmo.setMode('rotate'); gizmo.setSize(0.9); gizmo.attach(obj);
@@ -208,6 +210,7 @@ function setStats(geo){
 }
 
 function fitView(geo){
+  wheelZoom.reset();
   geo.computeBoundingBox();
   geo.boundingBox.getCenter(centerC);
   const sz = new THREE.Vector3(); geo.boundingBox.getSize(sz);
@@ -462,7 +465,9 @@ const mid = new THREE.Vector3();
 (function loop(){
   requestAnimationFrame(loop);
   head.position.copy(camera.position);                // headlight follows camera
-  if (viewHelper.animating) viewHelper.update(clock.getDelta()); else clock.getDelta();
+  const dt = clock.getDelta();
+  if (viewHelper.animating) viewHelper.update(dt);
+  wheelZoom.update(dt);
   controls.update();
   updateMarkerScales();                               // constant on-screen marker size
   // floating distance label at the segment midpoint

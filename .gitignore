@@ -23,3 +23,4 @@ build/
 
 # vendored build artifact — regenerate with tools/build_supersplat.sh
 static/supersplat/
+static/supersplat-legacy/

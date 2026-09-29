@@ -221,6 +221,7 @@ import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { TrackballControls } from 'three/addons/controls/TrackballControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { ViewHelper } from '/static/three/addons/helpers/ViewHelper.js?v=tl1';   // ?v busts cache after the top-left edit
+import { createSmoothWheelZoom } from '/static/js/smooth-wheel-zoom.js';
 
 const JOB = "{{ job.id }}";
 const MSUB = "{{ model_sub }}";                    // viewing a cleaned variant if set
@@ -245,6 +246,7 @@ controls.rotateSpeed = 3.2; controls.zoomSpeed = 1.3; controls.panSpeed = 0.9;
 controls.staticMoving = false; controls.dynamicDampingFactor = 0.15;
 controls.keys = [];                 // free A/S/D for WASD fly-nav (else they switch modes)
 controls.noPan = true;              // disable TrackballControls pan — we do our own (below)
+const wheelZoom = createSmoothWheelZoom(renderer.domElement, camera, controls);
 
 // Right-drag = pan STRICTLY in the screen plane (camera right + true-up only; ZERO
 // forward/back component, whatever the orientation). Scaled so the point under the
@@ -308,6 +310,7 @@ let ptPos = null, ptCol = null, ptAlive = null, ptSel = null;   // point xyz/rgb
 const selected = new Set();        // camera indices (gi) marked for removal
 
 function fitView(){
+  wheelZoom.reset();
   if (!points) return;
   // Robust centre + size (median / 5–95 percentile), so scattered outlier points
   // don't drag the pivot (and gizmo) off the dense object.
@@ -1129,6 +1132,7 @@ const clock = new THREE.Clock();
   const dt = clock.getDelta();
   if (viewHelper.animating) viewHelper.update(dt);
   applyMove(dt);
+  wheelZoom.update(dt);
   controls.update();
   renderer.clear();
   renderer.render(scene, camera);
