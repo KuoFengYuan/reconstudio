@@ -47,6 +47,55 @@ index d75465f..3d5ed9a 100644
                  this.events.fire('progressUpdate', { text: phase === 'sort' ? 'Sorting' : 'Uploading', progress: 100 });
              } : undefined;
              const resource = await EditorSplatResource.create(this.app.graphicsDevice, source, reorder, onPhase);
+diff --git a/src/editor-device.ts b/src/editor-device.ts
+new file mode 100644
+index 0000000..3eab588
+--- /dev/null
++++ b/src/editor-device.ts
+@@ -0,0 +1,43 @@
++import { WebgpuGraphicsDevice } from 'playcanvas';
++
++const startupError = (code: string, message: string) => Object.assign(new Error(message), { code });
++
++// v3 requires compute/storage buffers. The generic engine factory silently
++// falls back to WebGL/null devices, which fail later with createBufferImpl.
++export const createEditorDevice = async (canvas: HTMLCanvasElement) => {
++    if (!window.isSecureContext) {
++        throw startupError('insecure-context', 'WebGPU requires HTTPS or localhost.');
++    }
++    if (!navigator.gpu) {
++        throw startupError('webgpu-unavailable', 'This browser does not expose WebGPU.');
++    }
++    let foundAdapter = false;
++    const failures: string[] = [];
++    for (const powerPreference of ['high-performance', 'default'] as const) {
++        let device: WebgpuGraphicsDevice;
++        try {
++            // Some dual-GPU systems cannot satisfy high-performance, but can
++            // provide the browser's default adapter. Probe before engine init
++            // so a null adapter never reaches its features access.
++            const adapter = await navigator.gpu.requestAdapter(
++                powerPreference === 'default' ? {} : { powerPreference }
++            );
++            if (!adapter) continue;
++            foundAdapter = true;
++            device = new WebgpuGraphicsDevice(canvas, {
++                antialias: false, depth: false, stencil: false,
++                xrCompatible: false, powerPreference
++            });
++            const initialized = await device.initWebGpu(undefined, undefined);
++            if (initialized?.isWebGPU) return initialized;
++            throw new Error('WebGPU device initialization returned no device.');
++        } catch (error) {
++            failures.push(`${powerPreference}: ${String(error)}`);
++            device?.destroy();
++        }
++    }
++    if (!foundAdapter) {
++        throw startupError('adapter-unavailable', 'No available WebGPU adapters (high-performance and default).');
++    }
++    throw startupError('device-failed', `WebGPU device initialization failed. ${failures.join('; ')}`);
++};
 diff --git a/src/file-handler.ts b/src/file-handler.ts
 index e2ed257..adbeb71 100644
 --- a/src/file-handler.ts
@@ -164,7 +213,7 @@ index 2fb063f..39a3e20 100644
      </body>
  </html>
 diff --git a/src/index.ts b/src/index.ts
-index d90fff0..734f63d 100644
+index d90fff0..b037e37 100644
 --- a/src/index.ts
 +++ b/src/index.ts
 @@ -4,6 +4,7 @@ import { version as stVersion, revision as stRevision } from '@playcanvas/splat-
@@ -175,14 +224,48 @@ index d90fff0..734f63d 100644
  import { version as appVersion } from '../package.json';
  import { i18n } from './ui/localization';
  
-@@ -33,6 +34,7 @@ main().catch((err) => {
+@@ -33,6 +34,9 @@ main().catch((err) => {
          // keep the fallback
      }
  
-+    reportSplatLoad('error', { message });
++    const detail = err instanceof Error ? err.message : String(err);
++    message = `${message} ${detail}`;
++    reportSplatLoad('error', { message, code: err?.code, stage: 'startup' });
      const dom = window.document.createElement('div');
      dom.id = 'startup-error';
      dom.textContent = message;
+diff --git a/src/main.ts b/src/main.ts
+index c9473b0..361b11b 100644
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -1,5 +1,7 @@
+ import { WebPCodec, WorkerQueue } from '@playcanvas/splat-transform';
+-import { Color, createGraphicsDevice } from 'playcanvas';
++import { Color } from 'playcanvas';
++
++import { createEditorDevice } from './editor-device';
+-
++
+ import { registerCameraPosesEvents } from './camera-poses';
+ import { CommandQueue } from './command-queue';
+@@ -125,14 +127,7 @@ const main = async () => {
+     const editorUI = new EditorUI(events);
+-
++
+     // create the graphics device
+-    const graphicsDevice = await createGraphicsDevice(editorUI.canvas, {
+-        deviceTypes: ['webgpu'],
+-        antialias: false,
+-        depth: false,
+-        stencil: false,
+-        xrCompatible: false,
+-        powerPreference: 'high-performance'
+-    });
++    const graphicsDevice = await createEditorDevice(editorUI.canvas);
+-
++
+     events.function('scene.gpu', () => {
+         // Use the renderer's adapter, rather than requesting another GPU.
 diff --git a/src/scene.ts b/src/scene.ts
 index 7b9f1f8..5b1733c 100644
 --- a/src/scene.ts
