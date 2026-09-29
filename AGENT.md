@@ -22,6 +22,12 @@ when the existing checkout contains work belonging to another task.
 3. Write the PR in English first: describe the final behavior, important tradeoffs,
    test results, and physical-device checks still pending. Include a Traditional
    Chinese summary afterward.
+   Use PR #56 as the level-of-detail reference: explain the reported symptom,
+   established cause, resulting behavior, and relevant implementation boundaries.
+   Include separate `Tradeoffs`, `Validation`, `Physical-device checks pending`,
+   and `繁體中文摘要` sections. Record concrete checks, outcomes, representative
+   inputs, and limitations; distinguish simulated browsers from physical devices.
+   If a later PR changes an earlier PR's behavior, link that follow-up explicitly.
 4. If the application provides task attachment tools, link or attach the PR to the
    current task.
 
@@ -35,6 +41,10 @@ when the existing checkout contains work belonging to another task.
   affected checks, and update the PR.
 - Merge the verified HEAD, normally with a squash merge. Ensure the HEAD being merged
   matches the commit that passed validation.
+- Preserve the PR number in the squash commit subject, e.g.
+  `fix: describe the verified change (#123)`. When using `gh pr merge --subject`,
+  include that suffix explicitly; overriding the subject omits GitHub's default
+  suffix. Do not rewrite already published `main` history to repair old subjects.
 - Never push directly to `main`, use administrator bypass, disable protections, or
   bypass required reviews.
 - If an external gate blocks merging, report its exact name and leave the PR and
