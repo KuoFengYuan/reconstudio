@@ -1023,9 +1023,9 @@ gsutil ls
 - 離線、缺少建置工具、未知主版本或修補不相容時，保留現有 bundle，並顯示更新失敗；細節在 `$RECON_STUDIO_DATA/supersplat_build.log`。
 - 手動更新：`./tools/build_supersplat.sh`；強制重建：`FORCE=1 ./tools/build_supersplat.sh`。v3.4.2 的建置相依套件建議使用 Node.js 22 以上，另需 npm、git、flock。
 - 可在 `local.env` 設 `SUPERSPLAT_VER=v3.4.2` 固定版本；刪除設定或改成 `latest` 恢復自動追蹤。`SUPERSPLAT_AUTOUPDATE=0` 可關閉啟動更新。
-- **v3 使用 WebGPU**，需支援 WebGPU 的瀏覽器與 HTTPS／localhost；不支援時編輯器與面板會顯示啟動錯誤。需要舊版 WebGL 時，可明確固定 `SUPERSPLAT_VER=v2.32.5`。
+- **v3 使用 WebGPU**，需支援 WebGPU 的瀏覽器與 HTTPS／localhost。啟動失敗時面板會自動改用一同建置的 v2.32.5 WebGL 相容版；缺少 WebGPU 的瀏覽器會直接使用相容版。若要只部署 v2，可明確固定 `SUPERSPLAT_VER=v2.32.5`。
 
-v3 使用 `tools/supersplat-v3.patch`，保留上游原生分塊載入與 WebGPU 渲染，銜接面板的載入進度、畫質切換與送回 PLY。v2 則使用 `tools/supersplat-reconstudio.patch`（送回點雲）與 `tools/supersplat-performance.patch`（背景載入與畫質控制）。v2 的記憶體／效能測試數據不代表 v3 的效能。
+v3 使用 `tools/supersplat-v3.patch`，保留上游原生分塊載入與 WebGPU 渲染，銜接面板的載入進度、畫質切換與送回 PLY。v2 則使用 `tools/supersplat-reconstudio.patch`（送回點雲）與 `tools/supersplat-performance.patch`（背景載入與畫質控制）。兩版共用 `tools/supersplat-wheel.patch`，讓滾輪縮放步幅一致。v2 的記憶體／效能測試數據不代表 v3 的效能。
 建置會比對版本、建置腳本與適用修補的雜湊，避免漏套修補；新版仍保留完整模型資料，不以抽稀換取畫質切換。
 
 ---

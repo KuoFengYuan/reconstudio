@@ -25,6 +25,7 @@ def build_tree(tmp_path):
     git("init", "-q")
     (src / "a").write_text("original\n")
     (src / "b").write_text("original\n")
+    (src / "c").write_text("original\n")
     git("add", ".")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture")
     git("tag", "v2.32.5")
@@ -35,6 +36,7 @@ def build_tree(tmp_path):
     for filename, target in [("supersplat-reconstudio.patch", "a"), ("supersplat-performance.patch", "b")]:
         (tools / filename).write_text(f"--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-original\n+patched\n")
     (tools / "supersplat-v3.patch").write_text("--- a/a\n+++ b/a\n@@ -1 +1 @@\n-original\n+v3-patched\n")
+    (tools / "supersplat-wheel.patch").write_text("--- a/c\n+++ b/c\n@@ -1 +1 @@\n-original\n+smooth-wheel\n")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "node").write_text("#!/bin/sh\nexit 0\n")
@@ -115,9 +117,20 @@ def test_default_discovers_latest_stable_and_rechecks_on_each_build(build_tree):
     Path(env["REMOTE_TAGS"]).write_text("hash\trefs/tags/v3.4.2\nhash\trefs/tags/v4.0.0-beta.1\n")
     assert run_build(build_tree).returncode == 0
     assert (dest / ".version").read_text().strip() == "v3.4.2"
-    assert Path(env["BUILD_CALLS"]).read_text().count("install") == 2
+    assert (project / "static/supersplat-legacy/.version").read_text().strip() == "v2.32.5"
+    assert Path(env["BUILD_CALLS"]).read_text().count("install") == 3
     assert run_build(build_tree).returncode == 0
-    assert Path(env["BUILD_CALLS"]).read_text().count("install") == 2
+    assert Path(env["BUILD_CALLS"]).read_text().count("install") == 3
+
+
+def test_v3_build_stops_before_deploy_when_compatibility_build_fails(build_tree):
+    project, _, env = build_tree
+    env["SUPERSPLAT_VER"] = "v3.4.2"
+    patch = project / "tools/supersplat-reconstudio.patch"
+    patch.write_text(patch.read_text().replace("-original", "-missing-upstream-line"))
+    result = run_build(build_tree)
+    assert result.returncode != 0
+    assert not (project / "static/supersplat").exists()
 
 
 def test_failed_latest_lookup_keeps_last_working_bundle(build_tree):

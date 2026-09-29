@@ -6,24 +6,32 @@ SUPERSPLAT_VER="${SUPERSPLAT_VER:-latest}"
 REPO_URL="https://github.com/playcanvas/supersplat.git"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${SUPERSPLAT_SRC:-$(dirname "$HERE")/supersplat}"
-DEST="$HERE/static/supersplat"
+DEST="${SUPERSPLAT_DEST:-$HERE/static/supersplat}"
 for bin in git node npm sha256sum flock; do
   command -v "$bin" >/dev/null || { echo "ERROR: '$bin' is required" >&2; exit 1; }
 done
 # Concurrent startup/build requests must not race the deployment rename.
 LOCK_KEY="$(printf '%s' "$HERE" | sha256sum | cut -c1-16)"
-exec 9>"${TMPDIR:-/tmp}/reconstudio-supersplat-$LOCK_KEY.lock"
-flock 9
+if [[ "${SUPERSPLAT_SKIP_LOCK:-0}" != 1 ]]; then
+  exec 9>"${TMPDIR:-/tmp}/reconstudio-supersplat-$LOCK_KEY.lock"
+  flock 9
+fi
 if [[ "$SUPERSPLAT_VER" == "latest" ]]; then
   SUPERSPLAT_VER="$(git ls-remote --tags --refs "$REPO_URL" 'v*' | awk -F/ '$NF ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ {print $NF}' | sort -V | tail -1)"
   [[ -n "$SUPERSPLAT_VER" ]] || { echo "ERROR: could not resolve latest tag" >&2; exit 1; }
 fi
 # v3 uses a different native chunk loader and WebGPU renderer; do not apply v2 internals.
 case "$SUPERSPLAT_VER" in
-  v2.*) PATCHES=("$HERE/tools/supersplat-reconstudio.patch" "$HERE/tools/supersplat-performance.patch") ;;
-  v3.*) PATCHES=("$HERE/tools/supersplat-v3.patch") ;;
+  v2.*) PATCHES=("$HERE/tools/supersplat-reconstudio.patch" "$HERE/tools/supersplat-performance.patch" "$HERE/tools/supersplat-wheel.patch") ;;
+  v3.*) PATCHES=("$HERE/tools/supersplat-v3.patch" "$HERE/tools/supersplat-wheel.patch") ;;
   *) echo "ERROR: unsupported SuperSplat release $SUPERSPLAT_VER; keeping current bundle" >&2; exit 1 ;;
 esac
+# WebGPU is unavailable or unstable on some browser/GPU combinations. Keep a
+# patched WebGL editor ready before deploying v3 so the panel can retry there.
+if [[ "$SUPERSPLAT_VER" == v3.* && "${SUPERSPLAT_BUILD_LEGACY:-1}" == 1 ]]; then
+  SUPERSPLAT_VER=v2.32.5 SUPERSPLAT_DEST="$HERE/static/supersplat-legacy" \
+    SUPERSPLAT_BUILD_LEGACY=0 SUPERSPLAT_SKIP_LOCK=1 "$HERE/tools/build_supersplat.sh"
+fi
 echo "target: $SUPERSPLAT_VER"
 RECON_BUILD_ID="$(cat "$HERE/tools/build_supersplat.sh" "${PATCHES[@]}" | sha256sum | cut -c1-16)"
 RECON_BUILD_ID="$SUPERSPLAT_VER-$RECON_BUILD_ID"
@@ -52,7 +60,11 @@ for patch in "${PATCHES[@]}"; do git apply "$patch"; done
 echo "[2/4] installing pinned dependencies"
 npm ci
 echo "[3/4] building editor"
-BASE_HREF=/static/supersplat/ npm run build
+if [[ "$DEST" == "$HERE/static/supersplat-legacy" ]]; then
+  BASE_HREF=/static/supersplat-legacy/ npm run build
+else
+  BASE_HREF=/static/supersplat/ npm run build
+fi
 [[ -s dist/index.html && -s dist/index.js &&
    ( "$SUPERSPLAT_VER" != v2.* || -s dist/splat-loader-worker.js ) ]] || { echo 'ERROR: incomplete editor build' >&2; exit 1; }
 echo "[4/4] deploying editor"
