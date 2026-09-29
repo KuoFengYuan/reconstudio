@@ -101,7 +101,7 @@ fi
 
 mkdir -p "$RECON_STUDIO_DATA" "$TMPDIR"
 
-# --- SuperSplat: sync the tested release and local patches at startup --- #
+# --- SuperSplat: sync the latest stable release and local patches at startup --- #
 # Runs in the BACKGROUND so the server starts immediately; the build script swaps
 # the bundle when done, so the current version keeps serving during the build.
 # Fail-soft: offline / node missing / patch conflict on a new release just keeps
@@ -112,8 +112,9 @@ if [[ "$SUPERSPLAT_AUTOUPDATE" == "1" ]]; then
   SS_LOG="$RECON_STUDIO_DATA/supersplat_build.log"
   (
     flock -n 9 || exit 0          # another startup is already syncing
-    if SUPERSPLAT_VER="${SUPERSPLAT_VER:-v2.32.5}" ./tools/build_supersplat.sh >>"$SS_LOG" 2>&1; then
-      echo "supersplat: $(cat static/supersplat/.version 2>/dev/null || echo '?') (synced)"
+    echo "supersplat: checking ${SUPERSPLAT_VER:-latest} (background; log: $SS_LOG)"
+    if SUPERSPLAT_VER="${SUPERSPLAT_VER:-latest}" ./tools/build_supersplat.sh >>"$SS_LOG" 2>&1; then
+      echo "supersplat: $(cat static/supersplat/.version 2>/dev/null || echo '?') (synced; requested ${SUPERSPLAT_VER:-latest})"
     else
       echo "supersplat: update failed — keeping current bundle (see $SS_LOG)" >&2
     fi
@@ -134,15 +135,7 @@ echo "  本機          http://127.0.0.1:$PORT"
 
 NGINX_SITE=/etc/nginx/sites-enabled/reconstudio.conf
 if [[ -r "$NGINX_SITE" ]]; then
-  proxied="$(sed -nE 's|.*proxy_pass +http://127\.0\.0\.1:([0-9]+).*|\1|p' "$NGINX_SITE" | head -1)"
-  hport="$(sed -nE 's|^ *listen +[0-9.]+:([0-9]+) +ssl.*|\1|p' "$NGINX_SITE" | head -1)"
-  hname="$(sed -nE 's|^ *server_name +([^ ;]+).*|\1|p' "$NGINX_SITE" | head -1)"
-  if [[ "$proxied" == "$PORT" ]]; then
-    echo "  區網(nginx)   https://$hname:$hport/   ← 給同事的就是這個(要帳密)"
-  else
-    echo "  區網(nginx)   ✗ 代理指到 :$proxied,但面板綁的是 :$PORT —— 從外面一定連不到。" >&2
-    echo "                 修:sudo scripts/deploy-nginx-lan.sh" >&2
-  fi
+  "$ENVPY" -m pipeline.startup_urls
 elif [[ "$HOST" == "0.0.0.0" || "$HOST" == "::" ]]; then
   for ip in $(lan_ips); do
     echo "  區網          http://$ip:$PORT   ⚠ 無密碼、可瀏覽 $RECON_STUDIO_BROWSE_ROOT"

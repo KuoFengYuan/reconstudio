@@ -1,0 +1,224 @@
+diff --git a/rollup.config.mjs b/rollup.config.mjs
+index 033fc61..2b00080 100644
+--- a/rollup.config.mjs
++++ b/rollup.config.mjs
+@@ -51,7 +51,7 @@ const application = {
+                 {
+                     src: 'src/index.html',
+                     transform: (contents, filename) => {
+-                        return contents.toString().replace('__BASE_HREF__', HREF);
++                        return contents.toString().replace('__BASE_HREF__', HREF).replace('__RECON_BUILD__', process.env.RECON_BUILD_ID || 'dev');
+                     }
+                 },
+                 { src: 'src/manifest.json' },
+diff --git a/src/asset-loader.ts b/src/asset-loader.ts
+index d75465f..3d5ed9a 100644
+--- a/src/asset-loader.ts
++++ b/src/asset-loader.ts
+@@ -3,6 +3,7 @@ import { AppBase, Asset } from 'playcanvas';
+ 
+ import { EditorSplatResource } from './editor-splat-resource';
+ import { Events } from './events';
++import { reportSplatLoad } from './iframe-api';
+ import { defaultLodIndex, hasLoadProgress, loadSplatSource } from './io';
+ import { Splat } from './splat';
+ import { i18n } from './ui/localization';
+@@ -41,6 +42,7 @@ class AssetLoader {
+         const header = `Loading ${filename.split('/').pop()}`;
+         const tracked = hasLoadProgress(fileSystem) ? fileSystem : null;
+         const progressStart = () => {
++            reportSplatLoad('loading');
+             this.events.fire('progressStart', header);
+             this.events.fire('progressUpdate', { text: 'Reading', progress: 0 });
+         };
+@@ -49,6 +51,7 @@ class AssetLoader {
+             if (tracked) {
+                 // per file: multi-file formats read one file after another
+                 tracked.onProgress = (loaded, total, name) => {
++                    reportSplatLoad('loading', { loaded, total });
+                     const file = name.split('/').pop();
+                     this.events.fire('progressUpdate', total ?
+                         { text: `Reading ${file}`, progress: Math.min(100, 100 * loaded / total) } :
+@@ -96,6 +99,7 @@ class AssetLoader {
+             }
+             const { source, transform, reorder } = result;
+             const onPhase = showProgress ? (phase: 'sort' | 'upload') => {
++                reportSplatLoad(phase === 'sort' ? 'packing' : 'gpu', { count: source.meta.numGaussians });
+                 this.events.fire('progressUpdate', { text: phase === 'sort' ? 'Sorting' : 'Uploading', progress: 100 });
+             } : undefined;
+             const resource = await EditorSplatResource.create(this.app.graphicsDevice, source, reorder, onPhase);
+diff --git a/src/file-handler.ts b/src/file-handler.ts
+index e2ed257..adbeb71 100644
+--- a/src/file-handler.ts
++++ b/src/file-handler.ts
+@@ -1,3 +1,4 @@
++import { reportSplatLoad } from './iframe-api';
+ import { path, Quat, Vec3 } from 'playcanvas';
+ 
+ import type { Pose } from './camera-poses';
+@@ -321,8 +322,10 @@ const initFileHandler = (scene: Scene, events: Events, dropTarget: HTMLElement)
+             }
+             model.resource.fileSources = fileSystem.sources;
+             await scene.add(model);
++            reportSplatLoad('ready', { count: model.numSplats });
+             return model;
+         } catch (error) {
++            reportSplatLoad('error', { message: String(error.message ?? error) });
+             const displayName = files[0]?.filename ?? 'unknown';
+             await showLoadError(error.message ?? error, displayName);
+         }
+diff --git a/src/iframe-api.ts b/src/iframe-api.ts
+index ff86dd4..3e915ee 100644
+--- a/src/iframe-api.ts
++++ b/src/iframe-api.ts
+@@ -1,6 +1,7 @@
+ import { Events } from './events';
+ 
+ const IS_SCENE_DIRTY = 'supersplat:is-scene-dirty';
++const EXPORT_PLY = 'supersplat:export-ply';
+ const NAVIGATE_HOME = 'supersplat:navigate-home';
+ 
+ interface IsSceneDirtyQuery {
+@@ -20,13 +21,64 @@ const isSceneDirtyQuery = (data: any): data is IsSceneDirtyQuery => {
+     );
+ };
+ 
++const isExportPlyQuery = (data: any): boolean => {
++    return data && typeof data === 'object' && data.type === EXPORT_PLY && !data.data;
++};
++
++// Buffer scene.write output instead of downloading it. Implements the slice of
++// FileSystemWritableFileStream that BrowserFileWriter uses (seek/write/truncate/close).
++const exportPlyBytes = async (events: Events): Promise<ArrayBuffer> => {
++    const chunks: Uint8Array[] = [];
++    const stream = {
++        seek: async (_pos: number) => {},
++        write: async (data: ArrayBuffer | Uint8Array) => {
++            const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
++            chunks.push(u8.slice(0));
++        },
++        truncate: async (_size: number) => {},
++        close: async () => {},
++        abort: async () => { chunks.length = 0; }
++    };
++    const written = await events.invoke('scene.write', 'ply', {
++        filename: 'point_cloud.ply',
++        splatIdx: 'all',
++        serializeSettings: {}            // defaults: deleted splats are always dropped
++    }, stream as unknown as FileSystemWritableFileStream);
++
++    if (written === false) throw new Error('Scene export failed');
++    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
++    const out = new Uint8Array(total);
++    let offset = 0;
++    for (const c of chunks) {
++        out.set(c, offset);
++        offset += c.byteLength;
++    }
++    return out.buffer;
++};
++
++const reportSplatLoad = (phase: string, extra = {}) => {
++    if (window.parent !== window) {
++        window.parent.postMessage({ type: 'reconstudio:splat-load', phase, ...extra }, location.origin);
++    }
++};
++
+ const registerIframeApi = (events: Events) => {
+-    window.addEventListener('message', (event: MessageEvent) => {
++    window.addEventListener('message', async (event: MessageEvent) => {
+         const source = event.source as Window | null;
+         if (!source) {
+             return;
+         }
+ 
++        if (isExportPlyQuery(event.data) && event.source === window.parent && event.origin === location.origin) {
++            try {
++                const buffer = await exportPlyBytes(events);
++                source.postMessage({ type: EXPORT_PLY, data: buffer }, event.origin, [buffer]);
++            } catch (err) {
++                source.postMessage({ type: EXPORT_PLY, error: String(err) }, event.origin);
++            }
++            return;
++        }
++
+         if (isSceneDirtyQuery(event.data)) {
+             const response: IsSceneDirtyResponse = {
+                 type: IS_SCENE_DIRTY,
+@@ -65,4 +117,4 @@ const requestNavigateHome = () => {
+     window.location.assign('https://superspl.at/');
+ };
+ 
+-export { registerIframeApi, requestNavigateHome };
++export { registerIframeApi, requestNavigateHome, reportSplatLoad };
+diff --git a/src/index.html b/src/index.html
+index 2fb063f..39a3e20 100644
+--- a/src/index.html
++++ b/src/index.html
+@@ -22,6 +22,6 @@
+     </head>
+ 
+     <body>
+-        <script type="module" src="./index.js"></script>
++        <script type="module" src="./index.js?recon=__RECON_BUILD__"></script>
+     </body>
+ </html>
+diff --git a/src/index.ts b/src/index.ts
+index d90fff0..734f63d 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -4,6 +4,7 @@ import { version as stVersion, revision as stRevision } from '@playcanvas/splat-
+ import { version as engineVersion, revision as engineRevision } from 'playcanvas';
+ 
+ import { main } from './main';
++import { reportSplatLoad } from './iframe-api';
+ import { version as appVersion } from '../package.json';
+ import { i18n } from './ui/localization';
+ 
+@@ -33,6 +34,7 @@ main().catch((err) => {
+         // keep the fallback
+     }
+ 
++    reportSplatLoad('error', { message });
+     const dom = window.document.createElement('div');
+     dom.id = 'startup-error';
+     dom.textContent = message;
+diff --git a/src/scene.ts b/src/scene.ts
+index 7b9f1f8..5b1733c 100644
+--- a/src/scene.ts
++++ b/src/scene.ts
+@@ -90,6 +90,7 @@ class Scene {
+     boundStorage = new BoundingBox();
+     boundDirty = true;
+     forceRender = false;
++    renderQuality = new URLSearchParams(location.search).get('rsQuality') || 'native';
+ 
+     // True while the user is dragging in the viewport. The element-state diff below
+     // only sees what elements serialize, so edits that live outside it - a
+@@ -200,6 +201,13 @@ class Scene {
+     ) {
+         this.events = events;
+         this.config = config;
++        window.addEventListener('message', (event) => {
++            if (event.origin !== location.origin || event.source !== window.parent) return;
++            if (event.data?.type === 'reconstudio:quality' && ['performance', 'balanced', 'native'].includes(event.data.quality)) {
++                this.renderQuality = event.data.quality;
++                this.forceRender = true;
++            }
++        });
+         this.canvas = canvas;
+         this.commandQueue = commandQueue;
+ 
+@@ -629,6 +637,12 @@ class Scene {
+         this.targetSize.width = Math.ceil(this.app.graphicsDevice.width / this.config.camera.pixelScale);
+         this.targetSize.height = Math.ceil(this.app.graphicsDevice.height / this.config.camera.pixelScale);
+ 
++        // Only reduce the editing viewport; exports and camera overrides retain full data/resolution.
++        const maxPixels = this.renderQuality === 'performance' ? 1_000_000 : this.renderQuality === 'balanced' ? 2_000_000 : Infinity;
++        const scale = Math.min(1, Math.sqrt(maxPixels / (this.targetSize.width * this.targetSize.height)));
++        this.targetSize.width = Math.max(1, Math.floor(this.targetSize.width * scale));
++        this.targetSize.height = Math.max(1, Math.floor(this.targetSize.height * scale));
++
+         this.forEachElement(e => e.onPreRender());
+ 
+         this.projectedSplatRenderer.render();

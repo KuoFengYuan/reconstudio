@@ -6,6 +6,8 @@ with it, so they are worth pinning as text.
 """
 import re
 
+import pytest
+
 from pipeline.config import REPO_ROOT
 
 TEMPLATE = (REPO_ROOT / "infra/nginx/reconstudio.conf.template").read_text()
@@ -251,3 +253,25 @@ def test_the_zone_is_matched_on_the_live_delegation_not_just_the_name():
     """This domain has two stale zones with the same dnsName in another project;
     writing the challenge into one publishes a TXT no resolver ever sees."""
     assert 'printf \'%s\\n\' "${LIVE_NS[@]}" | grep -qxF "$zns"' in ISSUE
+
+
+@pytest.mark.parametrize("proxy_port", ["8078", "8077", None])
+def test_startup_url_reads_shared_proxy_snippet(tmp_path, monkeypatch, proxy_port):
+    from pipeline import preflight
+    from pipeline.startup_urls import nginx_message
+
+    snippet = tmp_path / "common.conf"
+    if proxy_port:
+        snippet.write_text(f"location / {{ proxy_pass http://127.0.0.1:{proxy_port}; }}")
+    site = tmp_path / "site.conf"
+    site.write_text(f"server {{\n listen 192.168.1.2:443 ssl;\n"
+                    f" server_name recon.example.com;\n include {snippet};\n}}")
+    monkeypatch.setattr(preflight, "_NGINX_SITE", site)
+    message = nginx_message("8078")
+    if proxy_port == "8078":
+        assert "https://recon.example.com/" in message
+        assert "✗" not in message
+    elif proxy_port:
+        assert "代理指到 :8077" in message and "面板綁的是 :8078" in message
+    else:
+        assert "無法判讀" in message and "一定連不到" not in message

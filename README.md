@@ -26,7 +26,7 @@
 cd ~/repo/reconstudio && ./run.sh
 ```
 
-它會自己讀 `local.env`、解 conda 環境、順手更新 SuperSplat 已驗證版本與效能修補(背景跑,不擋啟動),
+它會自己讀 `local.env`、解 conda 環境、順手更新 SuperSplat 最新穩定版本與整合修補(背景跑,不擋啟動),
 然後印出**真正連得到的網址**:
 
 ```
@@ -201,7 +201,7 @@ LichtFeld 的 backend(MR-NF)已內建在 `pipeline/backends.py`,只要
 ## 4. 選用元件
 
 - **☁️ GCS 雲端搬檔**:需 Google Cloud SDK + 登入,見[三、進階 — GCS 設定](#gcs-設定一次性)。
-- **🧹 SuperSplat(去背 + 點雲檢視)**:**免裝** — `run.sh` 啟動時自動同步已驗證版本與效能修補
+- **🧹 SuperSplat(去背 + 點雲檢視)**:**免裝** — `run.sh` 啟動時自動同步最新穩定版本與整合修補
   (背景跑、不擋啟動;離線就沿用現有版本)。詳見[三、進階](#supersplat-自動更新)。
 - **🌊 深度/法向量(選用)** — 為照片產生深度圖和/或法向量圖,給 LichtFeld 訓練做深度/法向量
   監督。有**兩種引擎**,寫出的 `depth/`、`normals/` 完全同格式,下游訓練不需要知道是哪一個
@@ -862,7 +862,7 @@ LichtFeld 則直接下載乾淨點雲。
 
 ### 大場景載入與操作
 
-從任務開啟 PLY 模型時，工具列會顯示讀取、背景整理 GPU 紋理、建立 GPU 資料等階段。
+從任務開啟 PLY 模型時，工具列會顯示讀取、整理模型資料、建立 GPU 資料等階段。
 不需要反覆按開啟；重複開啟會取消前一次載入，避免同時載入多份模型。
 按「停止載入／關閉模型」會結束目前編輯器並返回任務；有修改時，先送回或匯出再關閉。
 
@@ -876,11 +876,11 @@ LichtFeld 則直接下載乾淨點雲。
 載入完成後可直接切換畫質，**不用重新下載或解析模型**。
 畫質設定只影響編輯畫面解析度，完整點數、球諧與幾何資料、匯出內容均保留，不會抽稀或改寫原模型。
 
-這次使用約 **221 MB、892,394 個 splats** 的模型驗證，優化前後的 64 個記憶體屬性陣列與
+v2.32.5 的背景載入修補曾使用約 **221 MB、892,394 個 splats** 的模型驗證，優化前後的 64 個記憶體屬性陣列與
 7 份 GPU 紋理緩衝區逐位元組相同。背景處理與畫質上限用來減少介面阻塞及繪製負擔；
 本機測試的首次載入總時間仍相近，完整檔案傳輸、GPU 上傳與可用記憶體仍會影響開啟時間。
 
-更新編輯器後，重新整理頁面再開啟模型即可使用背景載入與畫質切換；
+更新編輯器後，重新整理頁面再開啟模型即可使用新版載入流程與畫質切換；
 後端的點數偵測與模型版本資訊需重啟面板才會套用。尚未重啟時，前端仍會依檔案大小選擇大模型畫質。
 
 ## Mesh(模型 → 三角網格)
@@ -997,7 +997,7 @@ TSDF 只給**頂點色**:一個顏色對一個頂點,所以顏色的精細度等
 | `RECON_STUDIO_HOST` / `_PORT` | 同上 | 要從環境變數一次性覆蓋時用這組 —— conda 會 export `HOST=x86_64-conda-linux-gnu`,裸的名字不能信 |
 | `RECON_STUDIO_LAN_DOMAIN` | `recon.venraas.tw` | 區網代理對外的網址名稱 |
 | `SUPERSPLAT_AUTOUPDATE` | `1` | 設 `0` 關掉 SuperSplat 啟動自動更新 |
-| `SUPERSPLAT_VER` | `v2.32.5` | 已驗證的 SuperSplat 版本，含背景載入修補 |
+| `SUPERSPLAT_VER` | `latest` | 最新穩定標籤；可指定版本，例如 `v3.4.2` |
 
 ## GCS 設定(一次性)
 
@@ -1017,17 +1017,16 @@ gsutil ls
 
 ## SuperSplat 自動更新
 
-`run.sh` 每次啟動會在**背景**檢查已驗證版本 `v2.32.5` 與兩份本機修補；版本或修補有變才重建。
+`run.sh` 每次啟動會在**背景**查詢上游最新穩定標籤（只選 `v主版.次版.修訂`，不選 alpha／beta／RC）；版本或整合修補有變才重建。啟動日誌先顯示 `checking latest`，完成後顯示實際版本與 `synced; requested latest`，不再將固定舊版本當成最新版本。
 
 - 重建在暫存目錄進行，不切換或清除相鄰 `supersplat` checkout 的修改；建置成功後才替換 bundle。
-- 離線、缺少建置工具或版本與修補不相容時，保留現有 bundle；細節在 `$RECON_STUDIO_DATA/supersplat_build.log`。
-- 手動重建：`FORCE=1 ./tools/build_supersplat.sh`（需支援相依套件的 Node.js、npm、git、flock）。
-- 可用 `SUPERSPLAT_VER` 指定版本；`latest` 是明確選項，需先確認兩份修補相容。
+- 離線、缺少建置工具、未知主版本或修補不相容時，保留現有 bundle，並顯示更新失敗；細節在 `$RECON_STUDIO_DATA/supersplat_build.log`。
+- 手動更新：`./tools/build_supersplat.sh`；強制重建：`FORCE=1 ./tools/build_supersplat.sh`。v3.4.2 的建置相依套件建議使用 Node.js 22 以上，另需 npm、git、flock。
+- 可在 `local.env` 設 `SUPERSPLAT_VER=v3.4.2` 固定版本；刪除設定或改成 `latest` 恢復自動追蹤。`SUPERSPLAT_AUTOUPDATE=0` 可關閉啟動更新。
+- **v3 使用 WebGPU**，需支援 WebGPU 的瀏覽器與 HTTPS／localhost；不支援時編輯器與面板會顯示啟動錯誤。需要舊版 WebGL 時，可明確固定 `SUPERSPLAT_VER=v2.32.5`。
 
-兩份修補分別是 `tools/supersplat-reconstudio.patch`（編輯器送回點雲）與
-`tools/supersplat-performance.patch`（遠端 PLY 背景解析、排序、GPU 紋理計算及畫質控制）。
-建置會比對版本與修補雜湊，避免同一上游版本漏套新修補；背景處理保留完整模型資料，透過可轉移緩衝區交給編輯器。
-本機拖放與其他格式沿用原有載入流程。日常操作與實測範圍見[大場景載入與操作](#大場景載入與操作)。
+v3 使用 `tools/supersplat-v3.patch`，保留上游原生分塊載入與 WebGPU 渲染，銜接面板的載入進度、畫質切換與送回 PLY。v2 則使用 `tools/supersplat-reconstudio.patch`（送回點雲）與 `tools/supersplat-performance.patch`（背景載入與畫質控制）。v2 的記憶體／效能測試數據不代表 v3 的效能。
+建置會比對版本、建置腳本與適用修補的雜湊，避免漏套修補；新版仍保留完整模型資料，不以抽稀換取畫質切換。
 
 ---
 

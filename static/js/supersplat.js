@@ -1,4 +1,4 @@
-// One editor at a time. Remote decode runs in the editor's transferable Worker.
+// One editor at a time; progress comes from the version-specific editor integration.
 (function () {
   'use strict';
   let request = null;
@@ -87,7 +87,7 @@
     url.searchParams.set('filename',filename);
     url.searchParams.set('rsQuality',document.getElementById('ss-quality').value);
     // Version the entry URL too: older installed service workers must not mask a patched bundle.
-    url.searchParams.set('rsBuild','blit-v2');
+    url.searchParams.set('rsBuild','latest-v3');
     const details=metadata ? (metadata.size/1048576).toFixed(1)+' MB'+(metadata.count?' · '+metadata.count.toLocaleString()+' splats':'') : filename;
     status(details+' · 正在啟動編輯器…');
     const hint=document.createElement('p');hint.className='hint';
@@ -104,9 +104,9 @@
     if(!data || data.type!=='reconstudio:splat-load')return;
     if(data.phase==='loading') {
       const percent=data.total && Number.isFinite(data.loaded) ? Math.min(99,100*data.loaded/data.total):undefined;
-      status(percent===undefined?'背景讀取與解析模型…':'背景讀取與解析模型 · '+percent.toFixed(0)+'%',percent);
+      status(percent===undefined?'讀取與解析模型…':'讀取與解析模型 · '+percent.toFixed(0)+'%',percent);
     } else if(data.phase==='packing') {
-      status('背景整理 GPU 紋理 · 完整保留球諧與幾何資料…');
+      status('整理模型資料 · 完整保留球諧與幾何資料…');
     } else if(data.phase==='gpu') {
       status('解析完成 · 正在建立 GPU 資料（'+Number(data.count).toLocaleString()+' splats）…');
     } else if(data.phase==='ready') {
