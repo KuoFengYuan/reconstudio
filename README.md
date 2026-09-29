@@ -9,6 +9,118 @@
 打開瀏覽器就能操作:每一步都有表單、即時 log、可取消、跑完有「接著跑下一步」按鈕自動帶路徑。
 也內建瀏覽器 3D 檢視器(點雲 / Mesh / 量尺)、去背編輯器、GCS 雲端搬檔。
 
+<a id="agent-context-router"></a>
+
+## AI Agent Context Router / AI Agent 實驗元件快速索引
+
+**Read [claude.md](claude.md) → this Context Router Table → only the relevant
+file or folder.** Full-codebase recursive scans, broad directory traversals, and
+global grep/find searches are forbidden. Follow direct references only as needed.
+See [claude.md](claude.md) for runtime conventions, experiment parameter sources,
+baseline preservation, and development rules.
+
+**先讀 [claude.md](claude.md) → 本索引表 → 直接相關檔案或目錄。**
+禁止全專案遞迴掃描、廣泛遍歷與全域 grep/find；只按需要追蹤直接引用。
+完整執行慣例、實驗參數來源、基準保留及開發規則請見 `claude.md`。
+
+Paths below are relative to this repository unless marked as runtime/external.
+This project orchestrates experiments; it has no central `experiments/`, `models/`,
+or `data/` source directory. Dataset and model output paths come from each job;
+trainer implementations live in configured external repositories. Do not scan
+those repositories or data trees to discover context.
+
+以下除執行期／外部路徑外，皆相對於本專案。本專案負責實驗流程編排，沒有集中式的
+`experiments/`、`models/` 或 `data/` 原始碼目錄；資料與模型輸出由個別任務指定，
+模型實作位於設定的外部專案。不可為了蒐集背景而掃描這些外部專案或資料目錄樹。
+
+| Component / 實驗模組 | Core Path / 核心路徑 | Purpose & Scope / 實驗用途與範疇 | Inputs & Artifacts / 輸入與產出 |
+| :--- | :--- | :--- | :--- |
+| Runtime & configuration / 啟動與設定 | [run.sh](run.sh), [setup.sh](setup.sh), [local.env.example](local.env.example), [pipeline/config.py](pipeline/config.py) | Panel environment, tools, storage, concurrency / 面板環境、工具、儲存與併行設定 | `local.env` → effective runtime settings / 執行期設定 |
+| Requests & experiment records / 請求與實驗紀錄 | [app.py](app.py), [web/services/forms.py](web/services/forms.py), [jobs.py](jobs.py) | HTTP entry, parameter validation, queue and progress / HTTP 入口、參數驗證、佇列與進度 | Form values / 表單 → `<RECON_STUDIO_DATA>/jobs/<job-id>/{job.json,console.log}` |
+| Data transfer & frame selection / 資料搬移與抽幀 | [pipeline/gcs.py](pipeline/gcs.py), [pipeline/frames.py](pipeline/frames.py) | GCS transfer, ffmpeg extraction and blur filtering / 雲端搬檔、抽幀與模糊篩選 | Bucket/files/video / 雲端、檔案、影片 → local files, `frames_<video>/`, quality reports / 本機素材與品質報告 |
+| Masking & capture fusion / 遮罩與多次拍攝融合 | [pipeline/matte.py](pipeline/matte.py), [tools/sam_matte.py](tools/sam_matte.py), [pipeline/fusion.py](pipeline/fusion.py) | External SAM inference and masked capture staging / 外部 SAM 推論與遮罩素材整備 | Photos/prompts / 照片與提示 → `no_bg/{masks,cutout}/`; fusion `images/`, `masks/` |
+| Reconstruction / 相機與點雲重建 | [pipeline/colmap/_run.py](pipeline/colmap/_run.py), [pipeline/colmap/](pipeline/colmap/), [pipeline/large_scene.py](pipeline/large_scene.py) | COLMAP stages; follow only the needed rig/GPS/layout helper / COLMAP 階段；按需定位 rig、GPS、版面輔助檔 | Photos/masks / 照片與遮罩 → `database.db`, sparse models, undistorted images / 稀疏模型與去畸變照片 |
+| Depth & normals / 深度與法線 | [pipeline/depth.py](pipeline/depth.py), [pipeline/moge3.py](pipeline/moge3.py), [tools/moge3_preprocess.py](tools/moge3_preprocess.py) | LichtFeld MoGe-2 or separate MoGe-3 environment / LichtFeld MoGe-2 或獨立 MoGe-3 環境 | Images / 照片 → `depth/`, `normals/` beside `images/` / 與影像目錄並列 |
+| Model/backend integration / 模型與後端整合 | [pipeline/backends.py](pipeline/backends.py), [backends.example.json](backends.example.json) | Backend commands, parameter schemas and environment resolution / 後端指令、參數定義與環境解析 | Optional `backends.json` → external `../GS-2M`, `../gsplat`, `../LichtFeld-Studio` defaults / 外部預設位置，可覆蓋 |
+| Training & mesh / 訓練與網格 | [pipeline/train.py](pipeline/train.py) | Adapt COLMAP scenes; invoke supported trainer/mesh backend / 整備 COLMAP 場景，呼叫支援的訓練／網格後端 | Undistorted scene / 去畸變場景 → configured `model_path`, backend-specific splats/checkpoints/mesh / 依後端產生模型、權重與網格 |
+| Scene partitioning / 大場景分塊 | [pipeline/blocksplit.py](pipeline/blocksplit.py) | Split undistorted scenes into trainable blocks / 將去畸變場景切成可訓練子塊 | COLMAP scene / 場景 → `block_<ix>_<iy>/`, `manifest.json`, optional `_tiles/` / 選用裁切池 |
+| Evaluation & metrics / 驗收與指標 | [pipeline/verify.py](pipeline/verify.py), [tools/verify_recon.py](tools/verify_recon.py), [tools/verify_recon.README.md](tools/verify_recon.README.md) | COLMAP observations, distortion, rig/EO and epipolar checks / 觀測、畸變、rig／EO 及對極驗收 | Sparse model + optional matching DB/manifest / 稀疏模型及選用資料庫／設定 → text metrics and exit status / 文字指標與結束碼 |
+| Viewer & workspace UI / 檢視器與工作區介面 | [templates/index.html](templates/index.html), [static/css/workspace.css](static/css/workspace.css), [static/js/workspace.js](static/js/workspace.js), [static/js/supersplat.js](static/js/supersplat.js), [web/routers/viewer.py](web/routers/viewer.py) | Workspace layout, model loading and viewing / 工作區排版、模型載入與檢視 | Job/model paths / 任務與模型路徑 → browser visualization / 瀏覽器視覺化 |
+| SuperSplat build / 編輯器建置 | [tools/build_supersplat.sh](tools/build_supersplat.sh) | Version selection and integration patches referenced by the script / 版本選擇與腳本引用的整合修補 | Upstream version + patches / 上游版本與修補 → generated `static/supersplat/`; do not scan bundle / 不掃描產生套件 |
+| Validation & deployment / 驗證與部署 | [pyproject.toml](pyproject.toml), [.github/workflows/ci.yml](.github/workflows/ci.yml), [tests/](tests/), [scripts/deploy-nginx-lan.sh](scripts/deploy-nginx-lan.sh) | Test configuration and LAN proxy setup; open only task-related tests / 測試設定與區網代理；只讀任務相關測試 | Code/config / 程式與設定 → check results or deployed proxy configuration / 檢查結果或代理設定 |
+
+`RECON_STUDIO_DATA` stores job metadata/logs, not necessarily the experiment's
+images or trained models. `run.sh` selects storage unless overridden; direct
+`pipeline.config.Settings` defaults to `~/.recon_studio`. Inspect only the chosen
+job's metadata to locate its artifacts, not the whole storage root.
+
+`RECON_STUDIO_DATA` 保存任務中繼資料／日誌，不等於照片或訓練模型所在處。
+`run.sh` 自動選擇儲存位置，可用設定覆蓋；直接使用 `Settings` 時預設為
+`~/.recon_studio`。以指定任務的中繼資料定位成果，不遍歷整個儲存根目錄。
+
+## Experiment Quick Start / 實驗快速開始
+
+1. **Set up / 環境設定.** From the repository root, with Git and Conda installed:
+   在專案根目錄執行，需先安裝 Git 與 Conda：
+
+   ```bash
+   ./setup.sh
+   ./run.sh --doctor
+   ./run.sh
+   ```
+
+   Setup installs the lightweight panel environment and preserves existing
+   `local.env`. Install ffmpeg/COLMAP and the chosen GPU backend separately, following
+   [installation](#一安裝第一次部署); resolve that stage's doctor warnings before running.
+   Open the URL printed by `run.sh` (the port is configurable).
+   安裝程式建立輕量面板環境並保留既有 `local.env`；ffmpeg、COLMAP 與選用 GPU 後端
+   需依[安裝說明](#一安裝第一次部署)另行安裝。解決該階段的健檢警告後，開啟啟動時印出的網址。
+
+2. **Run an experiment / 執行實驗.** Use the panel: choose local photos (or extract
+   frames), run COLMAP into a new workspace, then pass the undistorted result to
+   **Training / 訓練**. Select a ready backend and a distinct model output path;
+   run **Mesh** only for a backend that supports it. Record the job ID, effective
+   parameters, backend revision, and baseline differences. The router above locates
+   each stage's defaults; no universal training CLI or in-repo model directory is assumed.
+   在面板選擇本機照片（或先抽幀），指定新工作區執行 COLMAP，再將去畸變結果交給訓練。
+   選擇可用後端與獨立模型輸出路徑；僅支援網格的後端可接 Mesh。記錄任務 ID、實際參數、
+   後端版本與基準差異，各階段預設值由上表定位；本專案沒有統一訓練 CLI 或內建模型目錄。
+
+3. **Evaluate / 評估.** Run the COLMAP checker in a separate environment containing
+   `pycolmap` and `numpy` (`PyYAML` additionally for YAML manifests). Replace the
+   example paths with the selected run's interpreter, sparse model, and original
+   matching database:
+   在含 `pycolmap`、`numpy` 的獨立環境執行 COLMAP 驗收（YAML manifest 另需 `PyYAML`）；
+   將以下範例替換成該次實驗的 Python、稀疏模型與對應的原始資料庫路徑：
+
+   ```bash
+   /path/to/evaluation-env/bin/python tools/verify_recon.py \
+     /path/to/workspace/sparse/0 --db /path/to/workspace/database.db
+   ```
+
+   Add `--manifest /path/to/case.yaml` for case-specific calibration/EO checks.
+   For an undistorted model, add `--undistorted`; this skips the epipolar check
+   because database keypoints use the original coordinates. Without a DB/manifest,
+   the checks requiring them are skipped. Exit `0` means the executed checks passed,
+   `1` means acceptance failures; execution errors must be investigated separately.
+   See [checker scope and limitations](tools/verify_recon.README.md).
+   個案率定／EO 驗收加上 `--manifest /path/to/case.yaml`；去畸變模型需加
+   `--undistorted`，因原始資料庫座標不同而略過對極檢查。未提供資料庫／manifest 時，
+   依賴它們的檢查會略過。結束碼 `0` 表示已執行項目通過，`1` 表示驗收失敗；
+   執行錯誤需另行排查，詳見[驗收範圍與限制](tools/verify_recon.README.md)。
+
+   Compare metric excerpts and thresholds against the baseline; report skipped
+   checks. This is geometric acceptance, not a universal 3DGS rendering benchmark;
+   use the selected trainer's evaluation workflow for rendering metrics.
+   將指標片段與門檻和基準比較，列出略過項目。此工具驗證幾何品質，不是通用 3DGS
+   渲染評測；渲染指標應使用所選訓練後端的評估流程。
+
+For code changes, follow [AGENT.md](AGENT.md); after installing `pip install -e '.[dev]'`
+in the development environment, CI-equivalent checks are `ruff check .`,
+`mypy pipeline/config.py`, and `pytest`. These are software checks, not experiment metrics.
+程式修改依 [AGENT.md](AGENT.md)，在開發環境安裝上述開發依賴後執行相同檢查；
+這些是軟體驗證，不是實驗品質指標。
+
 **讀這份文件的方式**:
 
 | 你是誰 | 看哪裡 |
