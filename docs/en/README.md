@@ -6,6 +6,7 @@ Turn photos or video into a COLMAP reconstruction, a 3D Gaussian Splatting model
 and, with a supported backend, a mesh. The local web panel provides forms,
 progress logs, cancellation, model viewers, masking, and GCS transfer.
 
+- [After-startup walkthrough](usage.md): buttons, inputs, job progress, and viewing results.
 - [Development, deployment, and daily-use workflows](workflows.md).
 - [Agent routing protocol](agent-guide.md): runtime, baselines, experiment records, development rules.
 - [Component context router](context-router.md): exact source paths and artifacts.
@@ -26,6 +27,12 @@ Setup installs the lightweight panel environment and preserves existing
 resolve that stage's doctor warnings before running. Open the URL printed by
 `run.sh`; the port is configurable. See the
 [detailed installation instructions (Traditional Chinese)](../zh-TW/user-guide.md#一安裝第一次部署).
+
+## After the panel starts
+
+Open the printed URL, check “環境檢查”, then choose “我有影片”, “我有照片”, or an
+existing model. For a first run, follow the [after-startup walkthrough](usage.md)
+through submitting a job, checking progress, and opening/downloading its result.
 
 ## Run an experiment
 
