@@ -165,7 +165,7 @@
     const all = document.getElementById("select-all-jobs");
     if (all) { all.checked = rows.length > 0 && count === rows.length; all.indeterminate = count > 0 && count < rows.length; }
     const button = document.getElementById("delete-jobs");
-    if (button) { button.disabled = !count || deleting; button.textContent = deleting ? "正在刪除…" : count ? "刪除選取（" + count + "）" : "刪除選取"; }
+    if (button) { button.hidden = !count && !deleting; button.disabled = !count || deleting; button.textContent = deleting ? "正在刪除…" : count ? "刪除選取（" + count + "）" : "刪除選取"; }
   };
 
   // Select-all checkbox in the table header
@@ -212,6 +212,8 @@
   // Preserve table state across swaps: checked rows, scroll position, and
   // the search box's focus + caret (SSE refresh shouldn't kill mid-typing).
   let savedSel = new Set();
+  let savedDetails = new Set();
+  let savedFilterFocus = null;
   let savedScroll = 0;
   let savedHorizontal = 0;
   let savedSearchFocus = null;   // {value, selStart, selEnd} or null
@@ -219,6 +221,12 @@
     const t = e.detail && e.detail.target;
     if (!t || t.id !== "joblist") return;
     if (composingSearch) { e.detail.shouldSwap = false; listDirty = true; return; }
+    savedDetails = new Set(Array.from(t.querySelectorAll('details[open]')).map((el) => el.id || el.dataset.jobDetails));
+    const active = document.activeElement;
+    savedFilterFocus = active?.id === 'job-status-select' ? {id: active.id} : active?.matches('summary') && t.contains(active) ?
+      {details: active.parentElement.id || active.parentElement.dataset.jobDetails} :
+      active?.matches('button[data-axis]') && t.contains(active) ?
+      {axis: active.dataset.axis, value: active.dataset.val} : null;
     savedSel = new Set(Array.from(document.querySelectorAll(".jobsel:checked")).map((x) => x.value));
     const sc = t.closest("#workspace-content"); savedScroll = sc ? sc.scrollTop : 0;
     const table = t.querySelector(".job-table-scroll");
@@ -233,6 +241,14 @@
   document.body.addEventListener("htmx:afterSwap", function (e) {
     const t = e.detail && e.detail.target;
     if (!t || t.id !== "joblist") return;
+    t.querySelectorAll('details').forEach((el) => { el.open = savedDetails.has(el.id || el.dataset.jobDetails); });
+    if (savedFilterFocus) {
+      const focusTarget = savedFilterFocus.id ? document.getElementById(savedFilterFocus.id) : savedFilterFocus.details ? Array.from(t.querySelectorAll('details')).find(
+        (el) => (el.id || el.dataset.jobDetails) === savedFilterFocus.details)?.querySelector('summary') :
+        Array.from(t.querySelectorAll('button[data-axis]')).find(
+          (el) => el.dataset.axis === savedFilterFocus.axis && el.dataset.val === savedFilterFocus.value);
+      if (focusTarget) focusTarget.focus({preventScroll:true});
+    }
     document.querySelectorAll(".jobsel").forEach((x) => { if (savedSel.has(x.value)) x.checked = true; });
     const table = t.querySelector(".job-table-scroll");
     if (table) table.scrollLeft = savedHorizontal;
