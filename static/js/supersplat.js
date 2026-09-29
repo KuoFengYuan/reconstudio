@@ -5,10 +5,12 @@
   let generation = 0;
   let metadata = null;
   let ready = false;
+  let failed = false;
   let currentJob = null;
   let currentFilename = null;
   let usingLegacy = false;
-  let fallbackAvailable = true;
+  let primaryVersion = '';
+  let legacyVersion = '';
   let startupTimer = null;
 
   function clearStartupTimer() {
@@ -16,13 +18,20 @@
     startupTimer = null;
   }
 
-  function retryWithLegacy(message) {
-    if (usingLegacy || !fallbackAvailable || !currentJob || !currentFilename) return false;
+  function showFailure(message, code) {
     clearStartupTimer();
-    const job = currentJob, filename = currentFilename;
-    window.mountSuperSplat(job, filename, true);
-    status('新版編輯器無法啟動（'+message+'），正在切換至相容模式…');
-    return true;
+    ready=false;failed=true;
+    document.getElementById('ss-send').disabled=true;
+    document.getElementById('ss-quality').disabled=true;
+    const guidance = code === 'insecure-context' ? ' 請使用 HTTPS 網址。' :
+      ['webgpu-unavailable','adapter-unavailable','device-failed'].includes(code) ?
+        ' 請在 Chrome 的 chrome://settings/system 開啟圖形加速並重新啟動，於 chrome://gpu 確認 WebGPU 可用。' : '';
+    status('SuperSplat '+(usingLegacy?legacyVersion:primaryVersion)+' 載入失敗：'+message+guidance);
+    const box=document.getElementById('ss-load-status');
+    box.append(button('重試目前版本',()=>window.mountSuperSplat(currentJob,currentFilename,usingLegacy)));
+    if(!usingLegacy && primaryVersion.startsWith('v3.') && legacyVersion) {
+      box.append(button('使用相容版 '+legacyVersion,()=>window.mountSuperSplat(currentJob,currentFilename,true)));
+    }
   }
 
   function stop() {
@@ -32,10 +41,10 @@
     request = null;
     const frame = document.getElementById('ss-frame');
     if (frame) frame.remove(); // unload also terminates its decoding Worker
-    ready = false;
+    ready = failed = false;
     currentJob = currentFilename = null;
     usingLegacy = false;
-    fallbackAvailable = true;
+    primaryVersion = legacyVersion = '';
   }
   function button(text, callback, className = 'ghost') {
     const element = document.createElement('button');
@@ -52,6 +61,13 @@
       stop(); window.loadJob(jobId);
     });
     bar.append(cancel);
+    const version=document.createElement('span');version.id='ss-version';
+    version.textContent='SuperSplat '+((usingLegacy?legacyVersion:primaryVersion)||'版本讀取中')+(usingLegacy?'（相容版）':'');
+    bar.append(version);
+    if(usingLegacy) {
+      const retry=button('開啟 '+primaryVersion,()=>window.mountSuperSplat(jobId,currentFilename,false));
+      retry.title='關閉目前模型並重新載入新版';bar.append(retry);
+    }
     const label = document.createElement('label'); label.textContent = '編輯畫質';
     const select = document.createElement('select'); select.id = 'ss-quality';
     for (const [value, text] of [['performance','流暢（大場景）'],['balanced','均衡'],['native','原始解析度']]) {
@@ -77,7 +93,7 @@
     if (!box) return;
     box.replaceChildren();
     const text = document.createElement('span');text.textContent=message;box.append(text);
-    if (!ready) {
+    if (!ready && !failed) {
       const meter = document.createElement('progress');meter.max=100;
       meter.setAttribute('aria-label','模型載入進度');
       if (Number.isFinite(progress)) meter.value=progress;
@@ -96,16 +112,24 @@
       const info=await response.json();
       if(token!==generation)return;
       metadata=info;
-      let primaryVersion='';
+      const readVersion=async path=>{
+        try {
+          const response=await fetch(path,{signal:request.signal,cache:'no-store'});
+          return response.ok ? (await response.text()).trim() : '';
+        } catch(error) {
+          if(error.name==='AbortError')throw error;
+          return '';
+        }
+      };
       try {
-        const versionResponse=await fetch('/static/supersplat/.version',{signal:request.signal,cache:'no-store'});
-        if(versionResponse.ok)primaryVersion=(await versionResponse.text()).trim();
+        [primaryVersion,legacyVersion]=await Promise.all([
+          readVersion('/static/supersplat/.version'),readVersion('/static/supersplat-legacy/.version')
+        ]);
       } catch(error) {
         if(error.name==='AbortError')return;
       }
       if(token!==generation)return;
-      fallbackAvailable=primaryVersion.startsWith('v3.');
-      window.mountSuperSplat(jobId,info.filename,!navigator.gpu && primaryVersion.startsWith('v3.'));
+      window.mountSuperSplat(jobId,info.filename);
     } catch(error) {
       if(token!==generation || error.name==='AbortError')return;
       ready=true;status(error.message);ready=false;
@@ -113,7 +137,7 @@
   };
   window.mountSuperSplat = function(jobId,filename,legacy = false) {
     clearStartupTimer();
-    ready=false;
+    ready=failed=false;
     currentJob=jobId;currentFilename=filename;usingLegacy=legacy;
     const main=shell(jobId);
     const source=new URL('/api/jobs/'+encodeURIComponent(jobId)+'/splat/'+encodeURIComponent(filename),location.origin);
@@ -131,16 +155,14 @@
     main.append(hint);
     const frame=document.createElement('iframe');frame.id='ss-frame';frame.title='SuperSplat 點雲編輯器';frame.src=url.href;
     frame.addEventListener('error', () => {
-      if (!retryWithLegacy('頁面載入失敗')) status('載入失敗：編輯器頁面無法載入');
+      if(frame.isConnected)showFailure('編輯器頁面無法載入');
     });
     main.append(frame);
     // A script or device failure may occur before the editor can post an error.
     // Only wait for the first progress message, never for a large model download.
     startupTimer=setTimeout(() => {
       startupTimer=null;
-      if (frame.isConnected && !retryWithLegacy('啟動逾時')) {
-        ready=true;status('載入失敗：相容模式啟動逾時，請重新整理後再試');ready=false;
-      }
+      if(frame.isConnected)showFailure('啟動逾時；可繼續等待或重試目前版本');
     },20000);
     if (window.revealWorkspaceContent) window.revealWorkspaceContent();
   };
@@ -150,6 +172,7 @@
     const data=event.data;
     if(!data || data.type!=='reconstudio:splat-load')return;
     clearStartupTimer();
+    failed=false;
     if(data.phase==='loading') {
       const percent=data.total && Number.isFinite(data.loaded) ? Math.min(99,100*data.loaded/data.total):undefined;
       status(percent===undefined?'讀取與解析模型…':'讀取與解析模型 · '+percent.toFixed(0)+'%',percent);
@@ -161,9 +184,7 @@
       ready=true;frame.dataset.ready='true';document.getElementById('ss-send').disabled=false;document.getElementById('ss-quality').disabled=false;
       status('已載入 '+Number(data.count).toLocaleString()+' splats · 可以開始編輯');
     } else if(data.phase==='error') {
-      if (!retryWithLegacy(String(data.message))) {
-        ready=true;status('載入失敗：'+String(data.message));ready=false;
-      }
+      showFailure(String(data.message),data.code);
     }
   });
   // Leaving the editor must invalidate a still-pending metadata request, too.
