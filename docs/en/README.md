@@ -6,7 +6,8 @@ Turn photos or video into a COLMAP reconstruction, a 3D Gaussian Splatting model
 and, with a supported backend, a mesh. The local web panel provides forms,
 progress logs, cancellation, model viewers, masking, and GCS transfer.
 
-- [After-startup walkthrough](usage.md): buttons, inputs, job progress, and viewing results.
+- [Detailed first-use guide](usage.md): field-by-field examples, expected results, viewer controls, browser acceptance, and troubleshooting.
+- [Optional-tool tutorials](tools.md): GCS, masking, fusion, depth/normals, partitioning, and measurement.
 - [Development, deployment, and daily-use workflows](workflows.md).
 - [Agent routing protocol](agent-guide.md): runtime, baselines, experiment records, development rules.
 - [Component context router](context-router.md): exact source paths and artifacts.
