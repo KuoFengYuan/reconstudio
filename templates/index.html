@@ -411,7 +411,7 @@
 <body>
 <a class="skip-link" href="#workspace-output">跳至工作區</a>
 <header>
-  <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示設定面板" aria-controls="workspace-settings" aria-expanded="true" aria-label="隱藏設定面板">◀</button>
+  <button class="ghost" id="toggle-left" onclick="toggleLeftPanel()" title="隱藏 / 顯示設定面板" aria-controls="workspace-settings" aria-expanded="false" aria-label="建立任務">＋ 建立任務</button>
   <div class="brand">
     <svg class="brand-mark" viewBox="0 0 36 40" fill="none" aria-hidden="true"><path d="m18 2 16 9v18l-16 9-16-9V11Z" stroke="currentColor" stroke-width="1.7"/><path d="m2 11 16 9 16-9M18 20v18M10 7l16 9v18" stroke="currentColor" stroke-width="1.4"/></svg>
     <div><h1>Recon Studio</h1><div class="brand-caption">3D RECONSTRUCTION WORKSPACE</div></div>
@@ -420,10 +420,12 @@
 </header>
 <nav class="mobile-jumps" aria-label="工作區快捷導覽"><a href="#workspace-settings" onclick="if(document.querySelector('.wrap').classList.contains('nleft')) toggleLeftPanel()">設定素材 ↑</a><a href="#workspace-output">查看工作與紀錄 ↓</a></nav>
 
-<div class="wrap">
+<div class="wrap nleft">
   <!-- ============================= left: forms ============================= -->
   <div class="col left" id="workspace-settings" role="region" aria-label="功能與任務設定">
     <div class="sidebar-heading"><h2>建立任務</h2><span>選擇功能，設定素材</span></div>
+    <details class="workflow-picker" id="workflow-picker">
+      <summary>切換功能 <strong id="workflow-current">雲端資料</strong></summary>
     <nav class="tabs steps" aria-label="重建功能">
       <div class="tabrow features">
         <span class="lbl">功能</span>
@@ -454,6 +456,7 @@
         </div>
       </div>
     </nav>
+    </details>
     <div class="form-intro"><h2 id="form-title">雲端資料</h2><p id="form-description">下載或上傳素材，準備重建需要的檔案。</p></div>
 
     <!-- ----- frames form ----- -->
@@ -1998,26 +2001,33 @@
 
 <div class="ui-notice" id="ui-notice" role="alert" hidden></div>
 <script>
-  // Collapsible left config panel (default open). State persists in localStorage
-  // so a reload keeps the user's choice; the ◀/☰ header button toggles it.
-  function applyLeftPanel(){
-    var collapsed = false;
-    try { collapsed = localStorage.getItem('rs_left_collapsed') === '1'; } catch (_) {}
-    var wrap = document.querySelector('.wrap');
-    if (wrap) wrap.classList.toggle('nleft', collapsed);
+  // Keep creation out of the reading area until requested; preserve an explicit choice.
+  function setLeftPanel(collapsed, persist){
+    document.querySelector('.wrap').classList.toggle('nleft', collapsed);
     var btn = document.getElementById('toggle-left');
-    if (btn) { btn.textContent = collapsed ? '☰' : '◀'; btn.title = (collapsed ? '顯示' : '隱藏') + '設定面板'; btn.setAttribute('aria-label', btn.title); btn.setAttribute('aria-expanded', String(!collapsed)); }
-  }
-  function toggleLeftPanel(){
-    var collapsed = document.querySelector('.wrap').classList.toggle('nleft');
-    try { localStorage.setItem('rs_left_collapsed', collapsed ? '1' : '0'); } catch (_) {}
-    var btn = document.getElementById('toggle-left');
-    btn.textContent = collapsed ? '☰' : '◀';
-    btn.title = (collapsed ? '顯示' : '隱藏') + '設定面板';
+    btn.textContent = collapsed ? '＋ 建立任務' : '收合設定';
+    btn.title = collapsed ? '建立任務' : '收合設定';
     btn.setAttribute('aria-label', btn.title);
     btn.setAttribute('aria-expanded', String(!collapsed));
+    if (persist) {
+      try { localStorage.setItem('rs_left_collapsed', collapsed ? '1' : '0'); } catch (_) {}
+    }
   }
-  applyLeftPanel();   // run on load (script is at end of body → DOM is ready)
+  function applyLeftPanel(){
+    var collapsed = true;
+    try { collapsed = localStorage.getItem('rs_left_collapsed') !== '0'; } catch (_) {}
+    setLeftPanel(collapsed, false);
+  }
+  function toggleLeftPanel(){
+    var collapsed = !document.querySelector('.wrap').classList.contains('nleft');
+    setLeftPanel(collapsed, true);
+    if (!collapsed) {
+      document.querySelector('#workflow-picker > summary').focus();
+    } else {
+      document.getElementById('toggle-left').focus({preventScroll:true});
+    }
+  }
+  applyLeftPanel();
 
   function showForm(which){
     ['frames','colmap','fusion','blocksplit','depth','matte','train','mesh','gcs','gallery','viewer','measure','supersplat'].forEach(function(k){

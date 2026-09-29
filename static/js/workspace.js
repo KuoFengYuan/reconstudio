@@ -20,14 +20,20 @@
     const text = descriptions[which];
     if (!text) return;
     document.getElementById('form-title').textContent = text[0];
+    document.getElementById('workflow-current').textContent = text[0];
     document.getElementById('form-description').textContent = text[1];
   }
   document.addEventListener('rs:formchange', (e) => {
+    const picker = document.getElementById('workflow-picker');
+    const focusWasInside = picker.contains(document.activeElement);
+    picker.open = false;
     describe(e.detail.which);
+    if (focusWasInside) picker.querySelector('summary').focus();
     if (document.querySelector('.wrap').classList.contains('nleft')) window.toggleLeftPanel();
   });
   const current = document.querySelector('.tabs.steps button.active');
   describe(current ? current.id.slice(2) : 'gcs');
+  if (current && current.id !== 't-gcs') window.setLeftPanel(false, false);
 
   window.startWorkflow = function (which) {
     if (document.querySelector('.wrap').classList.contains('nleft')) window.toggleLeftPanel();
