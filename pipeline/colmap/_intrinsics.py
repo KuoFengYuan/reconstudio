@@ -286,6 +286,31 @@ _MODEL_IDS = {
 }
 
 
+_PIXEL_PARAMS = {"f", "fx", "fy", "cx", "cy"}
+
+
+def params_for_width(cal: Calibration, model: str, width: int | None, *,
+                     use_pp: bool = True, flip_pp_y: bool = True) -> list[float]:
+    """`cal.colmap_params` for images `width` px wide.
+
+    A certificate is in sensor pixels, but the images COLMAP sees are usually
+    resized first (影像解析度 defaults to 1920). Focal length and principal point
+    are in pixels and follow the resize; distortion is zeroed and does not.
+    """
+    scale = (width / cal.width) if (width and cal.width) else 1.0
+    names = _MODEL_PARAMS[model.upper()]
+    params = cal.colmap_params(model, use_pp=use_pp, flip_pp_y=flip_pp_y)
+    return [v * scale if n in _PIXEL_PARAMS else v for n, v in zip(names, params, strict=True)]
+
+
+def camera_widths(db_path: Path) -> dict[str, int]:
+    """Image folder -> width of its camera in the database (see camera_folders)."""
+    folders = camera_folders(db_path)
+    with sqlite3.connect(str(db_path)) as con:
+        rows = dict(con.execute("SELECT camera_id, width FROM cameras").fetchall())
+    return {folder: int(rows[cid]) for cid, folder in folders.items() if cid in rows}
+
+
 def camera_folders(db_path: Path) -> dict[int, str]:
     """camera_id -> the folder its images live in, read from the images table.
 
@@ -305,6 +330,19 @@ def camera_folders(db_path: Path) -> dict[int, str]:
     return out
 
 
+# COLMAP >= 4.3 (#4801, src/colmap/scene/camera.h CameraSource) keeps one
+# `cameras` row per (camera_id, source). USER outranks every estimate and is
+# what the mapper reads; GUESS/EXIF are the feature extractor's own rows.
+_SOURCE_USER = 1
+_SOURCE_GUESS, _SOURCE_EXIF = 2, 3
+# The extractor's estimate first, then any other estimate, our own USER row last:
+# "how far off was EXIF" must not compare the certificate against itself on a
+# resumed run (which logged "+0.0% off" every time).
+_EXTRACTOR_ROW_FIRST = (
+    f"ORDER BY CASE WHEN source IN ({_SOURCE_GUESS}, {_SOURCE_EXIF}) THEN 0 "
+    f"WHEN source = {_SOURCE_USER} THEN 2 ELSE 1 END, source DESC LIMIT 1")
+
+
 def apply_to_database(db_path: Path, model: str,
                       by_camera: dict[str, Calibration], *,
                       use_pp: bool = True, flip_pp_y: bool = True,
@@ -316,7 +354,8 @@ def apply_to_database(db_path: Path, model: str,
     valuable for a plain multi-folder dataset — arguably more so, since there is
     no rig constraint to compensate for a diverging self-calibration.
 
-    prior_focal_length is set so COLMAP treats the value as a prior rather than a
+    The camera is marked as user-provided (prior_focal_length, or source=USER on
+    COLMAP ≥ 4.3) so COLMAP treats the value as a prior rather than a
     guess, and the sensor size is left alone: it is a property of the images that
     are actually in the database, not of the certificate.
     """
@@ -327,12 +366,18 @@ def apply_to_database(db_path: Path, model: str,
     folders = camera_folders(db_path)
     changed: list[tuple[str, float, float]] = []
     with sqlite3.connect(str(db_path)) as con:
+        # COLMAP ≥ 4.3 (#4801) replaced prior_focal_length with a per-row
+        # `source`. Write a USER row next to the extractor's own, the way
+        # COLMAP's UpdateCamera does (INSERT OR REPLACE on the composite key).
+        has_source = any(r[1] == "source"
+                         for r in con.execute("PRAGMA table_info(cameras)"))
+        order = _EXTRACTOR_ROW_FIRST if has_source else ""
         for cid, folder in sorted(folders.items()):
             cal = by_camera.get(folder)
             if cal is None:
                 continue
             row = con.execute(
-                "SELECT width, height, params FROM cameras WHERE camera_id=?",
+                f"SELECT width, height, params FROM cameras WHERE camera_id=? {order}",
                 (cid,)).fetchone()
             if row is None:
                 continue
@@ -341,15 +386,18 @@ def apply_to_database(db_path: Path, model: str,
             # Scale to the images actually in the database: they may have been
             # resized since calibration, and a focal in pixels is resolution
             # dependent while C in millimetres is not.
-            scale = (width / cal.width) if cal.width else 1.0
-            params = [v * scale if i < 4 else v
-                      for i, v in enumerate(cal.colmap_params(
-                          model, use_pp=use_pp, flip_pp_y=flip_pp_y))]
-            con.execute(
-                "UPDATE cameras SET model=?, params=?, prior_focal_length=1 "
-                "WHERE camera_id=?",
-                (_MODEL_IDS[model],
-                 struct.pack(f"<{len(params)}d", *params), cid))
+            params = params_for_width(cal, model, width, use_pp=use_pp, flip_pp_y=flip_pp_y)
+            packed = struct.pack(f"<{len(params)}d", *params)
+            if has_source:
+                con.execute(
+                    "INSERT OR REPLACE INTO cameras(camera_id, model, width, "
+                    "height, params, source) VALUES(?, ?, ?, ?, ?, ?)",
+                    (cid, _MODEL_IDS[model], width, height, packed, _SOURCE_USER))
+            else:
+                con.execute(
+                    "UPDATE cameras SET model=?, params=?, prior_focal_length=1 "
+                    "WHERE camera_id=?",
+                    (_MODEL_IDS[model], packed, cid))
             changed.append((folder, old_f, params[0]))
         con.commit()
     return changed

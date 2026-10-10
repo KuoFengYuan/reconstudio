@@ -958,7 +958,14 @@
               </label>
               <div class="pctl"><input id="cm_gm_min_size" name="GM_MIN_MODEL_SIZE" value="{{ colmap_defaults.GM_MIN_MODEL_SIZE }}" placeholder="3"></div>
             </div>
-            <div class="fhint" id="h_cm_gm_min_size">註冊張數少於這個值的模型直接丟棄,用來濾掉零星的小碎塊。留空 = COLMAP 預設(3)。需要 COLMAP 4.3 以上。</div>
+            <div class="fhint" id="h_cm_gm_min_size">註冊影格數少於這個值的模型直接丟棄,用來濾掉零星的小碎塊(多相機 rig 時一個影格含每台相機各一張)。留空 = COLMAP 預設(3)。需要 COLMAP 4.3 以上。</div>
+            <div class="prow">
+              <label class="plabel" for="cm_gm_track_max"><span class="ptext">GM_TRACK_MAX_VIEWS</span>
+                <span class="info" onclick="togHint(event,'h_cm_gm_track_max')" title="說明">?</span>
+              </label>
+              <div class="pctl"><input id="cm_gm_track_max" name="GM_TRACK_MAX_VIEWS" value="{{ colmap_defaults.GM_TRACK_MAX_VIEWS }}" placeholder="100"></div>
+            </div>
+            <div class="fhint" id="h_cm_gm_track_max">觀測數超過這個值的 track 直接丟棄,不進 BA。留空 = COLMAP 預設(100,需 COLMAP 4.3 以上;更舊版本沒有這個參數,留空才能相容)。實測對一般空拍資料集品質幾乎無影響、還快約 2 成;只有極端高重疊(例如同一物件密集環繞的影片幀)才需要調大。</div>
           </div>
           <!-- 參數:僅 hierarchical 用得到（留空=COLMAP 預設） -->
           <div class="pgrp" data-p="hierarchical">

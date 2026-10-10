@@ -28,10 +28,13 @@ from ..runner import PipelineError, Runner
 from ._eo import inject_eo_priors, map_names_to_eo, parse_eo_csv, resolve_crs
 from ._gps import gps_coverage, image_gps_latlonalt, inject_pose_priors
 from ._intrinsics import (
+    Calibration,
     apply_to_database,
     camera_folders,
+    camera_widths,
     discover_calibrations,
     match_to_cameras,
+    params_for_width,
 )
 from ._layout import IMAGE_EXTS, list_image_names, list_images, resolve_layout
 from ._resize import resize_to_fullhd, resize_workers
@@ -115,6 +118,15 @@ COLMAP_DEFAULTS = {
     # blank-means-COLMAP-default min size. The largest reconstructed model is promoted
     # to sparse/0 for downstream stages; extra components remain available.
     "gm_single_model": False, "gm_min_model_size": "",
+    # global_mapper long-track cap (COLMAP #4754, restored 2026-09-20): tracks seen by
+    # more than this many images are dropped before BA. COLMAP's own default is now 100
+    # (the option didn't exist before this commit, i.e. previously unlimited). Measured on
+    # a 740-image aerial block (FY115 20260813_region): final point count / mean track
+    # length / reprojection error are unchanged within noise, but the run is ~20% faster
+    # with the cap than without (fewer huge Schur-complement blocks in BA). "" = COLMAP's
+    # own default (100) and, since the flag is then omitted entirely, also keeps this stage
+    # working against pre-#4754 COLMAP builds, which reject the unknown option outright.
+    "gm_track_max_views": "",
     # GPU bundle adjustment for the incremental / pose_prior mappers (big speedup; on by default).
     "ba_gpu": True,
     # BA solver backend: "ceres" (default; the ba_gpu flag above then chooses CPU vs
@@ -254,6 +266,7 @@ class _Ctx:
     ra_use_gravity: bool
     gm_single: bool
     gm_min_size: str
+    gm_track_max: str
     db: Path
     lst: Path
     dense_dir: Path
@@ -273,6 +286,11 @@ class _Ctx:
     # camera id -> (model, params) taken from a vendor calibration, when the
     # dataset shipped one. Empty means nothing was calibrated.
     rig_intrinsics: dict[str, tuple[str, list[float]]] = field(default_factory=dict)
+    # The certificate found while staging the rig, kept so later stages need not
+    # search again: after staging, img_root/orig_root point at rig_images/, which
+    # holds symlinked photos but never the certificate.
+    rig_calibrations: dict[str, Calibration] = field(default_factory=dict)
+    rig_calibration_src: str = ""
     # True once a vendor calibration has been written into the database.
     intrinsics_applied: bool = False
 
@@ -442,6 +460,7 @@ def _setup(p: dict, r: Runner) -> _Ctx:
         ra_use_gravity=bool(d["ra_use_gravity"]),
         gm_single=bool(d["gm_single_model"]),
         gm_min_size=str(d["gm_min_model_size"]).strip(),
+        gm_track_max=str(d["gm_track_max_views"]).strip(),
         db=db, lst=lst, dense_dir=dense_dir,
     )
 
@@ -768,7 +787,9 @@ def _stage_extract(c: _Ctx) -> None:
                         "(背景不抽特徵;遮罩全黑的區域整張被忽略)")
             c.r.run([COLMAP_BIN, "feature_extractor", "--database_path", str(c.db),
                      "--image_path", c.img_root, "--image_list_path", str(c.lst), *cam,
-                     "--ImageReader.camera_model", str(c.d["camera_model"]),
+                     # COLMAP's model lookup is case-sensitive: "opencv" dies
+                     # with Check failed: ExistsCameraModelWithName.
+                     "--ImageReader.camera_model", str(c.d["camera_model"]).upper(),
                      "--SiftExtraction.max_num_features", str(c.d["max_features"]),
                      *sift_size, *masks])
             (c.ws / ".extract.json").write_text(
@@ -921,7 +942,10 @@ def _stage_rig_stage(c: _Ctx) -> None:
         model = str(c.d["camera_model"]).upper()
         hit, missed = match_to_cameras(cals, grouping.cameras)
         c.r.log(f"intrinsics: {len(cals)} calibrated head(s) found in {Path(src).name}")
+        c.rig_calibrations, c.rig_calibration_src = dict(hit), str(src)
         for cam, cal in sorted(hit.items()):
+            # certificate resolution for now; _rescale_rig_config() rewrites these
+            # for the extracted images before rig_configurator reads the file
             params = cal.colmap_params(model)
             intrinsics[cam] = (model, params)
             cx, cy = cal.principal_point_px()
@@ -970,11 +994,18 @@ def _stage_apply_intrinsics(c: _Ctx) -> None:
     """
     if not c.stage_on("extract") or not c.db.exists():
         return
-    cals, src = discover_calibrations(Path(c.orig_root or c.img_root))
-    if not cals:
-        return
+    if c.rig_calibrations:
+        cals, src = list(c.rig_calibrations.values()), c.rig_calibration_src
+    else:
+        cals, src = discover_calibrations(Path(c.orig_root or c.img_root))
+        if not cals:
+            return
     folders = sorted(set(camera_folders(c.db).values()))
-    hit, missed = match_to_cameras(cals, folders)
+    if c.rig_calibrations:
+        hit = {cam: cal for cam, cal in c.rig_calibrations.items() if cam in folders}
+        missed = [f for f in folders if f not in hit]
+    else:
+        hit, missed = match_to_cameras(cals, folders)
     if not hit:
         c.r.log(f"intrinsics: {Path(src).name} has {len(cals)} head(s) but none match "
                 f"the image folders {folders} — leaving COLMAP's EXIF estimate alone")
@@ -1014,10 +1045,48 @@ def _stage_rig_configure(c: _Ctx) -> None:
         c.r.log(f"rig: deferring rig_configurator — MAPPER={c.mapper} needs known "
                 "extrinsics, so they are derived from an initial reconstruction first")
         return
+    _rescale_rig_config(c)
     c.r.banner(f"rig_configurator -> {c.db}")
     c.r.run([COLMAP_BIN, "rig_configurator",
              "--database_path", str(c.db),
              "--rig_config_path", str(c.rig_config)])
+
+
+def _rig_intrinsics_at_db_resolution(c: _Ctx) -> dict[str, tuple[str, list[float]]]:
+    """Certificate intrinsics rescaled to the images that were actually extracted.
+
+    rig_configurator copies camera_params into the database verbatim. Written at
+    certificate resolution while extraction saw 1920-px images, every head got a
+    focal ~6x too long and a principal point outside the frame, and global_mapper
+    failed with "no 3D points to optimize" (the same rig with 影像解析度=保持原樣
+    registered 72/72 at 1.21 px).
+    """
+    if not c.rig_calibrations or not c.db.exists():
+        return dict(c.rig_intrinsics)
+    widths = camera_widths(c.db)
+    model = str(c.d["camera_model"]).upper()
+    return {cam: (model, params_for_width(cal, model, widths.get(cam)))
+            for cam, cal in c.rig_calibrations.items()}
+
+
+def _rescale_rig_config(c: _Ctx) -> None:
+    """Rewrite rig_config.json's camera_params for the extracted image size."""
+    scaled = _rig_intrinsics_at_db_resolution(c)
+    if not c.rig_calibrations or scaled == c.rig_intrinsics or c.rig_config is None:
+        return
+    cfg = json.loads(c.rig_config.read_text(encoding="utf-8"))
+    for rig in cfg:
+        for entry in rig.get("cameras", []):
+            cam = str(entry.get("image_prefix", "")).rstrip("/")
+            if cam in scaled:
+                entry["camera_model_name"], entry["camera_params"] = scaled[cam][0], scaled[cam][1]
+    c.rig_config.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    c.rig_intrinsics = scaled
+    widths = camera_widths(c.db)
+    for cam, cal in sorted(c.rig_calibrations.items()):
+        if widths.get(cam) and cal.width and widths[cam] != cal.width:
+            c.r.log(f"intrinsics: {cam} certificate {cal.width} px -> extracted "
+                    f"{widths[cam]} px (x{widths[cam] / cal.width:.4f}), f={scaled[cam][1][0]:.1f}")
 
 
 def _stage_gps_inject(c: _Ctx) -> None:
@@ -1196,6 +1265,7 @@ def _stage_rig_calibrate(c: _Ctx) -> None:
             "rig is even involved — check the matches, or set MAPPER=global to let it "
             "calibrate the rig itself in one pass.")
 
+    _rescale_rig_config(c)
     c.r.banner(f"rig calibration pass 2/2: rig_configurator --input_path {init / '0'} "
                f"-> {c.db}")
     c.r.run([COLMAP_BIN, "rig_configurator",
@@ -1235,6 +1305,8 @@ def _stage_mapper(c: _Ctx) -> None:
                     label += " [largest component only]"
                 if c.gm_min_size:
                     extra += ["--GlobalMapper.min_model_size", c.gm_min_size]
+                if c.gm_track_max:
+                    extra += ["--GlobalMapper.track_max_num_views_per_track", c.gm_track_max]
             elif c.mapper == "pose_prior":
                 # GPS priors folded into BA -> the output is already georeferenced
                 # and metric (model_aligner is then redundant). overwrite_priors_
@@ -1484,6 +1556,18 @@ def _stage_coverage_report(c: _Ctx) -> None:
                 "留在別的 component(見上面的 models 報告)。")
 
 
+# Models whose parameter vector starts "f, cx, cy"; the rest start "fx, fy, cx, cy".
+# Deciding by vector length read SIMPLE_RADIAL's (f, cx, cy, k1) as fx/fy/cx/cy.
+_SINGLE_FOCAL_MODELS = {"SIMPLE_PINHOLE", "SIMPLE_RADIAL", "RADIAL",
+                        "SIMPLE_RADIAL_FISHEYE", "RADIAL_FISHEYE"}
+
+
+def _f_cx_cy(model: str, params) -> tuple[float, float, float]:
+    p = list(params)
+    return ((p[0], p[1], p[2]) if str(model).upper() in _SINGLE_FOCAL_MODELS
+            else (p[0], p[2], p[3]))
+
+
 def _stage_intrinsics_report(c: _Ctx) -> None:
     """4a'. Compare what the bundle converged to against the certificate.
 
@@ -1496,6 +1580,7 @@ def _stage_intrinsics_report(c: _Ctx) -> None:
     """
     if not c.rig_intrinsics:
         return
+    c.rig_intrinsics = _rig_intrinsics_at_db_resolution(c)   # a resumed run skipped the rescale
     model_dir = c.ws / "sparse" / "0"
     if not (model_dir / "cameras.bin").exists():
         return
@@ -1520,12 +1605,8 @@ def _stage_intrinsics_report(c: _Ctx) -> None:
         seed = c.rig_intrinsics.get(cam or "")
         if not seed:
             continue
-        s = solved[cid].params
-        _, want = seed
-        # OPENCV order: fx fy cx cy ...; the shorter models put f first then cx cy
-        wf, wcx, wcy = ((want[0], want[2], want[3]) if len(want) >= 4
-                        else (want[0], want[1], want[2]))
-        gf, gcx, gcy = ((s[0], s[2], s[3]) if len(s) >= 4 else (s[0], s[1], s[2]))
+        wf, wcx, wcy = _f_cx_cy(*seed)
+        gf, gcx, gcy = _f_cx_cy(solved[cid].model, solved[cid].params)
         c.r.log(f"  {cam:<11} {wf:9.1f} -> {gf:9.1f} ({gf - wf:+7.1f})  "
                 f"{wcx:8.1f} -> {gcx:8.1f} ({gcx - wcx:+6.1f})  "
                 f"{wcy:8.1f} -> {gcy:8.1f} ({gcy - wcy:+6.1f})")

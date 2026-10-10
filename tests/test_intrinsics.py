@@ -8,9 +8,14 @@ size) are used — distortion is left to the bundle on purpose.
 from __future__ import annotations
 
 import json
+import sqlite3
+import struct
+
+import pytest
 
 from pipeline.colmap._intrinsics import (
     Calibration,
+    apply_to_database,
     calibrations_from_file,
     discover_calibrations,
     match_to_cameras,
@@ -155,3 +160,60 @@ def test_a_certificate_one_level_above_the_dataset_is_still_found(tmp_path):
     cals, src = discover_calibrations(tmp_path / "images")
     assert src is not None and src.name == "cert.txt"
     assert len(cals) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Writing a certificate into the database, on both schemas. The 4.3 table is
+# copied verbatim from `colmap database_creator` at 4ae1aafb (#4801): one row
+# per (camera_id, source); GUESS=2 / EXIF=3 come from the extractor, USER=1 is
+# ours. The legacy table has a single row with prior_focal_length.
+# --------------------------------------------------------------------------- #
+CAMERAS_43 = ("CREATE TABLE cameras (camera_id INTEGER NOT NULL, model INTEGER NOT NULL, "
+              "width INTEGER NOT NULL, height INTEGER NOT NULL, params BLOB, "
+              "source INTEGER NOT NULL, PRIMARY KEY(camera_id, source))")
+CAMERAS_LEGACY = ("CREATE TABLE cameras (camera_id INTEGER PRIMARY KEY, model INTEGER, "
+                  "width INTEGER, height INTEGER, params BLOB, prior_focal_length INTEGER)")
+NADIR = Calibration("nadir", 6000, 4000, 0.004, 24.0)       # f = 6000 px at full res
+
+
+def _blob(*values):
+    return struct.pack(f"<{len(values)}d", *values)
+
+
+def _f(blob):
+    return struct.unpack(f"<{len(blob) // 8}d", blob)[0]
+
+
+def _db(tmp_path, schema):
+    db = tmp_path / "database.db"
+    with sqlite3.connect(db) as con:
+        con.execute(schema)
+        con.execute("CREATE TABLE images (image_id INTEGER PRIMARY KEY, name TEXT, camera_id INTEGER)")
+        con.execute("INSERT INTO images VALUES (1, 'nadir/a.jpg', 1), (2, 'nadir/b.jpg', 1)")
+        extractor_row = (1, 4, 1920, 1280, _blob(2300.0, 2300.0, 960, 640, 0, 0, 0, 0))
+        if "source" in schema:
+            con.execute("INSERT INTO cameras VALUES (?, ?, ?, ?, ?, 3)", extractor_row)
+        else:
+            con.execute("INSERT INTO cameras VALUES (?, ?, ?, ?, ?, 0)", extractor_row)
+    return db
+
+
+def test_43_schema_gets_a_user_row_and_keeps_the_extractor_estimate(tmp_path):
+    db = _db(tmp_path, CAMERAS_43)
+    for _ in range(2):          # a resumed run must not compare the certificate with itself
+        [(folder, old_f, new_f)] = apply_to_database(db, "OPENCV", {"nadir": NADIR})
+        assert (folder, old_f) == ("nadir", 2300.0)
+        assert new_f == pytest.approx(6000 * 1920 / 6000)
+    with sqlite3.connect(db) as con:
+        rows = dict(con.execute("SELECT source, params FROM cameras WHERE camera_id=1"))
+    assert sorted(rows) == [1, 3]                     # one USER row, EXIF untouched
+    assert _f(rows[3]) == 2300.0 and _f(rows[1]) == pytest.approx(1920.0)
+
+
+def test_legacy_schema_is_updated_in_place_as_a_prior(tmp_path):
+    db = _db(tmp_path, CAMERAS_LEGACY)
+    [(_, old_f, _)] = apply_to_database(db, "OPENCV", {"nadir": NADIR})
+    assert old_f == 2300.0
+    with sqlite3.connect(db) as con:
+        [(prior, blob)] = con.execute("SELECT prior_focal_length, params FROM cameras").fetchall()
+    assert prior == 1 and _f(blob) == pytest.approx(1920.0)

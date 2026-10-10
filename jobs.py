@@ -86,14 +86,20 @@ RUN_FUNCS: dict[str, Callable[[dict, Runner], None]] = {
 _RUN_MARKERS = [
     (re.compile(r"stage nested layout"), "stage"),
     (re.compile(r"feature_extractor"), "extract"),
-    (re.compile(r"sequential_matcher|vocab_tree_matcher|spatial_matcher|matches_importer"), "match"),
+    # "rig_configurator -> <db>" only: the rig-calibration pass 2/2 banner also
+    # names rig_configurator but belongs to the mapper stage.
+    (re.compile(r"\] rig_configurator -> "), "rig"),
+    (re.compile(r"GPS pose priors: injected"), "gps_inject"),
+    (re.compile(r"sequential_matcher|vocab_tree_matcher|spatial_matcher|exhaustive_matcher|"
+                r"matches_importer"), "match"),
     (re.compile(r"view_graph_calibrator"), "calibrate"),
     (re.compile(r"colmap global_mapper|colmap mapper |colmap pose_prior_mapper|"
                 r"colmap hierarchical_mapper"), "mapper"),
     (re.compile(r"simplify_images"), "simplify"),
     (re.compile(r"model_aligner"), "align"),
     (re.compile(r"image_undistorter"), "undistort"),
-    (re.compile(r"auto_reorient"), "reorient"),
+    # GPS-metric models print "reorient (GPS-metric: …)" instead of auto_reorient
+    (re.compile(r"auto_reorient|\] reorient \("), "reorient"),
 ]
 _SKIP_RE = re.compile(r"^\s*skip (\w+)")
 _BANNER_RE = re.compile(r"^=== \[\d\d:\d\d:\d\d\]")

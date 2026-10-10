@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from web.shared import ENUMS
@@ -186,7 +187,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
     params = {
         "image_root": image_root, "workspace": workspace, "folders": folders,
         "stages": stages,
-        "camera_model": g("CAMERA_MODEL", "OPENCV"),
+        "camera_model": g("CAMERA_MODEL", "OPENCV").upper(),
         "camera_mode": g("CAMERA_MODE", "per_folder"),
         "max_features": g("MAX_FEATURES", "4096"),
         "matcher": g("MATCHER", "vocab"),
@@ -236,6 +237,7 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
         # largest. Blank min size = COLMAP's 3.
         "gm_single_model": bool(form.get("GM_SINGLE_MODEL")),
         "gm_min_model_size": (form.get("GM_MIN_MODEL_SIZE") or "").strip(),
+        "gm_track_max_views": (form.get("GM_TRACK_MAX_VIEWS") or "").strip(),
         "ba_gpu": bool(form.get("MAPPER_BA_GPU")),
         "ba_backend": g("BA_BACKEND", "ceres"),
         "colmap_gpu": (form.get("COLMAP_GPU") or "").strip(),
@@ -310,9 +312,17 @@ def build_colmap_params(image_root: str, workspace: str, folders: list[str],
     for key, label in (("max_image_size", "MAX_IMAGE_SIZE"),
                        ("hm_leaf_max_num_images", "HM_LEAF_MAX_NUM_IMAGES"),
                        ("hm_image_overlap", "HM_IMAGE_OVERLAP"),
-                       ("gm_min_model_size", "GM_MIN_MODEL_SIZE")):
+                       ("gm_min_model_size", "GM_MIN_MODEL_SIZE"),
+                       ("gm_track_max_views", "GM_TRACK_MAX_VIEWS")):
         if params[key] and not params[key].isdigit():
             raise ValueError(f"{label} must be a positive integer (or blank)")
+    # A typo here only surfaces as a CHECK abort inside feature_extractor.
+    if not re.fullmatch(r"[A-Z][A-Z_]*", params["camera_model"]):
+        raise ValueError(f"CAMERA_MODEL 格式不對:{params['camera_model']!r}(例:OPENCV、SIMPLE_RADIAL、PINHOLE)")
+    # A track needs >= 3 views to survive global_mapper's own filters, so a cap
+    # below that discards every track and the mapper dies with "no 3D points".
+    if params["gm_track_max_views"] and int(params["gm_track_max_views"]) < 3:
+        raise ValueError("GM_TRACK_MAX_VIEWS 至少要 3(更小會丟掉所有 track,global_mapper 會失敗);留空 = COLMAP 預設 100")
     # SIFT size also takes "auto" (follow the undistort cap) and -1 (COLMAP's own
     # default). Without this the "auto" the panel now pre-fills would be rejected
     # here before the pipeline ever saw it.

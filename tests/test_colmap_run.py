@@ -523,6 +523,25 @@ def test_gm_min_model_size_is_passed_when_set(patched, imgroot, vocab, tmp_path)
     assert argv[argv.index("--GlobalMapper.min_model_size") + 1] == "10"
 
 
+# --------------------------------------------------------------------------- #
+# global_mapper long-track cap (COLMAP #4754): blank omits the flag so a default
+# run still works against pre-#4754 builds, which reject the unknown option.
+# --------------------------------------------------------------------------- #
+def test_gm_track_max_views_is_omitted_by_default(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global"), r)
+    argv = r.argv_for("global_mapper")
+    assert "--GlobalMapper.track_max_num_views_per_track" not in argv
+
+
+def test_gm_track_max_views_is_passed_when_set(patched, imgroot, vocab, tmp_path):
+    r = FakeRunner()
+    _run.run_colmap(_params(imgroot, tmp_path / "ws", vocab, mapper="global",
+                            gm_track_max_views="250"), r)
+    argv = r.argv_for("global_mapper")
+    assert argv[argv.index("--GlobalMapper.track_max_num_views_per_track") + 1] == "250"
+
+
 def _fake_model(d: Path, n_images: int, n_points: int) -> None:
     """A model dir carrying only the .bin headers, which is all the report reads:
     COLMAP's binary format opens with a little-endian uint64 element count."""
@@ -1390,3 +1409,30 @@ def test_failed_mapper_keeps_existing_model_and_dataset(patched, imgroot, vocab,
         _run.run_colmap(_params(imgroot, ws, vocab, force=True), FailedMapper())
     assert _run._bin_count(ws / "sparse" / "0" / "images.bin") == 269
     assert _run._bin_count(dense / "sparse" / "images.bin") == 269
+
+
+def test_rig_certificate_is_rescaled_to_the_extracted_images(patched, vocab, tmp_path):
+    """rig_configurator copies camera_params verbatim. At certificate resolution
+    (1000 px here) against extracted images (the fake DB says 100 px), every head
+    got a 10x focal and a principal point outside the frame; on real data
+    global_mapper then failed with "no 3D points to optimize"."""
+    root = tmp_path / "rig_scaled"
+    _make_rig_images(root)
+    _calib_txt(root)
+    r = FakeRunner()
+    _run.run_colmap(_params(root, tmp_path / "ws_s", vocab, rig_enable=True,
+                            layout="multi", mapper="global"), r)
+    rig = r.argv_for("rig_configurator")
+    cfg = json.loads(Path(rig[rig.index("--rig_config_path") + 1]).read_text())
+    for cam in cfg[0]["cameras"]:
+        fx, fy, cx, cy = cam["camera_params"][:4]
+        assert cx == pytest.approx(50.0), cam          # centre of a 100-px image
+        assert fx == fy and fx < 3000                  # ~2394 px at 1000 px -> ~239
+    # ...and the certificate also reaches the database directly, which used to
+    # search rig_images/ (symlinked photos only) and never find it
+    assert any("applied 3 calibrated camera(s)" in b for b in r.banners)
+
+
+def test_intrinsics_report_reads_single_focal_models_in_their_own_order():
+    assert _run._f_cx_cy("SIMPLE_RADIAL", [800.0, 320.0, 240.0, 0.01]) == (800.0, 320.0, 240.0)
+    assert _run._f_cx_cy("OPENCV", [800.0, 801.0, 320.0, 240.0, 0, 0, 0, 0]) == (800.0, 320.0, 240.0)

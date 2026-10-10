@@ -385,3 +385,23 @@ def test_parse_texture_rejects_a_stale_form_instead_of_skipping_silently():
     assert parse_texture({"texture_form": "1"}, _tex_spec()) is None
     # A backend without texture support never sees the check at all.
     assert parse_texture({"model_path": "/x"}, {}) is None
+
+
+@pytest.mark.parametrize("value", ["0", "2"])
+def test_gm_track_cap_below_three_is_rejected(value):
+    # every track has >= 3 views after global_mapper's own filters, so a smaller
+    # cap empties the reconstruction ("no 3D points") instead of failing fast
+    with pytest.raises(ValueError, match="GM_TRACK_MAX_VIEWS"):
+        _build({"GM_TRACK_MAX_VIEWS": value})
+
+
+@pytest.mark.parametrize(("value", "expected"), [("", ""), ("3", "3"), (" 250 ", "250")])
+def test_gm_track_cap_accepts_blank_and_three_or_more(value, expected):
+    assert _build({"GM_TRACK_MAX_VIEWS": value})["gm_track_max_views"] == expected
+
+
+def test_camera_model_is_uppercased_and_checked():
+    # COLMAP's model lookup is case-sensitive; "opencv" used to abort extraction
+    assert _build({"CAMERA_MODEL": "simple_radial"})["camera_model"] == "SIMPLE_RADIAL"
+    with pytest.raises(ValueError, match="CAMERA_MODEL"):
+        _build({"CAMERA_MODEL": "OPENCV; rm"})

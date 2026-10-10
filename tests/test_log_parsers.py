@@ -12,6 +12,8 @@ mesh extraction/scaling, and gsutil copy/completion counting.
 The parsers MUTATE the job in place and return None; we never call job.save()
 (that would touch the filesystem), so a bare Job dataclass is all we need.
 """
+import pytest
+
 from jobs import (
     PARSERS,
     Job,
@@ -44,6 +46,27 @@ def test_colmap_banner_sets_running_stage():
     _parse_colmap(job, "=== [12:00:00] feature_extractor (--SiftExtraction) ===")
     assert job.current_stage == "extract"
     assert job.stage_status["extract"] == "running"
+
+
+@pytest.mark.parametrize(("banner", "stage"), [
+    # these banners existed but matched no marker, so the stage strip never lit up
+    ("exhaustive_matcher (40 images -> 780 pairs)", "match"),
+    ("reorient (GPS-metric: fixed Z-up -> Y-up, scale preserved) -> /ws/sparse_reoriented", "reorient"),
+    ("rig_configurator -> /ws/database.db", "rig"),
+    ("GPS pose priors: injected 120 from EXIF (TIFF/non-JPEG; 0 skipped)", "gps_inject"),
+])
+def test_colmap_banners_for_every_stage(banner, stage):
+    job = _job()
+    _parse_colmap(job, f"=== [12:00:00] {banner} ===")
+    assert (job.current_stage, job.stage_status.get(stage)) == (stage, "running")
+
+
+def test_rig_calibration_pass_banner_does_not_steal_the_mapper_stage():
+    job = _job()
+    _parse_colmap(job, "=== [12:00:00] colmap global_mapper ===")
+    _parse_colmap(job, "=== [12:00:01] rig calibration pass 2/2: rig_configurator "
+                       "--input_path /ws/init/0 ===")
+    assert job.current_stage == "mapper"
 
 
 def test_colmap_returns_none():
