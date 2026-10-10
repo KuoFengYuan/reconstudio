@@ -69,7 +69,7 @@ trainer's own evaluation workflow.
 
 ## Validate code changes
 
-Follow [AGENT.md](../../AGENT.md). In the development environment:
+Follow [AGENTS.md](../../AGENTS.md#6-branch-commit-pr-merge-cleanup). In the development environment:
 
 ```bash
 pip install -e '.[dev]'

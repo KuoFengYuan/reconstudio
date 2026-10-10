@@ -19,8 +19,8 @@ CI 驗證程式碼，**不會自動部署伺服器**。
 
 ## 1. 開發修改
 
-1. 先讀 [claude.md](../../claude.md)、[Agent 指引](agent-guide.md) 與[元件索引](context-router.md)，
-   並依 [AGENT.md](../../AGENT.md) 執行。使用短期 `Feature/`、`Bugfix/` 或 `Enhance/` 分支；
+1. 先讀 [AGENTS.md](../../AGENTS.md)、[Agent 指引](agent-guide.md) 與[元件索引](context-router.md)，
+   並依 [AGENTS.md](../../AGENTS.md#6-branch-commit-pr-merge-cleanup) 執行。使用短期 `Feature/`、`Bugfix/` 或 `Enhance/` 分支；
    保留無關修改，原簽出不乾淨時使用獨立 worktree。
 2. 建立或選用 Python 3.10 以上的開發環境，安裝：
 

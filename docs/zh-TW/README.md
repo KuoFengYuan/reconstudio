@@ -58,7 +58,7 @@
 
 ## 驗證程式修改
 
-依 [AGENT.md](../../AGENT.md)，在開發環境、專案根目錄執行：
+依 [AGENTS.md](../../AGENTS.md#6-branch-commit-pr-merge-cleanup)，在開發環境、專案根目錄執行：
 
 ```bash
 pip install -e '.[dev]'
