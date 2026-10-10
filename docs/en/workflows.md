@@ -20,8 +20,8 @@ service keeps it running. CI validates code and **does not deploy the server**.
 
 ## 1. Develop a change
 
-1. Read [claude.md](../../claude.md), the [agent guide](agent-guide.md), then the
-   [context router](context-router.md). Follow [AGENT.md](../../AGENT.md).
+1. Read [AGENTS.md](../../AGENTS.md), the [agent guide](agent-guide.md), then the
+   [context router](context-router.md). Follow [AGENTS.md](../../AGENTS.md#6-branch-commit-pr-merge-cleanup).
    Use a short-lived `Feature/`, `Bugfix/`, or `Enhance/` branch. Keep unrelated
    changes intact; use an isolated worktree when the checkout is dirty.
 2. Create or select a Python 3.10+ development environment, then install:

@@ -8,6 +8,7 @@ from . import (
     matte,
     measure,
     pages,
+    verify,
     viewer,
     viz,
 )
@@ -23,4 +24,5 @@ ROUTERS = [
     matte.router,
     fusion.router,
     doctor.router,
+    verify.router,
 ]

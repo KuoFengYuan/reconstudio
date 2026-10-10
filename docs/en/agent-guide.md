@@ -12,7 +12,7 @@ generated bundles, or sibling trainer repositories to discover context.
 
 ## Mandatory three-step workflow
 
-1. Read [claude.md](../../claude.md) and this guide for runtime conventions,
+1. Read [AGENTS.md](../../AGENTS.md) and this guide for runtime conventions,
    baseline configurations, and experiment rules. Read only the relevant detailed
    implementation subsection below when needed.
 2. Read the [Context Router Table](context-router.md#agent-context-router), linked
@@ -54,7 +54,7 @@ remain allowed for validation; summarize results and inspect failed cases only.
   inputs where applicable. Report thresholds and skipped checks. Rendering metrics
   use the selected backend's own workflow; passing `pytest` establishes software
   checks, not reconstruction quality.
-- Follow [AGENT.md](../../AGENT.md) for branches, detailed bilingual PRs,
+- Follow [AGENTS.md](../../AGENTS.md#6-branch-commit-pr-merge-cleanup) for branches, detailed bilingual PRs,
   validation, merge, and cleanup. Maintain English and Traditional Chinese guides
   together; keep implementation contracts in the reference below.
 

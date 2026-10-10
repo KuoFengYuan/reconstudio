@@ -11,7 +11,7 @@
 
 ## 必須遵循的三步流程
 
-1. 先讀 [claude.md](../../claude.md) 與本指引，確認執行環境、基準設定及實驗規則。
+1. 先讀 [AGENTS.md](../../AGENTS.md) 與本指引，確認執行環境、基準設定及實驗規則。
    僅在需要時讀取[詳細實作參考](../en/agent-guide.md#implementation-reference)的相關段落。
 2. 從 [README.md](../../README.md) 的文件入口，讀取[實驗元件索引表](context-router.md#agent-context-router)，
    定位本次實驗階段、腳本或模型整合元件。
@@ -42,7 +42,7 @@
   `job.json` 與 `console.log`；未自動保存的來源資訊需另行記錄，只讀取本次任務相關片段。
 - COLMAP 驗收使用 `tools/verify_recon.py`，按需要提供對應資料庫／manifest，
   回報門檻及略過項目。渲染指標依各後端的評估流程執行；`pytest` 通過不代表重建品質合格。
-- 分支、詳細雙語 PR、驗證、合併與清理依 [AGENT.md](../../AGENT.md)。
+- 分支、詳細雙語 PR、驗證、合併與清理依 [AGENTS.md](../../AGENTS.md#6-branch-commit-pr-merge-cleanup)。
   文件異動應同步維護英文與繁體中文版本；實作時保留端點、表單欄位與日誌解析契約。
 
 ## 開發與實作參考
