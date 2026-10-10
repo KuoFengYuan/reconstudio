@@ -28,6 +28,15 @@ class PipelineError(RuntimeError):
 
 
 class Runner:
+    # COLMAP >= 4.3 (#4662) traps the first SIGINT/SIGTERM and tries to stop
+    # cleanly. Its feature extractor and exhaustive matcher can then wait on
+    # their own worker queues forever (measured on 4ae1aafb: >10 min, every
+    # thread in futex), leaving a cancelled job "running" with the GPU and the
+    # worker slot held. A second signal is COLMAP's forced exit, so cancel()
+    # escalates on a timer: SIGTERM, SIGTERM again, then SIGKILL.
+    CANCEL_GRACE_S = 10.0     # first SIGTERM -> second SIGTERM
+    CANCEL_FORCE_S = 5.0      # second SIGTERM -> SIGKILL
+
     def __init__(self, console: Path | str, on_line: Callable[[str], None] | None = None,
                  mirror: Path | str | None = None):
         self._fh = open(console, "w", buffering=1)
@@ -35,6 +44,7 @@ class Runner:
         self._on_line = on_line
         self._cancelled = False
         self._procs: set[subprocess.Popen] = set()   # concurrent children
+        self._escalating = False
         self._lock = threading.Lock()                # serialize log writes
         # extra env applied to every child process (e.g. CUDA_VISIBLE_DEVICES for a
         # whole stage); per-call run(env=...) still takes precedence over this.
@@ -49,16 +59,43 @@ class Runner:
                 self._mirror.close()
 
     def cancel(self) -> None:
-        """Called from another thread: stop the pipeline and kill all children."""
+        """Called from another thread: stop the pipeline and kill all children.
+
+        Signals at once, then escalates in the background (see CANCEL_GRACE_S).
+        A repeated call (a second click on 取消) signals again immediately."""
         self._cancelled = True
         with self._lock:
             procs = list(self._procs)
+            escalate = bool(procs) and not self._escalating
+            self._escalating = self._escalating or escalate
+        self._signal(procs, signal.SIGTERM)
+        if escalate:
+            threading.Thread(target=self._escalate, args=(procs,), daemon=True).start()
+
+    @staticmethod
+    def _signal(procs: list[subprocess.Popen], sig: int) -> None:
         for proc in procs:
             if proc.poll() is None:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(proc.pid), sig)
                 except (ProcessLookupError, PermissionError):
                     pass
+
+    def _escalate(self, procs: list[subprocess.Popen]) -> None:
+        for sig, wait in ((signal.SIGTERM, self.CANCEL_GRACE_S),
+                          (signal.SIGKILL, self.CANCEL_FORCE_S)):
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                if all(p.poll() is not None for p in procs):
+                    return
+                time.sleep(0.1)
+            alive = [p for p in procs if p.poll() is None]
+            if alive:
+                try:
+                    self.log(f"[cancel] {len(alive)} 個子程序未結束,送出 {signal.Signals(sig).name}")
+                except ValueError:    # the job already closed its console
+                    pass
+            self._signal(alive, sig)
 
     @property
     def cancelled(self) -> bool:

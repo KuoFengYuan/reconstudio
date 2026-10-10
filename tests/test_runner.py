@@ -17,6 +17,8 @@ no network, and no GPU.
 """
 import re
 import sys
+import threading
+import time
 
 import pytest
 
@@ -246,6 +248,9 @@ def test_cancel_during_process_creation_cannot_miss_child(tmp_path, monkeypatch,
         return Process()
 
     monkeypatch.setattr(runner_mod.subprocess, "Popen", spawn)
+    # The fake child never exits; the escalation thread would outlive this
+    # test's patches and signal whatever real process group 12345 is.
+    monkeypatch.setattr(Runner, "_escalate", lambda self, procs: None)
     monkeypatch.setattr(runner_mod.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(runner_mod.os, "killpg", lambda pid, sig: killed.set())
     try:
@@ -266,3 +271,63 @@ def test_missing_binary_with_redirect_keeps_original_error(tmp_path):
         assert not runner._procs
     finally:
         runner.close()
+
+
+# --------------------------------------------------------------------------- #
+# Cancel escalation. COLMAP >= 4.3 traps the first SIGTERM and its extractor /
+# exhaustive matcher can then hang forever; the second signal is its forced
+# exit. The fake children below reproduce both behaviours without COLMAP.
+# --------------------------------------------------------------------------- #
+_TRAPS_FIRST_SIGTERM = (
+    "import signal, sys, time\n"
+    "hits = []\n"
+    "def on_term(*_):\n"
+    "    hits.append(1)\n"
+    "    if len(hits) >= 2: sys.exit(3)\n"
+    "signal.signal(signal.SIGTERM, on_term)\n"
+    "print('ready', flush=True)\n"
+    "while True: time.sleep(0.05)\n"
+)
+_IGNORES_SIGTERM = (
+    "import signal, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "print('ready', flush=True)\n"
+    "while True: time.sleep(0.05)\n"
+)
+
+
+def _run_then_cancel(tmp_path, code, monkeypatch):
+    monkeypatch.setattr(Runner, "CANCEL_GRACE_S", 0.4)
+    monkeypatch.setattr(Runner, "CANCEL_FORCE_S", 0.4)
+    ready = threading.Event()
+    r = Runner(tmp_path / "c.log", on_line=lambda ln: ready.set() if ln == "ready" else None)
+    outcome = {}
+
+    def work():
+        try:
+            r.run([sys.executable, "-c", code])
+        except Exception as exc:          # Cancelled is the expected one
+            outcome["exc"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    assert ready.wait(10), "child never started"
+    start = time.monotonic()
+    r.cancel()
+    worker.join(10)
+    r.close()
+    return worker, outcome, time.monotonic() - start
+
+
+def test_cancel_sends_a_second_sigterm_to_a_child_that_traps_the_first(tmp_path, monkeypatch):
+    worker, outcome, took = _run_then_cancel(tmp_path, _TRAPS_FIRST_SIGTERM, monkeypatch)
+    assert not worker.is_alive(), "cancel left the child running"
+    assert isinstance(outcome.get("exc"), Cancelled)
+    assert took < 5
+
+
+def test_cancel_falls_back_to_sigkill(tmp_path, monkeypatch):
+    worker, outcome, took = _run_then_cancel(tmp_path, _IGNORES_SIGTERM, monkeypatch)
+    assert not worker.is_alive(), "SIGKILL fallback never fired"
+    assert isinstance(outcome.get("exc"), Cancelled)
+    assert "SIGKILL" in (tmp_path / "c.log").read_text()

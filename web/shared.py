@@ -73,6 +73,9 @@ COLMAP_DEFAULTS = {
     # own sparse/N. That is COLMAP's default, so the knob is the opt-out — ticking it
     # reconstructs only the largest component. GM_MIN_MODEL_SIZE blank = COLMAP's 3.
     "GM_SINGLE_MODEL": "0", "GM_MIN_MODEL_SIZE": "",
+    # Long-track cap for global_mapper (COLMAP #4754). Blank = COLMAP's own default (100);
+    # needs COLMAP 4.3+ (post-#4754), else the flag is simply omitted.
+    "GM_TRACK_MAX_VIEWS": "",
     # GPU bundle adjustment (incremental / pose_prior / hierarchical) — on by default.
     # global_mapper isn't in this set: its Ceres BA defaults to GPU on its own.
     "MAPPER_BA_GPU": "1",
