@@ -220,11 +220,15 @@ BUILTIN_BACKENDS: dict[str, dict] = {
         "exec": "../LichtFeld-Studio/build/LichtFeld-Studio",
         "train_args": "-d {scene} -o {out} --strategy mrnf --headless --no-splash {args} {extra}",
         "params": [
-            {"key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數"},
-            {"key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "1",
-             "label": "步數縮放 (預設 1;留空=用內建預設)",
-             "hint": "把所有訓練步數(迭代次數 + refine/lr 排程)整體乘以此倍率。有效迭代 = 迭代次數 × 此值"
-                     "(LichtFeld 內部換算,不必自己乘)。預設 1(不縮放);留空 = 用 LichtFeld 內建預設。"},
+            {"key": "iterations", "flag": "--iter", "type": "int", "default": "30000", "label": "迭代次數",
+             "hint": "精確指定總迭代次數(LichtFeld 預設 30000)。和下方「步數縮放」二擇一:"
+                     "填了步數縮放,這格會自動停用、不送出。"},
+            {"key": "steps_scaler", "flag": "--steps-scaler", "type": "float", "default": "",
+             "conflicts_with": "iterations",
+             "label": "步數縮放 (留空=不用;與迭代次數二擇一)",
+             "hint": "把 LichtFeld 預設排程(30000 次迭代 + refine/lr 排程)整體乘以此倍率,"
+                     "例如 2 = 60000 次、排程等比例拉長。LichtFeld 規定 --iter 和 --steps-scaler 互斥"
+                     "(同時給會直接報錯結束),所以填這格時「迭代次數」會自動停用。預設留空 = 用迭代次數。"},
             {"key": "sh_degree", "flag": "--sh-degree", "type": "select", "options": ["0", "1", "2", "3"],
              "default": "3", "label": "SH 階數"},
             {"key": "max_cap", "flag": "--max-cap", "type": "int", "default": "1000000", "label": "最大高斯數 (max-cap)"},
@@ -248,7 +252,7 @@ BUILTIN_BACKENDS: dict[str, dict] = {
                      "距離/尺寸等相對量測不受影響,但要換回絕對 TWD97 座標時要把 world_origin 加回去。"},
             {"key": "export_formats", "flag": "--export", "type": "select",
              "options": ["sog", "sog,ply", "ply"], "default": "sog",
-             "csv_options": ["ply", "sog", "spz", "usd", "usda", "usdc", "html", "rad"],
+             "csv_options": ["ply", "sog", "ssog", "spz", "usd", "usda", "usdc", "html", "rad"],
              "label": "匯出格式 (--export)",
              "hint": "訓練結束後,除了 project.licht 再另外匯出一份可直接使用的成品 —— "
                      "project.licht 是 LichtFeld 的內部格式,SuperSplat / 網頁 viewer / "
@@ -258,7 +262,7 @@ BUILTIN_BACKENDS: dict[str, dict] = {
                      "線上瀏覽都吃這個,預設;**sog,ply**=兩種都輸出,要餵給只認 PLY 的工具"
                      "(CloudCompare、其他 3DGS repo)時選這個,代價是多一個幾百 MB 的檔案;"
                      "**ply**=只輸出未壓縮 PLY。"
-                     "其他 LichtFeld 支援的格式(spz / usd / usda / usdc / html / rad)"
+                     "其他 LichtFeld 支援的格式(ssog / spz / usd / usda / usdc / html / rad)"
                      "可在「進階(額外旗標)」的 extra 自己寫 --export —— extra 接在後面,"
                      "同一個旗標重複給時以後面的為準,所以會覆蓋這一格。"},
             {"key": "use_16bit", "group": "影像與資料集", "flag": "--use-16bit", "type": "bool", "default": False, "label": "16-bit 色彩訓練",
@@ -269,20 +273,42 @@ BUILTIN_BACKENDS: dict[str, dict] = {
             {"key": "mask_mode", "group": "影像與資料集", "flag": "--mask-mode", "type": "select",
              "options": ["none", "segment", "ignore", "segment_and_ignore", "alpha_consistent"], "default": "none",
              "label": "遮罩模式 (前景去背訓練)", "hint": "none=不用遮罩(一般重建)。其餘模式需另外提供遮罩影像。"},
-            {"key": "bilateral_grid", "group": "外觀 / 曝光校正", "flag": "--bilateral-grid", "type": "bool", "default": False,
-             "label": "雙邊網格 (曝光補償)"},
-            {"key": "ppisp", "group": "外觀 / 曝光校正", "flag": "--ppisp", "type": "bool", "default": True,
-             "label": "PPISP",
-             "hint": "每張相機各自的物理合理 ISP 模型(曝光 + 白平衡),比雙邊網格更貼近真實相機的曝光/白平衡差異,"
-                     "可與雙邊網格同時開。搭配下方「EXIF Exposure」用照片 EXIF 加速收斂。(面板預設開)"},
+            # LichtFeld MRNF turns exposure correction on by default, and it refuses to start
+            # when that is combined with --ppisp or --bilateral-grid ("exposure correction
+            # replaces the standalone bilateral grid and PPISP options"). One select keeps
+            # the form from ever submitting a combination the binary rejects.
+            {"key": "appearance", "group": "外觀 / 曝光校正", "type": "select",
+             "options": ["exposure_correction", "ppisp", "bilateral_grid", "ppisp+bilateral_grid", "off"],
+             "option_flags": {
+                 "exposure_correction": [],
+                 "ppisp": ["--no-exposure-correction", "--ppisp"],
+                 "bilateral_grid": ["--no-exposure-correction", "--bilateral-grid"],
+                 "ppisp+bilateral_grid": ["--no-exposure-correction", "--ppisp", "--bilateral-grid"],
+                 "off": ["--no-exposure-correction"],
+             },
+             "default": "exposure_correction", "label": "外觀 / 曝光校正模式",
+             "hint": "補償照片之間的曝光與白平衡差異。LichtFeld 規定這幾種只能擇一,所以合成一個選單。"
+                     "**exposure_correction**=LichtFeld MRNF 預設(建議):每張照片的曝光/白平衡模型 + "
+                     "局部殘差網格,上游說明它取代了獨立的雙邊網格與 PPISP;"
+                     "**ppisp**=每台相機各自的物理合理 ISP 模型(搭配下方「EXIF Exposure」);"
+                     "**bilateral_grid**=雙邊網格色彩校正;**ppisp+bilateral_grid**=兩者同時開;"
+                     "**off**=完全不做外觀校正(曝光一致的素材或做對照實驗時)。"
+                     "選 exposure_correction 以外的選項時,面板會自動加 --no-exposure-correction。"},
             {"key": "ppisp_exif_exposure", "group": "外觀 / 曝光校正", "flag": "--no-ppisp-exif-exposure", "type": "bool", "invert": True,
              "default": True, "label": "EXIF Exposure",
              "hint": "PPISP 開啟時,從照片 EXIF 讀取每張相機的曝光初始值以加速收斂(LichtFeld 預設開)。"
-                     "取消勾選 = 傳 --no-ppisp-exif-exposure 停用,PPISP 曝光從零開始學。僅在勾選 PPISP 時有意義。"},
+                     "取消勾選 = 傳 --no-ppisp-exif-exposure 停用,PPISP 曝光從零開始學。"
+                     "僅在上方選 ppisp 或 ppisp+bilateral_grid 時有意義。"},
             {"key": "enable_mip", "group": "外觀 / 曝光校正", "flag": "--enable-mip", "type": "bool", "default": True, "label": "Mip 濾波 (抗鋸齒)"},
             {"key": "use_depth_loss", "group": "深度監督", "flag": "--use-depth-loss", "type": "bool", "default": False,
              "label": "深度損失 (use-depth-loss)",
-             "hint": "讀取資料集 depth/ 深度圖做監督(需與 images/ 同層,可用「🌊 深度」工具產生)。預設關。"},
+             "hint": "讀取資料集 depth/ 深度圖做監督(與 images/ 同層)。缺圖或尺寸不符時 LichtFeld 會用內建 "
+                     "MoGe-2 即時補生成(見下方「深度圖自動生成」);也可先用「🌊 深度」工具預生成。預設關。"},
+            {"key": "depth_auto_generate", "group": "深度監督", "flag": "--no-depth-auto-generate", "type": "bool", "invert": True,
+             "default": True, "label": "深度圖自動生成",
+             "hint": "訓練開始前掃 depth/,缺圖或尺寸和當前訓練解析度不符的,直接用內建 MoGe-2 從全解析度 "
+                     "images/ 補生成(LichtFeld 預設開)。取消勾選 = 傳 --no-depth-auto-generate:只吃你預先"
+                     "產生的深度圖,缺圖就報錯。僅在勾選深度損失時有意義。"},
             {"key": "depth_loss_mode", "group": "深度監督", "flag": "--depth-loss-mode", "type": "select",
              "options": ["ssi", "ssi-disparity", "ssi-depth"], "default": "ssi", "label": "深度損失模式",
              "hint": "深度先驗慣例:ssi=自動偵測(預設,建議);ssi-disparity/ssi-depth=強制指定先驗是反深度或正深度。"
@@ -334,11 +360,31 @@ def build_cli(params: list, values: dict) -> str:
     enum; each item is validated and a bad one raises ValueError (the routers
     already turn that into a form error).
 
+    A select may set `"option_flags": {option: [tokens]}` instead of `flag` when
+    each choice maps to its own set of flags (LichtFeld's mutually exclusive
+    appearance modes); an unknown option raises ValueError.
+    A param may set `"conflicts_with": "<other key>"` for CLIs that reject both
+    flags together (LichtFeld's --iter vs --steps-scaler): filling both raises
+    ValueError at submit time instead of the trainer dying on argv.
+
     Reused for both training (`params`) and mesh extraction (`mesh_params`)."""
     import shlex
+    filled = {pr["key"]: str(values.get(pr["key"]) or "").strip() for pr in params}
+    labels = {pr["key"]: pr.get("label", pr["key"]) for pr in params}
     toks: list[str] = []
     for pr in params:
         v = values.get(pr["key"])
+        other = pr.get("conflicts_with")
+        if other and filled.get(pr["key"]) and filled.get(other):
+            raise ValueError(f"「{labels[pr['key']]}」和「{labels.get(other, other)}」只能擇一填寫,"
+                             f"請清空其中一格。")
+        if pr.get("option_flags") is not None:
+            s = ("" if v is None else str(v)).strip() or str(pr.get("default") or "")
+            if s not in pr["option_flags"]:
+                raise ValueError(f"{pr.get('label', pr['key'])}: 不支援的值 {s}"
+                                 f"（可用：{', '.join(pr['option_flags'])}）")
+            toks += pr["option_flags"][s]
+            continue
         if pr.get("type") == "bool":
             on = bool(v)
             if pr.get("invert"):

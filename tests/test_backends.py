@@ -95,3 +95,75 @@ def test_mrnf_export_dropdown_offers_sog_both_and_ply():
     assert pr["default"] in pr["options"]
     for opt in pr["options"]:
         assert build_cli([pr], {"export_formats": opt}) == f"--export {opt}"
+
+
+# --- option_flags / conflicts_with (LichtFeld mutually exclusive options) ---
+
+_APPEARANCE = [{"key": "app", "type": "select", "options": ["a", "b"], "default": "a",
+                "option_flags": {"a": [], "b": ["--no-x", "--y"]}, "label": "外觀"}]
+
+
+def test_option_flags_emit_the_tokens_of_the_chosen_option():
+    assert build_cli(_APPEARANCE, {"app": "a"}) == ""
+    assert build_cli(_APPEARANCE, {"app": "b"}) == "--no-x --y"
+
+
+def test_option_flags_fall_back_to_the_default_when_missing():
+    assert build_cli(_APPEARANCE, {}) == ""
+
+
+def test_option_flags_reject_an_unknown_option():
+    with pytest.raises(ValueError, match="zzz"):
+        build_cli(_APPEARANCE, {"app": "zzz"})
+
+
+_ITERS = [{"key": "iterations", "flag": "--iter", "type": "int", "label": "迭代次數"},
+          {"key": "steps_scaler", "flag": "--steps-scaler", "type": "float",
+           "conflicts_with": "iterations", "label": "步數縮放"}]
+
+
+def test_conflicting_params_alone_are_fine():
+    assert build_cli(_ITERS, {"iterations": "30000"}) == "--iter 30000"
+    assert build_cli(_ITERS, {"steps_scaler": "2"}) == "--steps-scaler 2"
+    assert build_cli(_ITERS, {"iterations": "30000", "steps_scaler": " "}) == "--iter 30000"
+
+
+def test_conflicting_params_together_are_rejected():
+    with pytest.raises(ValueError, match="擇一"):
+        build_cli(_ITERS, {"iterations": "30000", "steps_scaler": "2"})
+
+
+def _mrnf_tokens(**overrides):
+    from pipeline.backends import BUILTIN_BACKENDS
+    prs = BUILTIN_BACKENDS["lichtfeld-mrnf"]["params"]
+    values = {p["key"]: p.get("default") for p in prs}
+    values.update(overrides)
+    return build_cli(prs, values).split()
+
+
+def test_mrnf_defaults_never_pass_iter_and_steps_scaler_together():
+    """LichtFeld exits on argv when both are given."""
+    toks = _mrnf_tokens()
+    assert "--iter" in toks
+    assert "--steps-scaler" not in toks
+
+
+def test_mrnf_appearance_options_never_combine_exposure_correction():
+    """MRNF enables exposure correction by default and rejects it alongside
+    --ppisp / --bilateral-grid, so every option that uses either must also
+    pass --no-exposure-correction."""
+    from pipeline.backends import BUILTIN_BACKENDS
+    prs = BUILTIN_BACKENDS["lichtfeld-mrnf"]["params"]
+    pr = next(p for p in prs if p["key"] == "appearance")
+    assert pr["default"] == "exposure_correction"
+    assert set(pr["options"]) == set(pr["option_flags"])
+    for opt in pr["options"]:
+        toks = _mrnf_tokens(appearance=opt)
+        if "--ppisp" in toks or "--bilateral-grid" in toks:
+            assert "--no-exposure-correction" in toks, opt
+    assert not {"--ppisp", "--bilateral-grid", "--no-exposure-correction"} & set(_mrnf_tokens())
+
+
+def test_mrnf_no_longer_offers_removed_flags():
+    toks = " ".join(_mrnf_tokens(**{"background_improvements": True}))
+    assert "--background-improvements" not in toks

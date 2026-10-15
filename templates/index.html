@@ -2167,9 +2167,11 @@
       el.disabled = auto.checked;
     });
   }
-  // LichtFeld: --steps-scaler multiplies iterations + schedules internally (applied AFTER the
-  // --iter override), so the real run = 迭代次數 × 步數縮放. Show that live; do NOT change the
-  // submitted iteration value (the binary does the multiply — pre-multiplying would double it).
+  // LichtFeld: --iter and --steps-scaler are mutually exclusive (the binary exits on argv
+  // when both are given). --steps-scaler rescales the default 30000-iteration schedule, so
+  // while 步數縮放 is filled, disable (= don't submit) 迭代次數 and show the resulting count.
+  // build_cli's conflicts_with check is the server-side backstop.
+  var LF_DEFAULT_ITERS = 30000;
   function updateLfIters(){
     var sel = document.getElementById('train_backend');
     if (!sel) return;
@@ -2184,11 +2186,14 @@
       // anchor after the whole compact row, not inside its control column
       (scEl.closest('.prow') || scEl).insertAdjacentElement('afterend', hint);
     }
-    var it = parseFloat(iterEl.value) || 0, sc = parseFloat(scEl.value);
-    hint.innerHTML = (sc && sc > 0 && sc !== 1)
-      ? '↳ 有效迭代次數 ≈ <b>' + Math.round(it * sc).toLocaleString() + '</b>（= ' +
-        it.toLocaleString() + ' × ' + sc + '，由 LichtFeld 內部換算）'
-      : '';
+    var raw = scEl.value.trim(), sc = parseFloat(raw);
+    iterEl.disabled = scEl.disabled || raw !== '';
+    hint.innerHTML = raw === '' ? ''
+      : (sc > 0)
+        ? '↳ 已改用步數縮放,「迭代次數」停用。實際迭代次數 ≈ <b>' +
+          Math.round(LF_DEFAULT_ITERS * sc).toLocaleString() + '</b>（= LichtFeld 預設 ' +
+          LF_DEFAULT_ITERS.toLocaleString() + ' × ' + sc + '）'
+        : '↳ 步數縮放需為大於 0 的數字';
   }
   (function(){   // live-update the effective-iterations hint as the user types
     var ft = document.getElementById('form-train');
