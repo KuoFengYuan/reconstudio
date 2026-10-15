@@ -279,10 +279,6 @@ BUILTIN_BACKENDS: dict[str, dict] = {
              "default": True, "label": "EXIF Exposure",
              "hint": "PPISP 開啟時,從照片 EXIF 讀取每張相機的曝光初始值以加速收斂(LichtFeld 預設開)。"
                      "取消勾選 = 傳 --no-ppisp-exif-exposure 停用,PPISP 曝光從零開始學。僅在勾選 PPISP 時有意義。"},
-            {"key": "background_improvements", "flag": "--background-improvements", "type": "bool",
-             "default": True, "label": "BG Improvements",
-             "hint": "改善遠景/背景高斯的生長 —— far-field 種子與分裂、衰減緩解、"
-                     "生長上限、逐高斯位置步進、依可見度比例排序生長、分批填充容量上限。(面板預設開)"},
             {"key": "enable_mip", "group": "外觀 / 曝光校正", "flag": "--enable-mip", "type": "bool", "default": True, "label": "Mip 濾波 (抗鋸齒)"},
             {"key": "use_depth_loss", "group": "深度監督", "flag": "--use-depth-loss", "type": "bool", "default": False,
              "label": "深度損失 (use-depth-loss)",
