@@ -8,6 +8,9 @@ body { background:var(--bg); font-size:14px; }
 button, input, select, textarea { min-height:38px; }
 button { touch-action:manipulation; }
 button:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+/* A field the form switches off (LichtFeld 迭代次數 while 步數縮放 is filled, voxel size
+   under 自動體素) is not submitted; without this it looks exactly like a live one. */
+.pctl input:disabled, .pctl select:disabled, .pctl textarea:disabled { opacity:.5; cursor:not-allowed; }
 button:focus-visible, a:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
   outline:3px solid var(--accent); outline-offset:3px;
 }
