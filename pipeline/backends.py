@@ -286,11 +286,12 @@ BUILTIN_BACKENDS: dict[str, dict] = {
                  "ppisp+bilateral_grid": ["--no-exposure-correction", "--ppisp", "--bilateral-grid"],
                  "off": ["--no-exposure-correction"],
              },
-             "default": "exposure_correction", "label": "外觀 / 曝光校正模式",
+             # Panel default is PPISP (the owner's choice), not LichtFeld's exposure correction.
+             "default": "ppisp", "label": "外觀 / 曝光校正模式",
              "hint": "補償照片之間的曝光與白平衡差異。LichtFeld 規定這幾種只能擇一,所以合成一個選單。"
-                     "**exposure_correction**=LichtFeld MRNF 預設(建議):每張照片的曝光/白平衡模型 + "
+                     "**ppisp**=每台相機各自的物理合理 ISP 模型(搭配下方「EXIF Exposure」)(面板預設);"
+                     "**exposure_correction**=LichtFeld MRNF 自己的預設:每張照片的曝光/白平衡模型 + "
                      "局部殘差網格,上游說明它取代了獨立的雙邊網格與 PPISP;"
-                     "**ppisp**=每台相機各自的物理合理 ISP 模型(搭配下方「EXIF Exposure」);"
                      "**bilateral_grid**=雙邊網格色彩校正;**ppisp+bilateral_grid**=兩者同時開;"
                      "**off**=完全不做外觀校正(曝光一致的素材或做對照實驗時)。"
                      "選 exposure_correction 以外的選項時,面板會自動加 --no-exposure-correction。"},

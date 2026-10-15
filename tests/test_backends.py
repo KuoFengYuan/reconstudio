@@ -155,13 +155,24 @@ def test_mrnf_appearance_options_never_combine_exposure_correction():
     from pipeline.backends import BUILTIN_BACKENDS
     prs = BUILTIN_BACKENDS["lichtfeld-mrnf"]["params"]
     pr = next(p for p in prs if p["key"] == "appearance")
-    assert pr["default"] == "exposure_correction"
     assert set(pr["options"]) == set(pr["option_flags"])
     for opt in pr["options"]:
         toks = _mrnf_tokens(appearance=opt)
         if "--ppisp" in toks or "--bilateral-grid" in toks:
             assert "--no-exposure-correction" in toks, opt
-    assert not {"--ppisp", "--bilateral-grid", "--no-exposure-correction"} & set(_mrnf_tokens())
+    assert not {"--ppisp", "--bilateral-grid", "--no-exposure-correction"} & set(
+        _mrnf_tokens(appearance="exposure_correction"))
+
+
+def test_mrnf_appearance_defaults_to_ppisp():
+    """The panel's chosen default, not LichtFeld's own exposure correction."""
+    from pipeline.backends import BUILTIN_BACKENDS
+    prs = BUILTIN_BACKENDS["lichtfeld-mrnf"]["params"]
+    pr = next(p for p in prs if p["key"] == "appearance")
+    assert pr["default"] == "ppisp"
+    toks = _mrnf_tokens()
+    assert "--ppisp" in toks and "--no-exposure-correction" in toks
+    assert "--bilateral-grid" not in toks
 
 
 def test_mrnf_no_longer_offers_removed_flags():
